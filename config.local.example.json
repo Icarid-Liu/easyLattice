@@ -1,0 +1,18 @@
+{
+  "estimator": {
+    "sage_binary": "sage",
+    "lattice_estimator_path": "/absolute/path/to/lattice-estimator",
+    "default_timeout_seconds": 16,
+    "per_attack_timeout_seconds": 12
+  },
+  "model": {
+    "provider": "openai-compatible",
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen2.5-coder:7b",
+    "api_key_env": "AILATTICE_API_KEY"
+  },
+  "scripts": {
+    "decrypt_error": [],
+    "signature_smoothing": []
+  }
+}

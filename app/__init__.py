@@ -1,0 +1,1 @@
+"""AILattice web prototype package."""
