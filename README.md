@@ -2,6 +2,10 @@
 
 Local-first, open-source prototype for lattice-crypto parameter selection.
 
+The public GitHub Pages site is a static example. It does not run a backend,
+call an LLM, call Sage, or call `lattice-estimator`. Dynamic estimation is
+available only when you run the local service or deploy your own backend.
+
 easyLattice is layered so the default path does not require any LLM token:
 
 1. deterministic core: fixed RLWE search policy and local security screening;
@@ -76,6 +80,39 @@ No API key is required for the default RLWE workflow. The LLM layer is disabled
 unless `llm.enabled=true` is set locally. When enabled, the model only converts
 free-form user intent into deterministic search constraints; final parameters
 still come from the fixed local search logic and optional estimator validation.
+
+## Public Static Example
+
+The hosted GitHub Pages version is intentionally static. It demonstrates the UI
+and fixed example outputs for this prototype, but all values should be treated
+as examples rather than live parameter certification.
+
+The table below fixes the controls to:
+
+- target security: `128`;
+- security metric: `Classical`;
+- reduction cost model: `MATZOV`;
+- distribution: `Auto`;
+- ring family: `x^n + 1`;
+- NTT scale: `n/2 | q - 1`;
+- estimator validation: off.
+
+| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Status |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- |
+| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
+| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
+| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
+| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
+| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
+| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
+| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
+| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
+| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | taxonomy placeholder |
+| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | taxonomy placeholder |
+
+`SIS / SIS` and `SIS / MSIS` are shown in the current UI taxonomy, but a real
+SIS/MSIS selector is not implemented yet. Their rows reuse the current
+LWE/RLWE fast-screen scaffold and should not be read as SIS hardness estimates.
 
 ## Run
 
@@ -185,22 +222,13 @@ Use `"problem": "ntru"` to call the NTRU selector:
 }
 ```
 
-## Hugging Face Live API
+## Optional Live Backend
 
-For a public live backend, deploy the Docker Space template in
-[`deploy/huggingface-live`](deploy/huggingface-live). It runs the deterministic
+The public GitHub Pages site does not use a live backend. If you want to
+self-host dynamic estimation later, the Docker template in
+[`deploy/huggingface-live`](deploy/huggingface-live) runs the deterministic
 selector and optional Sage/lattice-estimator validation behind the same API as
-the local server.
-
-```bash
-python3 -m pip install huggingface_hub
-HF_TOKEN=hf_xxx python3 deploy/huggingface-live/deploy_space.py \
-  --repo-id YOUR_HF_NAME/easyLattice-live \
-  --public
-```
-
-The live Space binds to `0.0.0.0:7860`, uses a 240 second default estimator
-timeout, and clamps estimator requests to 300 seconds.
+the local server. Hugging Face may require a paid PRO account for Docker Spaces.
 
 For a smaller estimator-only worker, the template in
 [`deploy/huggingface-estimator`](deploy/huggingface-estimator) exposes:
