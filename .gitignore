@@ -8,6 +8,7 @@ htmlcov/
 .tox/
 .venv/
 venv/
+.external/
 .env
 .env.*
 config.local.json

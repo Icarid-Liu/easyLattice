@@ -116,6 +116,38 @@ LWE/RLWE fast-screen scaffold and should not be read as SIS hardness estimates.
 
 ## Run
 
+For a fresh local checkout, the simplest path is:
+
+```bash
+./scripts/setup-local.sh --start
+```
+
+The setup script creates `config.local.json`, keeps LLM disabled, detects
+optional Sage/lattice-estimator paths when available, runs a small smoke test,
+and then starts the web service at:
+
+```text
+http://127.0.0.1:8000
+```
+
+If you only want to generate local config without starting the server:
+
+```bash
+./scripts/setup-local.sh
+```
+
+Optional estimator setup:
+
+```bash
+./scripts/setup-local.sh --with-estimator
+```
+
+This clones `malb/lattice-estimator` into `.external/lattice-estimator` if no
+local estimator path is detected. Sage is still optional for fast-screen mode
+and required only when `useEstimator=true`.
+
+Manual start still works:
+
 ```bash
 python3 -m app.server
 ```
@@ -134,7 +166,8 @@ PORT=8010 python3 -m app.server
 
 ## Local Configuration
 
-Copy the example file and edit local paths:
+The setup script above is preferred. For manual configuration, copy the example
+file and edit local paths:
 
 ```bash
 cp config.local.example.json config.local.json
