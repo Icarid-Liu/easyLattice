@@ -40,7 +40,7 @@ class ParameterSearchTests(unittest.TestCase):
             self.assertTrue(is_prime(q))
 
     def test_default_recommendation_has_rlwe_shape(self):
-        result = recommend_rlwe({"targetSecurity": 128, "securityModel": "min"})
+        result = recommend_rlwe({"targetSecurity": 128, "securityModel": "classical"})
         candidate = result["recommendation"]
         n = candidate["ring"]["n"]
         q = candidate["modulus"]["q"]
@@ -59,7 +59,7 @@ class ParameterSearchTests(unittest.TestCase):
 
         result = recommend_rlwe({
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "nttScalePower": 6,
             "minQBits": 2,
             "maxQBits": 12,
@@ -81,7 +81,7 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(spec.estimator["plus_weight"], 48)
         self.assertEqual(spec.estimator["minus_weight"], 48)
 
-    def test_dense_sparse_ternary_auto_candidate(self):
+    def test_classical_auto_candidate_uses_sparse_ternary(self):
         spec = sparse_ternary_spec(n=512, l0=1, l1=0)
         self.assertAlmostEqual(spec.parameters["probability_plus"], 1 / 4)
         self.assertAlmostEqual(spec.parameters["probability_minus"], 1 / 4)
@@ -93,7 +93,7 @@ class ParameterSearchTests(unittest.TestCase):
             "hardProblemVariant": "rlwe",
             "ringFamily": "power2",
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "redCostModel": "matzov",
             "nttScalePower": 1,
             "maxQBits": 24,
@@ -103,7 +103,7 @@ class ParameterSearchTests(unittest.TestCase):
         candidate = result["recommendation"]
         self.assertEqual(candidate["ring"]["n"], 512)
         self.assertEqual(candidate["modulus"]["q"], 257)
-        self.assertEqual(candidate["distribution"]["name"], "ST(l0=1, l1=0)")
+        self.assertEqual(candidate["distribution"]["name"], "ST(l0=2, l1=0)")
 
     def test_lwr_variants_use_uniform_error_with_configurable_secret(self):
         request = parse_request({
@@ -118,7 +118,7 @@ class ParameterSearchTests(unittest.TestCase):
             "hardProblemCategory": "LWE",
             "hardProblemVariant": "MLWR",
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "redCostModel": "matzov",
             "nttScalePower": 1,
             "maxQBits": 24,
@@ -146,7 +146,7 @@ class ParameterSearchTests(unittest.TestCase):
             "hardProblemCategory": "LWE",
             "hardProblemVariant": "RLWR",
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "redCostModel": "matzov",
             "nttScalePower": 1,
             "maxQBits": 24,
@@ -190,7 +190,7 @@ class ParameterSearchTests(unittest.TestCase):
     def test_remote_estimator_is_used_when_configured(self):
         result = recommend_rlwe({
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "nttScalePower": 1,
             "maxQBits": 24,
             "distribution": "auto",
@@ -245,6 +245,11 @@ class ParameterSearchTests(unittest.TestCase):
                 "securityModel": "matzov",
             })
 
+        with self.assertRaises(ValueError):
+            parse_request({
+                "securityModel": "min",
+            })
+
     def test_ternary_ring_candidates(self):
         dims = ring_dimensions("ternary")
         self.assertIn(384, dims)
@@ -267,7 +272,7 @@ class ParameterSearchTests(unittest.TestCase):
     def test_matzov_reduction_model_128_recommendations_are_tight_lower_bound(self):
         request = {
             "targetSecurity": 128,
-            "securityModel": "min",
+            "securityModel": "classical",
             "redCostModel": "matzov",
             "maxQBits": 24,
         }

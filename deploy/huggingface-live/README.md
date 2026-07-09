@@ -41,7 +41,7 @@ curl -X POST https://YOUR_HF_NAME-easyLattice-live.hf.space/api/agent/recommend 
     "hardProblemCategory": "LWE",
     "hardProblemVariant": "RLWR",
     "targetSecurity": 128,
-    "securityModel": "min",
+    "securityModel": "classical",
     "redCostModel": "matzov",
     "nttScalePower": 1,
     "maxQBits": 24,

@@ -48,7 +48,7 @@ COMMON_NTT_PRIMES = (
     998244353,
     2013265921,
 )
-SUPPORTED_SECURITY_MODELS = {"classical", "quantum", "min"}
+SUPPORTED_SECURITY_MODELS = {"classical", "quantum"}
 SUPPORTED_RED_COST_MODELS = {"matzov", "adps16"}
 SUPPORTED_RING_FAMILIES = {"power2", "ternary"}
 SUPPORTED_HARD_PROBLEMS = {
@@ -67,7 +67,7 @@ class RequestOptions:
     hard_problem_category: str = "lwe"
     hard_problem_variant: str = "rlwe"
     ring_family: str = "power2"
-    security_model: str = "min"
+    security_model: str = "classical"
     red_cost_model: str = "matzov"
     ntt_scale_power: int = 0
     min_q_bits: int = 2
@@ -185,9 +185,9 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
 
     hard_problem_category, hard_problem_variant = parse_hard_problem(raw)
 
-    model = str(raw.get("security_model", raw.get("securityModel", "min"))).lower()
+    model = str(raw.get("security_model", raw.get("securityModel", "classical"))).lower()
     if model not in SUPPORTED_SECURITY_MODELS:
-        raise ValueError("security_model must be one of classical, quantum, min.")
+        raise ValueError("security_model must be one of classical, quantum.")
 
     ring_family = str(raw.get("ring_family", raw.get("ringFamily", "power2"))).lower()
     if ring_family not in SUPPORTED_RING_FAMILIES:
@@ -599,7 +599,7 @@ def selected_security_bits(security: dict[str, Any], request: RequestOptions) ->
         return classical
     if request.security_model == "quantum":
         return quantum
-    return min(classical, quantum)
+    raise ValueError("security_model must be one of classical, quantum.")
 
 
 def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: str) -> tuple[float, float]:

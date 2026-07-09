@@ -82,7 +82,7 @@ class OpenAICompatibleLLM:
                         "securityModel, redCostModel, nttScalePower, minQBits, maxQBits, minN, maxN, "
                         "distribution, useEstimator, validationCount, validationAttempts. "
                         "Valid ringFamily values are power2 and ternary. Valid securityModel values are "
-                        "min, classical, and quantum. Valid redCostModel values are matzov and adps16. "
+                        "classical and quantum. Valid redCostModel values are matzov and adps16. "
                         "For LWR, RLWR, and MLWR variants, distribution controls the secret only; "
                         "the rounding-error distribution is always uniform. "
                         "Do not invent security claims."

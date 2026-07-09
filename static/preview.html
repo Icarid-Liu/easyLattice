@@ -685,8 +685,7 @@
           <fieldset>
             <legend>Security metric</legend>
             <div class="segmented">
-              <label><input type="radio" name="securityModel" value="min" checked /><span>Both</span></label>
-              <label><input type="radio" name="securityModel" value="classical" /><span>Classical</span></label>
+              <label><input type="radio" name="securityModel" value="classical" checked /><span>Classical</span></label>
               <label><input type="radio" name="securityModel" value="quantum" /><span>Quantum</span></label>
             </div>
           </fieldset>
@@ -1281,7 +1280,7 @@
           security,
           selection: {
             target_security: 128,
-            security_model: "min",
+            security_model: "classical",
             selected_security_bits: security.matzov_bits,
             margin_bits: margin,
             meets_target: margin >= 0,
@@ -1629,7 +1628,7 @@
           hard_problem_category: "lwe",
           hard_problem_variant: "rlwe",
           ring_family: family,
-          security_model: "min",
+          security_model: "classical",
           red_cost_model: "matzov",
           ntt_scale_power: 1,
           min_q_bits: 2,
