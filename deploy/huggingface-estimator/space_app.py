@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import time
+import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[2]
+RUNNER = ROOT / "app" / "estimator_runner.py"
+
+
+def env_value(*names: str, default: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None:
+            return value
+    return default
+
+
+DEFAULT_TIMEOUT_SECONDS = int(env_value("EASYLATTICE_ESTIMATOR_TIMEOUT_SECONDS", default="240"))
+MAX_TIMEOUT_SECONDS = int(env_value("EASYLATTICE_ESTIMATOR_MAX_TIMEOUT_SECONDS", default="300"))
+MAX_REQUEST_BYTES = int(env_value("EASYLATTICE_ESTIMATOR_MAX_REQUEST_BYTES", default=str(1_000_000)))
+MAX_JOBS = int(env_value("EASYLATTICE_ESTIMATOR_MAX_JOBS", default="128"))
+JOB_TTL_SECONDS = int(env_value("EASYLATTICE_ESTIMATOR_JOB_TTL_SECONDS", default="3600"))
+WORKERS = max(1, min(4, int(env_value("EASYLATTICE_ESTIMATOR_WORKERS", default="1"))))
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in env_value("EASYLATTICE_ALLOWED_ORIGINS", default="*").split(",")
+    if origin.strip()
+]
+
+
+@dataclass
+class Job:
+    id: str
+    payload: dict[str, Any]
+    timeout_seconds: int
+    status: str = "queued"
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+jobs: dict[str, Job] = {}
+lock = Lock()
+executor = ThreadPoolExecutor(max_workers=WORKERS)
+
+
+class EstimatorHandler(BaseHTTPRequestHandler):
+    server_version = "easyLatticeEstimator/0.1"
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.write_cors_headers()
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        if self.path in ("/", "/health"):
+            self.write_json(
+                {
+                    "ok": True,
+                    "service": "easylattice-estimator",
+                    "default_timeout_seconds": DEFAULT_TIMEOUT_SECONDS,
+                    "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
+                    "workers": WORKERS,
+                }
+            )
+            return
+
+        if self.path.startswith("/jobs/"):
+            job_id = self.path.removeprefix("/jobs/").strip("/")
+            with lock:
+                job = jobs.get(job_id)
+            if not job:
+                self.write_error(HTTPStatus.NOT_FOUND, "job not found")
+                return
+            self.write_json(job_to_json(job))
+            return
+
+        self.write_error(HTTPStatus.NOT_FOUND, "not found")
+
+    def do_POST(self) -> None:
+        if self.path not in ("/jobs", "/estimate"):
+            self.write_error(HTTPStatus.NOT_FOUND, "not found")
+            return
+
+        try:
+            request = self.read_json()
+            payload, timeout_seconds = parse_estimate_request(request)
+        except ValueError as exc:
+            self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        except json.JSONDecodeError:
+            self.write_error(HTTPStatus.BAD_REQUEST, "invalid JSON body")
+            return
+
+        cleanup_jobs()
+        if self.path == "/estimate":
+            job = create_job(payload, timeout_seconds)
+            run_job(job)
+            status = HTTPStatus.OK if job.status == "succeeded" else HTTPStatus.REQUEST_TIMEOUT
+            self.write_json(job_to_json(job), status)
+            return
+
+        job = create_job(payload, timeout_seconds)
+        submit_job(job)
+        self.write_json(job_to_json(job), HTTPStatus.ACCEPTED)
+
+    def read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > MAX_REQUEST_BYTES:
+            raise ValueError(f"request body is too large; max {MAX_REQUEST_BYTES} bytes")
+        body = self.rfile.read(length).decode("utf-8") if length else "{}"
+        data = json.loads(body or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("request body must be a JSON object")
+        return data
+
+    def write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.write_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def write_error(self, status: HTTPStatus, message: str) -> None:
+        self.write_json({"ok": False, "error": message}, status)
+
+    def write_cors_headers(self) -> None:
+        origin = self.headers.get("Origin", "")
+        if "*" in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        elif origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"{self.address_string()} - {fmt % args}")
+
+
+def parse_estimate_request(request: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    payload = request.get("payload", request)
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+
+    timeout_raw = request.get("timeout_seconds", request.get("timeoutSeconds", DEFAULT_TIMEOUT_SECONDS))
+    try:
+        timeout_seconds = int(timeout_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout_seconds must be an integer") from exc
+    timeout_seconds = max(1, min(MAX_TIMEOUT_SECONDS, timeout_seconds))
+
+    normalized = dict(payload)
+    validate_payload(normalized)
+    normalized["per_attack_timeout"] = clamp_per_attack_timeout(normalized, timeout_seconds)
+    return normalized, timeout_seconds
+
+
+def validate_payload(payload: dict[str, Any]) -> None:
+    problem = str(payload.get("problem", "lwe")).lower()
+    if problem not in {"lwe", "ntru"}:
+        raise ValueError("problem must be lwe or ntru")
+
+    n = int(payload.get("n", 0))
+    q = int(payload.get("q", 0))
+    if n < 1 or n > 16384:
+        raise ValueError("n must be between 1 and 16384")
+    if q < 2 or q.bit_length() > 64:
+        raise ValueError("q must be at least 2 and at most 64 bits")
+
+    if problem == "ntru":
+        ntru_type = str(payload.get("ntru_type", "circulant"))
+        if ntru_type not in {"circulant", "matrix"}:
+            raise ValueError("ntru_type must be circulant or matrix")
+        require_distribution(payload, "secret_distribution")
+        require_distribution(payload, "error_distribution")
+    else:
+        require_distribution(payload, "distribution")
+
+
+def require_distribution(payload: dict[str, Any], key: str) -> None:
+    distribution = payload.get(key)
+    if not isinstance(distribution, dict):
+        raise ValueError(f"{key} must be a JSON object")
+    estimator = distribution.get("estimator")
+    if not isinstance(estimator, dict):
+        raise ValueError(f"{key}.estimator must be a JSON object")
+    estimator_type = estimator.get("type")
+    allowed = {
+        "centered_binomial",
+        "sparse_ternary_fixed_weight",
+        "discrete_gaussian",
+        "uniform",
+        "uniform_mod",
+        "composite_moment",
+    }
+    if estimator_type not in allowed:
+        raise ValueError(f"unsupported estimator distribution type: {estimator_type}")
+
+
+def clamp_per_attack_timeout(payload: dict[str, Any], timeout_seconds: int) -> int:
+    default = 60 if payload.get("problem") == "ntru" else 30
+    raw = payload.get("per_attack_timeout", default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, timeout_seconds, 90))
+
+
+def create_job(payload: dict[str, Any], timeout_seconds: int) -> Job:
+    job = Job(id=uuid.uuid4().hex, payload=payload, timeout_seconds=timeout_seconds)
+    with lock:
+        jobs[job.id] = job
+    return job
+
+
+def submit_job(job: Job) -> Future:
+    return executor.submit(run_job, job)
+
+
+def run_job(job: Job) -> None:
+    with lock:
+        job.status = "running"
+        job.started_at = time.time()
+    try:
+        result = run_estimator_subprocess(job.payload, job.timeout_seconds)
+        with lock:
+            job.status = "succeeded" if result.get("ok") else "failed"
+            job.result = result
+            job.error = None if result.get("ok") else result.get("message", "estimator failed")
+            job.finished_at = time.time()
+    except subprocess.TimeoutExpired:
+        with lock:
+            job.status = "timeout"
+            job.error = f"estimator timed out after {job.timeout_seconds}s"
+            job.finished_at = time.time()
+    except Exception as exc:
+        with lock:
+            job.status = "failed"
+            job.error = f"{type(exc).__name__}: {exc}"
+            job.finished_at = time.time()
+
+
+def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+    sage_binary = os.environ.get("SAGE_BINARY", "sage")
+    env = os.environ.copy()
+    estimator_path = os.environ.get("LATTICE_ESTIMATOR_PATH")
+    if estimator_path:
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = estimator_path if not existing else f"{estimator_path}{os.pathsep}{existing}"
+
+    completed = subprocess.run(
+        [sage_binary, "-python", str(RUNNER)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()[-1:]
+        message = detail[0] if detail else f"estimator exited with code {completed.returncode}"
+        return {"ok": False, "message": message}
+
+    try:
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        return {
+            "ok": False,
+            "message": f"estimator returned non-JSON output: {type(exc).__name__}",
+            "stdout_tail": completed.stdout[-2000:],
+            "stderr_tail": completed.stderr[-2000:],
+        }
+
+
+def cleanup_jobs() -> None:
+    cutoff = time.time() - JOB_TTL_SECONDS
+    with lock:
+        expired = [
+            job_id
+            for job_id, job in jobs.items()
+            if (job.finished_at or job.created_at) < cutoff
+        ]
+        for job_id in expired:
+            jobs.pop(job_id, None)
+        if len(jobs) <= MAX_JOBS:
+            return
+        removable = sorted(jobs.values(), key=lambda job: job.finished_at or job.created_at)
+        for job in removable[: max(0, len(jobs) - MAX_JOBS)]:
+            if job.status in {"queued", "running"}:
+                continue
+            jobs.pop(job.id, None)
+
+
+def job_to_json(job: Job) -> dict[str, Any]:
+    return {
+        "ok": job.status == "succeeded",
+        "job_id": job.id,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "timeout_seconds": job.timeout_seconds,
+        "result": job.result,
+        "error": job.error,
+    }
+
+
+def main() -> None:
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "7860"))
+    server = ThreadingHTTPServer((host, port), EstimatorHandler)
+    print(f"easyLattice estimator worker listening on http://{host}:{port}")
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

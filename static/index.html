@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AILattice RLWE 参数助手</title>
+    <title>easyLattice Lattice Parameter Assistant</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -12,21 +12,53 @@
         <div class="brand-row">
           <div class="brand-mark">A</div>
           <div>
-            <h1>AILattice</h1>
-            <p>Local RLWE 参数助手</p>
+            <h1>easyLattice</h1>
+            <p>Local lattice parameter assistant</p>
           </div>
         </div>
 
         <div id="config-panel" class="config-panel">
-          <span>本地配置</span>
+          <span>Local configuration</span>
           <strong id="config-source">defaults</strong>
-          <small id="config-model">model: local</small>
+          <small id="config-agent">agent: deterministic</small>
+          <small id="config-llm">llm: disabled</small>
           <small id="config-estimator">estimator: sage</small>
         </div>
 
         <form id="parameter-form" class="form-stack">
+          <fieldset class="hard-problem-fieldset">
+            <legend>Underlying hard problem</legend>
+            <div class="problem-groups" role="radiogroup" aria-label="Underlying hard problem">
+              <div class="problem-group">
+                <strong>NTRU</strong>
+                <div class="problem-options">
+                  <label><input type="radio" name="hardProblem" value="ntru:matrix" /><span>matrix</span></label>
+                  <label><input type="radio" name="hardProblem" value="ntru:ring" /><span>ring</span></label>
+                </div>
+              </div>
+              <div class="problem-group">
+                <strong>LWE</strong>
+                <div class="problem-options">
+                  <label><input type="radio" name="hardProblem" value="lwe:rlwe" checked /><span>RLWE</span></label>
+                  <label><input type="radio" name="hardProblem" value="lwe:lwe" /><span>LWE</span></label>
+                  <label><input type="radio" name="hardProblem" value="lwe:lwr" /><span>LWR</span></label>
+                  <label><input type="radio" name="hardProblem" value="lwe:rlwr" /><span>RLWR</span></label>
+                  <label><input type="radio" name="hardProblem" value="lwe:mlwe" /><span>MLWE</span></label>
+                  <label><input type="radio" name="hardProblem" value="lwe:mlwr" /><span>MLWR</span></label>
+                </div>
+              </div>
+              <div class="problem-group">
+                <strong>SIS</strong>
+                <div class="problem-options">
+                  <label><input type="radio" name="hardProblem" value="sis:sis" /><span>SIS</span></label>
+                  <label><input type="radio" name="hardProblem" value="sis:msis" /><span>MSIS</span></label>
+                </div>
+              </div>
+            </div>
+          </fieldset>
+
           <label>
-            <span>多项式形式</span>
+            <span>Polynomial form</span>
             <select id="ring-family" name="ringFamily">
               <option value="power2">x^n + 1</option>
               <option value="ternary">x^n - x^(n/2) + 1</option>
@@ -34,24 +66,16 @@
           </label>
 
           <label>
-            <span>目标安全级别</span>
-            <select id="target-security" name="targetSecurity">
-              <option value="80">80</option>
-              <option value="128" selected>128</option>
-              <option value="192">192</option>
-              <option value="256">256</option>
-              <option value="384">384</option>
-              <option value="512">512</option>
-            </select>
+            <span>Target security bits</span>
+            <input id="target-security" name="targetSecurity" type="number" min="40" max="512" step="1" value="128" />
           </label>
 
           <fieldset>
-            <legend>安全口径</legend>
+            <legend>Security metric</legend>
             <div class="segmented">
-              <label><input type="radio" name="securityModel" value="matzov" checked /><span>MATZOV</span></label>
-              <label><input type="radio" name="securityModel" value="min" /><span>两者</span></label>
-              <label><input type="radio" name="securityModel" value="classical" /><span>经典</span></label>
-              <label><input type="radio" name="securityModel" value="quantum" /><span>量子</span></label>
+              <label><input type="radio" name="securityModel" value="min" checked /><span>Both</span></label>
+              <label><input type="radio" name="securityModel" value="classical" /><span>Classical</span></label>
+              <label><input type="radio" name="securityModel" value="quantum" /><span>Quantum</span></label>
             </div>
           </fieldset>
 
@@ -64,23 +88,23 @@
           </label>
 
           <label>
-            <span id="ntt-scale-label">NTT 尺度：n | q - 1</span>
-            <input id="ntt-scale" name="nttScalePower" type="range" min="-1" max="5" step="1" value="0" />
+            <span id="ntt-scale-label">NTT scale: n | q - 1</span>
+            <input id="ntt-scale" name="nttScalePower" type="range" min="-1" max="6" step="1" value="0" />
           </label>
 
           <label>
-            <span>最小模数位数</span>
+            <span>Minimum modulus bits</span>
             <input id="min-q-bits" name="minQBits" type="number" min="2" max="63" step="1" value="2" />
           </label>
 
           <label>
-            <span>最大模数位数</span>
+            <span>Maximum modulus bits</span>
             <input id="max-q-bits" name="maxQBits" type="number" min="12" max="63" step="1" value="24" />
           </label>
 
           <label>
-            <span>分布</span>
-            <select name="distribution">
+            <span>Distribution</span>
+            <select id="distribution" name="distribution">
               <option value="auto">Auto</option>
               <option value="centered_binomial">Centered Binomial</option>
               <option value="sparse_ternary">Sparse Ternary</option>
@@ -89,12 +113,27 @@
 
           <label class="check-row">
             <input id="use-estimator" name="useEstimator" type="checkbox" />
-            <span>Sage estimator 精算推荐</span>
+            <span>Refine with Sage estimator</span>
+          </label>
+
+          <label>
+            <span>Natural-language constraints</span>
+            <textarea
+              id="intent"
+              name="intent"
+              rows="4"
+              placeholder="Example: 128-bit MATZOV, ternary cyclotomic ring, prefer n/2 NTT scale, smallest possible modulus"
+            ></textarea>
+          </label>
+
+          <label class="check-row">
+            <input id="use-llm" name="useLLM" type="checkbox" disabled />
+            <span>Use the locally configured LLM to parse constraints</span>
           </label>
 
           <button class="primary-button" type="submit">
             <span class="button-icon">↻</span>
-            生成推荐
+            Generate recommendation
           </button>
         </form>
       </aside>
@@ -102,47 +141,62 @@
       <main class="workspace">
         <section class="top-strip">
           <div>
-            <h2 id="summary-title">等待输入</h2>
-            <p id="summary-subtitle">选择目标后生成 RLWE 实例。</p>
+            <h2 id="summary-title">Waiting for input</h2>
+            <p id="summary-subtitle">Choose a target to generate a lattice instance.</p>
           </div>
           <div id="status-pill" class="status-pill idle">Idle</div>
         </section>
 
         <section id="result-grid" class="result-grid hidden">
           <div class="metric-panel">
-            <span>经典安全</span>
+            <span>Classical security</span>
             <strong id="classic-bits">-</strong>
             <div class="meter"><div id="classic-meter"></div></div>
           </div>
           <div class="metric-panel">
-            <span>量子安全</span>
+            <span>Quantum security</span>
             <strong id="quantum-bits">-</strong>
             <div class="meter"><div id="quantum-meter"></div></div>
           </div>
           <div class="metric-panel">
-            <span>环维度</span>
+            <span>Ring dimension</span>
             <strong id="ring-n">-</strong>
             <small id="ring-poly">-</small>
           </div>
           <div class="metric-panel">
-            <span>模数</span>
+            <span>Modulus</span>
             <strong id="modulus-q">-</strong>
             <small id="modulus-bits">-</small>
           </div>
           <div class="metric-panel">
-            <span>目标口径</span>
+            <span>Selected metric</span>
             <strong id="selected-bits">-</strong>
             <small id="security-margin">-</small>
+          </div>
+          <div id="profile-panel" class="metric-panel triangle-panel hidden">
+            <div class="triangle-heading">
+              <span>Parameter profile</span>
+            </div>
+            <svg class="triangle-chart" viewBox="0 0 160 122" role="img" aria-label="Security compactness efficiency profile">
+              <text class="triangle-label triangle-label-top" x="80" y="12">Security</text>
+              <text class="triangle-label triangle-label-left" x="8" y="116">Compactness</text>
+              <text class="triangle-label triangle-label-right" x="152" y="116">Efficiency</text>
+              <polygon class="triangle-frame" points="80,24 28,94 132,94"></polygon>
+              <line class="triangle-axis" x1="80" y1="70" x2="80" y2="24"></line>
+              <line class="triangle-axis" x1="80" y1="70" x2="132" y2="94"></line>
+              <line class="triangle-axis" x1="80" y1="70" x2="28" y2="94"></line>
+              <polygon id="profile-fill" class="triangle-fill" points="80,70 80,70 80,70"></polygon>
+            </svg>
           </div>
         </section>
 
         <section id="details" class="details-layout hidden">
           <div class="detail-column">
-            <h3>实例</h3>
+            <h3>Instance</h3>
             <dl id="instance-list"></dl>
           </div>
           <div class="detail-column">
-            <h3>估计</h3>
+            <h3>Estimate</h3>
             <dl id="security-list"></dl>
           </div>
         </section>
@@ -151,8 +205,8 @@
 
         <section id="alternatives" class="alternatives hidden">
           <div class="section-heading">
-            <h3>备选候选</h3>
-            <button id="copy-json" type="button" class="secondary-button">复制 JSON</button>
+            <h3>Alternative candidates</h3>
+            <button id="copy-json" type="button" class="secondary-button">Copy JSON</button>
           </div>
           <div id="candidate-list" class="candidate-list"></div>
         </section>

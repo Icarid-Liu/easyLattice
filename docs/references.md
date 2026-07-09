@@ -22,7 +22,7 @@ https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.203.pdf
 - NEV is an NTRU encryption/KEM design using vector decoding.
 - It is proved under decisional NTRU and RLWE assumptions over
   `Z_q[X]/(X^n+1)`.
-- Its main lesson for AILattice is that scheme encoding can radically change
+- Its main lesson for easyLattice is that scheme encoding can radically change
   the feasible modulus and correctness tradeoff; this cannot be captured by a
   bare RLWE hardness estimate alone.
 
@@ -35,7 +35,7 @@ https://eprint.iacr.org/2023/1298
   encoding.
 - It targets compact ciphertexts/public-key+ciphertext combinations while
   maintaining low decryption failure.
-- Its main lesson for AILattice is that parameter search needs scheme-specific
+- Its main lesson for easyLattice is that parameter search needs scheme-specific
   correctness/failure scripts in addition to LWE/NTRU hardness estimates.
 
 Reference:

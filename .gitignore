@@ -11,6 +11,7 @@ venv/
 .env
 .env.*
 config.local.json
+docs/project-memory.md
 *.log
 .DS_Store
 .idea/

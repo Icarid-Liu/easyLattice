@@ -8,16 +8,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .agent import recommend_with_agent
 from .config import public_config
-from .parameter_search import recommend_rlwe
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "static"
 
 
-class AILatticeHandler(BaseHTTPRequestHandler):
-    server_version = "AILattice/0.1"
+class EasyLatticeHandler(BaseHTTPRequestHandler):
+    server_version = "easyLattice/0.1"
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -38,7 +38,7 @@ class AILatticeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/api/rlwe/recommend":
+        if parsed.path not in ("/api/rlwe/recommend", "/api/agent/recommend"):
             self.write_error(HTTPStatus.NOT_FOUND, "Not found")
             return
 
@@ -46,7 +46,7 @@ class AILatticeHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length).decode("utf-8") if length else "{}"
             payload = json.loads(body or "{}")
-            result = recommend_rlwe(payload)
+            result = recommend_with_agent(payload)
         except ValueError as exc:
             self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -91,8 +91,8 @@ class AILatticeHandler(BaseHTTPRequestHandler):
 def run() -> None:
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
-    server = ThreadingHTTPServer((host, port), AILatticeHandler)
-    print(f"AILattice listening on http://{host}:{port}")
+    server = ThreadingHTTPServer((host, port), EasyLatticeHandler)
+    print(f"easyLattice listening on http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

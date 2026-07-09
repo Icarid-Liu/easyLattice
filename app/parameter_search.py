@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config
+from .remote_estimator import estimate_remotely
 
 
 RING_DIMENSIONS = (512, 1024, 2048, 4096, 8192)
 TERNARY_RING_DIMENSIONS = (384, 512, 768, 1024, 1152, 1536, 2048, 2304, 3072, 4096, 4608, 6144, 8192)
 ETA_VALUES = (1, 2, 3, 4, 5, 6, 8)
+UNIFORM_RADII = (1, 2, 3, 4, 5, 6, 8)
 SPARSE_TERNARY_PARAMETERS = (
     (1, 0),
     (2, 0),
@@ -28,6 +30,7 @@ SPARSE_TERNARY_PARAMETERS = (
     (4, 1),
     (4, 2),
 )
+SPARSE_TERNARY_FAST_SCREEN_PENALTY_BITS = 30.0
 COMMON_NTT_PRIMES = (
     257,
     769,
@@ -45,14 +48,24 @@ COMMON_NTT_PRIMES = (
     998244353,
     2013265921,
 )
-SUPPORTED_SECURITY_MODELS = {"classical", "quantum", "min", "matzov"}
+SUPPORTED_SECURITY_MODELS = {"classical", "quantum", "min"}
 SUPPORTED_RED_COST_MODELS = {"matzov", "adps16"}
 SUPPORTED_RING_FAMILIES = {"power2", "ternary"}
+SUPPORTED_HARD_PROBLEMS = {
+    "ntru": {"matrix", "ring"},
+    "lwe": {"lwe", "rlwe", "lwr", "rlwr", "mlwe", "mlwr"},
+    "sis": {"sis", "msis"},
+}
+LWR_VARIANTS = {"lwr", "rlwr", "mlwr"}
+NTT_UNFRIENDLY_SCALE_POWER = 6
+MAX_STRUCTURED_NTT_SCALE_POWER = 5
 
 
 @dataclass(frozen=True)
 class RequestOptions:
     target_security: int = 128
+    hard_problem_category: str = "lwe"
+    hard_problem_variant: str = "rlwe"
     ring_family: str = "power2"
     security_model: str = "min"
     red_cost_model: str = "matzov"
@@ -152,14 +165,15 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
             "strategy": [
                 f"ring family first: {request.ring_family}",
                 "degree n second",
-                f"prime q with {ntt_requirement_label(request.ntt_scale_power, request.ring_family)} | q-1",
+                ntt_search_strategy_text(request),
                 "choose Xs/Xe distribution pair after q; prototype currently uses the same family for both",
                 f"fast {request.red_cost_model.upper()} screen before optional Sage validation",
             ],
         },
         "next_question": (
-            "是否接受该 RLWE 实例？如果要绑定到具体加密或签名方案，下一步需要加入"
-            "正确性/拒绝率/光滑参数等方案相关约束。"
+            "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, "
+            "the next step is to add scheme-specific constraints such as correctness, rejection rate, "
+            "and smoothing parameters."
         ),
     }
 
@@ -169,9 +183,11 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
     if target < 40 or target > 512:
         raise ValueError("target_security must be between 40 and 512 bits.")
 
+    hard_problem_category, hard_problem_variant = parse_hard_problem(raw)
+
     model = str(raw.get("security_model", raw.get("securityModel", "min"))).lower()
     if model not in SUPPORTED_SECURITY_MODELS:
-        raise ValueError("security_model must be one of classical, quantum, min, matzov.")
+        raise ValueError("security_model must be one of classical, quantum, min.")
 
     ring_family = str(raw.get("ring_family", raw.get("ringFamily", "power2"))).lower()
     if ring_family not in SUPPORTED_RING_FAMILIES:
@@ -182,8 +198,8 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         raise ValueError("red_cost_model must be one of matzov, adps16.")
 
     ntt_scale_power = int(raw.get("ntt_scale_power", raw.get("nttScalePower", 0)))
-    if ntt_scale_power < -1 or ntt_scale_power > 8:
-        raise ValueError("ntt_scale_power must be between -1 and 8.")
+    if ntt_scale_power < -1 or ntt_scale_power > NTT_UNFRIENDLY_SCALE_POWER:
+        raise ValueError("ntt_scale_power must be between -1 and 6.")
 
     min_q_bits = int(raw.get("min_q_bits", raw.get("minQBits", 2)))
     if min_q_bits < 2 or min_q_bits > 63:
@@ -199,7 +215,11 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         raise ValueError("Require 256 <= min_n <= max_n.")
 
     distribution = str(raw.get("distribution", "auto"))
-    if distribution not in {"auto", "centered_binomial", "sparse_ternary"}:
+    if is_lwr_variant(hard_problem_variant):
+        distribution = "uniform"
+    elif distribution == "uniform":
+        raise ValueError("uniform distribution is only available for LWR, RLWR, and MLWR variants.")
+    elif distribution not in {"auto", "centered_binomial", "sparse_ternary"}:
         raise ValueError("distribution must be one of auto, centered_binomial, sparse_ternary.")
 
     estimator_timeout = raw.get(
@@ -214,6 +234,8 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
 
     return RequestOptions(
         target_security=target,
+        hard_problem_category=hard_problem_category,
+        hard_problem_variant=hard_problem_variant,
         ring_family=ring_family,
         security_model=model,
         red_cost_model=red_cost_model,
@@ -228,6 +250,34 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         validation_count=validation_count,
         validation_attempts=max(validation_count, min(80, int(validation_attempts))),
     )
+
+
+def parse_hard_problem(
+    raw: dict[str, Any],
+    default_category: str = "lwe",
+    default_variant: str = "rlwe",
+) -> tuple[str, str]:
+    category = str(
+        raw.get("hard_problem_category", raw.get("hardProblemCategory", default_category))
+    ).lower()
+    variant = str(
+        raw.get("hard_problem_variant", raw.get("hardProblemVariant", default_variant))
+    ).lower()
+
+    if category not in SUPPORTED_HARD_PROBLEMS:
+        allowed = ", ".join(name.upper() for name in SUPPORTED_HARD_PROBLEMS)
+        raise ValueError(f"hard_problem_category must be one of {allowed}.")
+
+    variants = SUPPORTED_HARD_PROBLEMS[category]
+    if variant not in variants:
+        allowed = ", ".join(sorted(variants))
+        raise ValueError(f"hard_problem_variant for {category.upper()} must be one of {allowed}.")
+
+    return category, variant
+
+
+def is_lwr_variant(variant: str) -> bool:
+    return variant in LWR_VARIANTS
 
 
 def build_candidates(request: RequestOptions) -> list[dict[str, Any]]:
@@ -277,12 +327,16 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
         sparse_penalty_bits=float(distribution.estimator.get("fast_screen_penalty_bits", 0.0)),
     )
     ring = ring_profile(n=n, q=q, family=request.ring_family)
-    ntt = ntt_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
+    ntt = (
+        ntt_unfriendly_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
+        if ntt_scale_is_unrestricted(request.ntt_scale_power)
+        else ntt_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
+    )
     warnings = [
-        "当前为 RLWE/LWE 快速筛选；未绑定具体方案，因此不计算解密错误率或签名失败率。",
+        "This is an RLWE/LWE fast screen. It is not bound to a concrete scheme, so decryption error "
+        "or rejection sampling times are not computed.",
     ]
-
-    return {
+    candidate = {
         "ring": {
             **ring,
         },
@@ -292,7 +346,7 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
             "prime": True,
             "q_minus_1_factorization": format_factorization(factors),
             "ntt_condition": ntt["condition"],
-            "ntt_friendly": True,
+            "ntt_friendly": not ntt_scale_is_unrestricted(request.ntt_scale_power),
             "ntt_quality": ntt["quality"],
             "ntt_layers_remaining": ntt["layers_remaining"],
             "polynomial_factorization": ntt["polynomial_factorization"],
@@ -321,10 +375,15 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
         },
         "warnings": warnings,
     }
+    candidate["visual_scores"] = visual_scores_for_candidate(candidate, request)
+    return candidate
 
 
 def distribution_candidates(n: int, request: RequestOptions) -> list[DistributionSpec]:
     candidates: list[DistributionSpec] = []
+    if request.distribution == "uniform":
+        candidates.extend(uniform_spec(radius) for radius in UNIFORM_RADII)
+        return candidates
     if request.distribution in {"auto", "centered_binomial"}:
         candidates.extend(centered_binomial_spec(eta) for eta in ETA_VALUES)
     if request.distribution in {"auto", "sparse_ternary"}:
@@ -351,9 +410,26 @@ def centered_binomial_spec(eta: int) -> DistributionSpec:
     )
 
 
+def uniform_spec(radius: int) -> DistributionSpec:
+    variance = radius * (radius + 1) / 3.0
+    return DistributionSpec(
+        family="uniform",
+        name=f"Uniform(-{radius},{radius})",
+        parameters={"lower_bound": -radius, "upper_bound": radius},
+        mean=0.0,
+        variance=variance,
+        stddev=math.sqrt(variance),
+        support=[-radius, radius],
+        symmetric=True,
+        sampling=f"uniform integer coefficients in [-{radius}, {radius}]",
+        estimator={"type": "uniform", "lower_bound": -radius, "upper_bound": radius},
+    )
+
+
 def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
     probability_each = ((2**l0) - 1) / (2 ** (2 * l0 + l1))
     variance = 2 * probability_each
+    nonzero_probability = 2 * probability_each
     plus_weight = max(0, round(n * probability_each))
     minus_weight = max(0, round(n * probability_each))
     estimator_stddev = math.sqrt((plus_weight + minus_weight) / n) if n else 0.0
@@ -366,6 +442,7 @@ def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
             "probability_plus": probability_each,
             "probability_minus": probability_each,
             "probability_zero": 1 - 2 * probability_each,
+            "nonzero_probability": nonzero_probability,
         },
         mean=0.0,
         variance=variance,
@@ -380,9 +457,15 @@ def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
             "iid_stddev": math.sqrt(variance),
             "fixed_weight_stddev": estimator_stddev,
             "note": "fixed-weight approximation to the iid sparse ternary distribution",
-            "fast_screen_penalty_bits": 30.0,
+            "fast_screen_penalty_bits": sparse_ternary_fast_screen_penalty_bits(probability_each),
         },
     )
+
+
+def sparse_ternary_fast_screen_penalty_bits(probability_each: float) -> float:
+    if probability_each >= 0.25:
+        return 0.0
+    return SPARSE_TERNARY_FAST_SCREEN_PENALTY_BITS
 
 
 def distribution_profile(distribution: DistributionSpec) -> dict[str, Any]:
@@ -450,22 +533,29 @@ def meets_target(security: dict[str, Any], request: RequestOptions) -> bool:
 
 
 def selected_security_bits(security: dict[str, Any], request: RequestOptions) -> float:
-    classical = float(security["classical_bits"])
-    quantum = float(security["quantum_bits"])
-    if request.red_cost_model == "adps16":
-        adps16 = security.get("adps16_core_svp_bits", classical)
-        return float(adps16) if adps16 is not None else float("-inf")
-    if request.red_cost_model == "matzov":
-        matzov = security.get("matzov_bits")
-        return float(matzov) if matzov is not None else float("-inf")
+    classical, quantum = security_bits_for_reduction_model(security, request.red_cost_model)
     if request.security_model == "classical":
         return classical
     if request.security_model == "quantum":
         return quantum
-    if request.security_model == "matzov":
-        matzov = security.get("matzov_bits")
-        return float(matzov) if matzov is not None else float("-inf")
     return min(classical, quantum)
+
+
+def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: str) -> tuple[float, float]:
+    classical = float(security["classical_bits"])
+    quantum = float(security["quantum_bits"])
+    if red_cost_model == "adps16":
+        adps16 = security.get("adps16_core_svp_bits")
+        if adps16 is not None:
+            classical = float(adps16)
+    if red_cost_model == "matzov":
+        matzov = security.get("matzov_bits")
+        matzov_quantum = security.get("matzov_quantum_bits")
+        if matzov is not None:
+            classical = float(matzov)
+        if matzov_quantum is not None:
+            quantum = float(matzov_quantum)
+    return classical, quantum
 
 
 def security_margin_bits(security: dict[str, Any], request: RequestOptions) -> float:
@@ -500,6 +590,103 @@ def distribution_rank(candidate: dict[str, Any], request: RequestOptions) -> tup
     overkill = max(0.0, margin)
     shortage = abs(min(0.0, margin)) * 10_000.0
     return (shortage, overkill, stddev, family_rank)
+
+
+def visual_scores_for_candidate(candidate: dict[str, Any], request: RequestOptions) -> dict[str, Any]:
+    selected_bits = floor_bits(float(candidate["selection"]["selected_security_bits"]))
+    compactness = compactness_profile(int(candidate["modulus"]["q"]), request)
+    performance = performance_profile(
+        n=int(candidate["ring"]["n"]),
+        q=int(candidate["modulus"]["q"]),
+        unrestricted=ntt_scale_is_unrestricted(request.ntt_scale_power),
+    )
+    return {
+        "security": {
+            "label": "Security",
+            "score": clamp_score(selected_bits / 512.0),
+            "bits": selected_bits,
+            "max_bits": 512,
+        },
+        "compactness": compactness,
+        "performance": performance,
+    }
+
+
+def compactness_profile(q: int, request: RequestOptions) -> dict[str, Any]:
+    q_bits = q.bit_length()
+    span = max(1, request.max_q_bits - request.min_q_bits)
+    score = 1.0 - ((q_bits - request.min_q_bits) / span)
+    return {
+        "label": "Compactness",
+        "score": clamp_score(score),
+        "q": q,
+        "q_bits": q_bits,
+        "min_q_bits": request.min_q_bits,
+        "max_q_bits": request.max_q_bits,
+    }
+
+
+def performance_profile(n: int, q: int, unrestricted: bool = False) -> dict[str, Any]:
+    if unrestricted:
+        return {
+            "label": "Performance",
+            "score": 0.0,
+            "k": None,
+            "k_label": "lift",
+            "divisor": None,
+            "condition": "no restriction of n and q (NTT unfriendly)",
+        }
+
+    q_minus_1 = q - 1
+    scales = [
+        (2 * n, 0.5, "2n"),
+        (n, 1.0, "n"),
+    ]
+    k = 2
+    divisor = max(1, n // 2)
+    while divisor >= 1:
+        scales.append((divisor, float(k), f"n/{k}"))
+        k *= 2
+        divisor = n // k
+
+    for divisor, scale_k, label in scales:
+        if divisor > 0 and q_minus_1 % divisor == 0:
+            return {
+                "label": "Performance",
+                "score": 1.0 if scale_k <= 1.0 else clamp_score(1.0 / scale_k),
+                "k": scale_k,
+                "k_label": "1/2" if scale_k == 0.5 else format_scale_number(scale_k),
+                "divisor": divisor,
+                "condition": f"{label} | q - 1",
+            }
+
+    return {
+        "label": "Performance",
+        "score": 0.0,
+        "k": None,
+        "k_label": "n/a",
+        "divisor": None,
+        "condition": "no power-of-two n/k divisor found",
+    }
+
+
+def update_visual_security(candidate: dict[str, Any]) -> None:
+    profile = candidate.get("visual_scores")
+    if not profile:
+        return
+    selected_bits = floor_bits(float(candidate["selection"]["selected_security_bits"]))
+    profile["security"]["bits"] = selected_bits
+    profile["security"]["score"] = clamp_score(selected_bits / 512.0)
+
+
+def clamp_score(value: float) -> float:
+    return round(max(0.0, min(1.0, value)), 4)
+
+
+def format_scale_number(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def estimator_candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[float, ...]:
@@ -555,6 +742,13 @@ def ntt_prime_candidates(
     ring_family: str = "power2",
     limit: int = 96,
 ) -> list[int]:
+    if ntt_scale_is_unrestricted(ntt_scale_power):
+        return unrestricted_prime_candidates(
+            min_q_bits=min_q_bits,
+            max_q_bits=max_q_bits,
+            limit=limit,
+        )
+
     modulus = ntt_divisor(n, ntt_scale_power, ring_family)
     found = {
         q
@@ -586,6 +780,51 @@ def ntt_prime_candidates(
     return scored[:limit]
 
 
+def unrestricted_prime_candidates(min_q_bits: int, max_q_bits: int, limit: int = 96) -> list[int]:
+    found: set[int] = set()
+    for q in COMMON_NTT_PRIMES:
+        if min_q_bits <= q.bit_length() <= max_q_bits and is_prime(q):
+            found.add(q)
+
+    lower_bound = max(3, 1 << (min_q_bits - 1))
+    upper_bound = (1 << max_q_bits) - 1
+    low = lower_bound
+    high = upper_bound
+    while low <= high and len(found) < limit:
+        midpoint = (low + high) // 2
+        q = next_prime_at_or_above(midpoint)
+        if q <= upper_bound:
+            found.add(q)
+        high = midpoint - 1
+
+    for bits in range(min_q_bits, max_q_bits + 1):
+        lower = max(3, 1 << (bits - 1))
+        upper = (1 << bits) - 1
+        q = next_prime_at_or_above(lower)
+        added_for_bits = 0
+        while q <= upper and added_for_bits < 4:
+            found.add(q)
+            added_for_bits += 1
+            q = next_prime_at_or_above(q + 1)
+
+    return sorted(found)[:limit]
+
+
+def next_prime_at_or_above(value: int) -> int:
+    candidate = max(2, value)
+    if candidate == 2:
+        return candidate
+    if candidate % 2 == 0:
+        candidate += 1
+    while not is_prime(candidate):
+        candidate += 2
+    return candidate
+
+
+def ntt_scale_is_unrestricted(ntt_scale_power: int) -> bool:
+    return ntt_scale_power == NTT_UNFRIENDLY_SCALE_POWER
+
+
 def ntt_divisor(n: int, ntt_scale_power: int, ring_family: str = "power2") -> int:
     base = 3 * n if ring_family == "ternary" else n
     if ntt_scale_power < 0:
@@ -594,6 +833,8 @@ def ntt_divisor(n: int, ntt_scale_power: int, ring_family: str = "power2") -> in
 
 
 def ntt_requirement_label(ntt_scale_power: int, ring_family: str = "power2") -> str:
+    if ntt_scale_is_unrestricted(ntt_scale_power):
+        return "no restriction of n and q (NTT unfriendly)"
     if ring_family == "ternary":
         if ntt_scale_power < 0:
             return "6n"
@@ -611,6 +852,13 @@ def ntt_requirement_label(ntt_scale_power: int, ring_family: str = "power2") -> 
     return f"n/2^{ntt_scale_power}"
 
 
+def ntt_search_strategy_text(request: RequestOptions) -> str:
+    label = ntt_requirement_label(request.ntt_scale_power, request.ring_family)
+    if ntt_scale_is_unrestricted(request.ntt_scale_power):
+        return "prime q with no n/q divisibility restriction; use lift-based NTT and prefer the smallest q"
+    return f"prime q with {label} | q-1"
+
+
 def ntt_profile(n: int, q: int, factors: dict[int, int] | None = None, ring_family: str = "power2") -> dict[str, Any]:
     factors = factors or factor_integer(q - 1)
     two_adicity = factors.get(2, 0)
@@ -619,6 +867,21 @@ def ntt_profile(n: int, q: int, factors: dict[int, int] | None = None, ring_fami
         return ternary_ntt_profile(n, q, factors, two_adicity, three_adicity)
 
     return power2_ntt_profile(n, q, factors, two_adicity)
+
+
+def ntt_unfriendly_profile(n: int, q: int, factors: dict[int, int], ring_family: str = "power2") -> dict[str, Any]:
+    return {
+        "condition": "no restriction of n and q (NTT unfriendly)",
+        "quality": "lift_ntt_unfriendly",
+        "layers_remaining": 99,
+        "factor_count": 0,
+        "factor_degree": 0,
+        "polynomial_factorization": "lift-based NTT mode; q is not required to split the ring polynomial",
+        "two_adicity": factors.get(2, 0),
+        "three_adicity": factors.get(3, 0),
+        "small_factor_weight": sum(exp for prime, exp in factors.items() if prime <= 31),
+        "score": 0,
+    }
 
 
 def power2_ntt_profile(n: int, q: int, factors: dict[int, int], two_adicity: int) -> dict[str, Any]:
@@ -788,6 +1051,28 @@ def format_factorization(factors: dict[int, int]) -> str:
 
 def run_sage_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any]:
     config = load_config()
+    payload = {
+        "problem": "lwe",
+        "n": candidate["ring"]["n"],
+        "q": candidate["modulus"]["q"],
+        "distribution": candidate["distribution"],
+        "per_attack_timeout": max(3, min(90, config.estimator.per_attack_timeout_seconds or timeout // 2)),
+    }
+    if config.estimator.remote_url:
+        result = estimate_remotely(
+            base_url=config.estimator.remote_url,
+            payload=payload,
+            timeout_seconds=config.estimator.remote_timeout_seconds,
+            poll_interval_seconds=config.estimator.remote_poll_interval_seconds,
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "message": result.get("message", "Remote Sage/lattice-estimator could not estimate this candidate."),
+                "raw": result,
+            }
+        return result
+
     sage_binary = config.estimator.sage_binary
     sage = shutil.which(sage_binary) or (sage_binary if Path(sage_binary).exists() else None)
     if not sage:
@@ -797,12 +1082,6 @@ def run_sage_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any
         }
 
     runner = Path(__file__).with_name("estimator_runner.py")
-    payload = {
-        "n": candidate["ring"]["n"],
-        "q": candidate["modulus"]["q"],
-        "distribution": candidate["distribution"],
-        "per_attack_timeout": max(3, min(30, config.estimator.per_attack_timeout_seconds or timeout // 2)),
-    }
     env = os.environ.copy()
     if config.estimator.lattice_estimator_path:
         existing = env.get("PYTHONPATH")
@@ -876,6 +1155,7 @@ def apply_estimator_result(
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
     candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+    update_visual_security(candidate)
     candidate["warnings"].append("Sage/lattice-estimator rough validation was applied to this recommendation.")
 
 

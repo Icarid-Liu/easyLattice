@@ -1,15 +1,20 @@
 import unittest
+from unittest.mock import patch
 
+from app.config import AppConfig, EstimatorConfig
 from app.parameter_search import (
     factor_integer,
     is_prime,
     ntt_prime_candidates,
     recommend_rlwe,
+    run_sage_estimator,
     security_margin_bits,
     parse_request,
     sparse_ternary_spec,
+    uniform_spec,
     ring_dimensions,
 )
+from app.estimator_runner import estimator_distribution
 
 
 class ParameterSearchTests(unittest.TestCase):
@@ -41,6 +46,30 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertGreaterEqual(candidate["selection"]["selected_security_bits"], 128)
         self.assertEqual((q - 1) % n, 0)
         self.assertIn(candidate["distribution"]["family"], {"centered_binomial", "sparse_ternary"})
+        self.assertIn("visual_scores", candidate)
+        self.assertEqual(candidate["visual_scores"]["security"]["max_bits"], 512)
+        self.assertGreater(candidate["visual_scores"]["compactness"]["score"], 0)
+        self.assertEqual(candidate["visual_scores"]["performance"]["score"], 1.0)
+
+    def test_ntt_unfriendly_mode_does_not_require_n_q_divisibility(self):
+        primes = ntt_prime_candidates(512, 12, ntt_scale_power=6, min_q_bits=2, limit=8)
+        self.assertEqual(primes[0], 3)
+        self.assertTrue(any((q - 1) % 512 != 0 for q in primes))
+
+        result = recommend_rlwe({
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "nttScalePower": 6,
+            "minQBits": 2,
+            "maxQBits": 12,
+            "useEstimator": False,
+        })
+        candidate = result["recommendation"]
+
+        self.assertFalse(candidate["modulus"]["ntt_friendly"])
+        self.assertEqual(candidate["modulus"]["ntt_condition"], "no restriction of n and q (NTT unfriendly)")
+        self.assertEqual(candidate["visual_scores"]["performance"]["score"], 0.0)
+        self.assertEqual(candidate["visual_scores"]["performance"]["k_label"], "lift")
 
     def test_sparse_ternary_probability_model(self):
         spec = sparse_ternary_spec(n=512, l0=2, l1=1)
@@ -50,6 +79,136 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertAlmostEqual(spec.variance, 3 / 16)
         self.assertEqual(spec.estimator["plus_weight"], 48)
         self.assertEqual(spec.estimator["minus_weight"], 48)
+
+    def test_dense_sparse_ternary_auto_candidate(self):
+        spec = sparse_ternary_spec(n=512, l0=1, l1=0)
+        self.assertAlmostEqual(spec.parameters["probability_plus"], 1 / 4)
+        self.assertAlmostEqual(spec.parameters["probability_minus"], 1 / 4)
+        self.assertAlmostEqual(spec.parameters["probability_zero"], 1 / 2)
+        self.assertEqual(spec.estimator["fast_screen_penalty_bits"], 0.0)
+
+        result = recommend_rlwe({
+            "hardProblemCategory": "lwe",
+            "hardProblemVariant": "rlwe",
+            "ringFamily": "power2",
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "redCostModel": "matzov",
+            "nttScalePower": 1,
+            "maxQBits": 24,
+            "distribution": "auto",
+        })
+
+        candidate = result["recommendation"]
+        self.assertEqual(candidate["ring"]["n"], 512)
+        self.assertEqual(candidate["modulus"]["q"], 257)
+        self.assertEqual(candidate["distribution"]["name"], "ST(l0=1, l1=0)")
+
+    def test_lwr_variants_force_uniform_distribution(self):
+        request = parse_request({
+            "hardProblemCategory": "LWE",
+            "hardProblemVariant": "LWR",
+            "distribution": "centered_binomial",
+        })
+
+        self.assertEqual(request.distribution, "uniform")
+
+        result = recommend_rlwe({
+            "hardProblemCategory": "LWE",
+            "hardProblemVariant": "MLWR",
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "redCostModel": "matzov",
+            "nttScalePower": 1,
+            "maxQBits": 24,
+            "distribution": "sparse_ternary",
+        })
+
+        candidate = result["recommendation"]
+        self.assertEqual(result["request"]["distribution"], "uniform")
+        self.assertEqual(candidate["distribution"]["family"], "uniform")
+        self.assertEqual(candidate["distribution"]["estimator"]["type"], "uniform")
+
+        with self.assertRaises(ValueError):
+            parse_request({
+                "hardProblemCategory": "LWE",
+                "hardProblemVariant": "LWE",
+                "distribution": "uniform",
+            })
+
+    def test_uniform_distribution_uses_nd_uniform_estimator(self):
+        spec = uniform_spec(2)
+        self.assertEqual(spec.estimator["type"], "uniform")
+        self.assertEqual(spec.estimator["lower_bound"], -2)
+        self.assertEqual(spec.estimator["upper_bound"], 2)
+
+        class FakeND:
+            @staticmethod
+            def Uniform(lower_bound, upper_bound):
+                return ("uniform", lower_bound, upper_bound)
+
+        self.assertEqual(
+            estimator_distribution(FakeND, {"estimator": spec.estimator}, 512),
+            ("uniform", -2, 2),
+        )
+
+    def test_remote_estimator_is_used_when_configured(self):
+        result = recommend_rlwe({
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "nttScalePower": 1,
+            "maxQBits": 24,
+            "distribution": "auto",
+        })
+        candidate = result["recommendation"]
+        remote_result = {"ok": True, "modes": {"classical": {}, "quantum": {}}}
+        config = AppConfig(
+            estimator=EstimatorConfig(
+                remote_url="https://example-estimator.hf.space",
+                remote_timeout_seconds=240,
+                remote_poll_interval_seconds=1.0,
+            )
+        )
+
+        with patch("app.parameter_search.load_config", return_value=config):
+            with patch("app.parameter_search.estimate_remotely", return_value=remote_result) as remote:
+                self.assertIs(run_sage_estimator(candidate, 16), remote_result)
+
+        remote.assert_called_once()
+        _, kwargs = remote.call_args
+        self.assertEqual(kwargs["base_url"], "https://example-estimator.hf.space")
+        self.assertEqual(kwargs["timeout_seconds"], 240)
+        self.assertEqual(kwargs["payload"]["problem"], "lwe")
+        self.assertEqual(kwargs["payload"]["n"], candidate["ring"]["n"])
+        self.assertEqual(kwargs["payload"]["q"], candidate["modulus"]["q"])
+
+    def test_hard_problem_taxonomy_is_preserved(self):
+        request = parse_request({
+            "hardProblemCategory": "LWE",
+            "hardProblemVariant": "MLWE",
+        })
+
+        self.assertEqual(request.hard_problem_category, "lwe")
+        self.assertEqual(request.hard_problem_variant, "mlwe")
+
+        request = parse_request({
+            "hardProblemCategory": "LWE",
+            "hardProblemVariant": "RLWE",
+        })
+
+        self.assertEqual(request.hard_problem_category, "lwe")
+        self.assertEqual(request.hard_problem_variant, "rlwe")
+
+        with self.assertRaises(ValueError):
+            parse_request({
+                "hardProblemCategory": "SIS",
+                "hardProblemVariant": "MLWE",
+            })
+
+        with self.assertRaises(ValueError):
+            parse_request({
+                "securityModel": "matzov",
+            })
 
     def test_ternary_ring_candidates(self):
         dims = ring_dimensions("ternary")
@@ -70,8 +229,13 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual((candidate["modulus"]["q"] - 1) % (3 * candidate["ring"]["n"] // 2), 0)
         self.assertIn("3", candidate["modulus"]["q_minus_1_factorization"])
 
-    def test_matzov_128_recommendations_are_tight_lower_bound(self):
-        request = {"targetSecurity": 128, "securityModel": "matzov", "maxQBits": 24}
+    def test_matzov_reduction_model_128_recommendations_are_tight_lower_bound(self):
+        request = {
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "redCostModel": "matzov",
+            "maxQBits": 24,
+        }
         result = recommend_rlwe(request)
         options = [result["recommendation"], *result["alternatives"][:2]]
         parsed = parse_request(request)

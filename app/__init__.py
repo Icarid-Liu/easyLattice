@@ -1,1 +1,1 @@
-"""AILattice web prototype package."""
+"""easyLattice web prototype package."""

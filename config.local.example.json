@@ -3,13 +3,20 @@
     "sage_binary": "sage",
     "lattice_estimator_path": "/absolute/path/to/lattice-estimator",
     "default_timeout_seconds": 16,
-    "per_attack_timeout_seconds": 12
+    "per_attack_timeout_seconds": 12,
+    "remote_url": null,
+    "remote_timeout_seconds": 240,
+    "remote_poll_interval_seconds": 2
   },
-  "model": {
+  "llm": {
+    "enabled": false,
     "provider": "openai-compatible",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen2.5-coder:7b",
-    "api_key_env": "AILATTICE_API_KEY"
+    "api_key_env": "EASYLATTICE_LLM_API_KEY",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "timeout_seconds": 30
   },
   "scripts": {
     "decrypt_error": [],

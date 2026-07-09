@@ -76,6 +76,12 @@ def cost_to_json(cost) -> dict:
 
 
 def run(payload: dict) -> dict:
+    if payload.get("problem") == "ntru":
+        return run_ntru(payload)
+    return run_lwe(payload)
+
+
+def run_lwe(payload: dict) -> dict:
     from estimator import LWE, ND
     from estimator.reduction import ADPS16
 
@@ -139,6 +145,74 @@ def run(payload: dict) -> dict:
     }
 
 
+def run_ntru(payload: dict) -> dict:
+    from estimator import NTRU, ND
+    from sage.all import oo
+
+    n = int(payload["n"])
+    q = int(payload["q"])
+    per_attack_timeout = int(payload.get("per_attack_timeout", 20))
+    Xs = estimator_distribution(ND, payload["secret_distribution"], n)
+    Xe = estimator_distribution(ND, payload["error_distribution"], n)
+    params = NTRU.Parameters(
+        n=n,
+        q=q,
+        Xs=Xs,
+        Xe=Xe,
+        m=n,
+        ntru_type=str(payload.get("ntru_type", "circulant")),
+        tag=f"NTRU screen n={n}, q={q}",
+    )
+
+    try:
+        with time_limit(per_attack_timeout):
+            rough = NTRU.estimate.rough(params, quiet=True, catch_exceptions=True)
+    except AttackTimeout as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "estimator_commit": estimator_commit(),
+            "parameters": {"n": n, "q": q, "m": n},
+        }
+
+    attacks = {}
+    successful = {}
+    for name, cost in rough.items():
+        if cost.get("rop") == oo:
+            attacks[name] = {"ok": False, "message": "infinite cost"}
+            continue
+        attacks[name] = {"ok": True, **cost_to_json(cost)}
+        if attacks[name].get("rop_bits") is not None:
+            successful[name] = attacks[name]
+
+    if successful:
+        best_attack, best_result = min(successful.items(), key=lambda item: item[1]["rop_bits"])
+        mode = {
+            "ok": True,
+            "min_bits": best_result["rop_bits"],
+            "best_attack": best_attack,
+            "attacks": attacks,
+        }
+    else:
+        mode = {
+            "ok": False,
+            "message": "no attack estimate completed",
+            "attacks": attacks,
+        }
+
+    return {
+        "ok": mode["ok"],
+        "estimator_commit": estimator_commit(),
+        "modes": {"classical": mode},
+        "parameters": {
+            "n": n,
+            "q": q,
+            "m": n,
+            "ntru_type": str(payload.get("ntru_type", "circulant")),
+        },
+    }
+
+
 def estimator_distribution(ND, distribution: dict, n: int):
     estimator = distribution.get("estimator", {})
     estimator_type = estimator.get("type")
@@ -149,6 +223,21 @@ def estimator_distribution(ND, distribution: dict, n: int):
             int(estimator["plus_weight"]),
             int(estimator["minus_weight"]),
             n,
+        )
+    if estimator_type == "discrete_gaussian":
+        return ND.DiscreteGaussian(float(estimator["stddev"]))
+    if estimator_type == "uniform":
+        return ND.Uniform(int(estimator["lower_bound"]), int(estimator["upper_bound"]))
+    if estimator_type == "uniform_mod":
+        return ND.UniformMod(int(estimator["modulus"]))
+    if estimator_type == "composite_moment":
+        bounds = estimator.get("bounds", [-10, 10])
+        return ND.NoiseDistribution(
+            n=n,
+            mean=0,
+            stddev=float(estimator["stddev"]),
+            bounds=(int(bounds[0]), int(bounds[1])),
+            _density=1.0,
         )
     raise ValueError(f"Unsupported estimator distribution: {estimator_type}")
 

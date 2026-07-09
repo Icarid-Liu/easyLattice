@@ -12,10 +12,33 @@ const copyJson = document.querySelector("#copy-json");
 const nttScale = document.querySelector("#ntt-scale");
 const nttScaleLabel = document.querySelector("#ntt-scale-label");
 const ringFamily = document.querySelector("#ring-family");
+const distributionSelect = document.querySelector("#distribution");
+const useLLM = document.querySelector("#use-llm");
+const profilePanel = document.querySelector("#profile-panel");
 
 let lastResult = null;
+const LWR_VARIANTS = new Set(["lwr", "rlwr", "mlwr"]);
+const DEFAULT_DISTRIBUTION_OPTIONS = [
+  ["auto", "Auto"],
+  ["centered_binomial", "Centered Binomial"],
+  ["sparse_ternary", "Sparse Ternary"],
+];
+const LWR_DISTRIBUTION_OPTIONS = [["uniform", "Uniform"]];
+const HARD_PROBLEM_VARIANT_LABELS = {
+  matrix: "matrix",
+  ring: "ring",
+  lwe: "LWE",
+  rlwe: "RLWE",
+  lwr: "LWR",
+  rlwr: "RLWR",
+  mlwe: "MLWE",
+  mlwr: "MLWR",
+  sis: "SIS",
+  msis: "MSIS",
+};
 
 loadPublicConfig();
+syncDistributionOptions();
 updateNttScaleLabel();
 
 form.addEventListener("submit", async (event) => {
@@ -26,22 +49,33 @@ form.addEventListener("submit", async (event) => {
 copyJson.addEventListener("click", async () => {
   if (!lastResult) return;
   await navigator.clipboard.writeText(JSON.stringify(lastResult.recommendation, null, 2));
-  copyJson.textContent = "已复制";
+  copyJson.textContent = "Copied";
   setTimeout(() => {
-    copyJson.textContent = "复制 JSON";
+    copyJson.textContent = "Copy JSON";
   }, 1200);
 });
 
 nttScale.addEventListener("input", updateNttScaleLabel);
 ringFamily.addEventListener("change", updateNttScaleLabel);
+document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
+  input.addEventListener("change", syncDistributionOptions);
+});
 
 async function requestRecommendation() {
   setStatus("loading", "Running");
-  title.textContent = "正在搜索参数";
-  subtitle.textContent = "生成 NTT 友好模数并筛选安全估计。";
+  title.textContent = "Searching parameters";
+  subtitle.textContent = "Generating NTT-friendly moduli and screening security estimates.";
 
   const data = new FormData(form);
+  const hardProblem = selectedHardProblem(data);
+  const useEstimator = data.get("useEstimator") === "on";
+  if (useEstimator) {
+    subtitle.textContent = "Running lattice-estimator validation. This can take several minutes.";
+  }
   const payload = {
+    problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
+    hardProblemCategory: hardProblem.category,
+    hardProblemVariant: hardProblem.variant,
     ringFamily: data.get("ringFamily"),
     targetSecurity: Number(data.get("targetSecurity")),
     securityModel: data.get("securityModel"),
@@ -50,11 +84,13 @@ async function requestRecommendation() {
     minQBits: Number(data.get("minQBits")),
     maxQBits: Number(data.get("maxQBits")),
     distribution: data.get("distribution"),
-    useEstimator: data.get("useEstimator") === "on",
+    useEstimator,
+    intent: String(data.get("intent") || ""),
+    useLLM: data.get("useLLM") === "on",
   };
 
   try {
-    const response = await fetch("/api/rlwe/recommend", {
+    const response = await fetch("/api/agent/recommend", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -68,7 +104,7 @@ async function requestRecommendation() {
     setStatus("done", "Ready");
   } catch (error) {
     setStatus("error", "Error");
-    title.textContent = "请求失败";
+    title.textContent = "Request failed";
     subtitle.textContent = error.message;
   }
 }
@@ -78,8 +114,8 @@ function renderResult(result) {
   const target = result.request.target_security;
   const source = candidate.security.source === "sage-lattice-estimator" ? "Sage estimator" : "fast screen";
 
-  title.textContent = `推荐 RLWE(${candidate.ring.n}, ${candidate.modulus.q})`;
-  subtitle.textContent = `${source} · ${result.search.generated_candidates} 个候选 · ${result.search.elapsed_ms} ms`;
+  title.textContent = `Recommended lattice instance (${candidate.ring.n}, ${candidate.modulus.q})`;
+  subtitle.textContent = `${source} · ${result.search.generated_candidates} candidates · ${result.search.elapsed_ms} ms`;
 
   show(resultGrid, details, warnings, alternatives, jsonPanel);
   setText("#classic-bits", `${candidate.security.classical_bits} bits`);
@@ -92,8 +128,10 @@ function renderResult(result) {
   setText("#security-margin", `margin +${candidate.selection.margin_bits} bits`);
   setMeter("#classic-meter", candidate.security.classical_bits, target);
   setMeter("#quantum-meter", candidate.security.quantum_bits, target);
+  renderParameterProfile(candidate);
 
   fillDefinitionList("#instance-list", [
+    ["Hard problem", formatHardProblem(result.request)],
     ["Family", candidate.ring.family],
     ["Ring", candidate.ring.quotient],
     ["Cyclotomic", `Φ_${candidate.ring.cyclotomic_index}, ${candidate.ring.family}`],
@@ -106,19 +144,23 @@ function renderResult(result) {
   ]);
 
   fillDefinitionList("#security-list", [
+    ["Agent", result.agent ? result.agent.name : "deterministic"],
+    ["LLM", result.agent?.llm_used ? `${result.agent.provider} / ${result.agent.model}` : "not used"],
     ["Source", candidate.security.source],
     ["MATZOV", `${candidate.security.matzov_bits || "n/a"} bits`],
     ["ADPS16", `${candidate.security.adps16_core_svp_bits || "n/a"} bits`],
     ["Classical", `${candidate.security.classical_bits} bits`],
     ["Quantum", `${candidate.security.quantum_bits} bits`],
-    ["Target", `${result.request.target_security} bits (${result.request.red_cost_model})`],
+    ["Target", `${result.request.target_security} bits (${result.request.security_model})`],
+    ["Reduction model", result.request.red_cost_model],
     ["Margin", `${candidate.selection.margin_bits} bits`],
     ["Estimator", candidate.security.estimator_commit || "not applied"],
     ["Next", result.next_question],
   ]);
 
   warnings.innerHTML = "";
-  candidate.warnings.forEach((warning) => {
+  const warningItems = [...candidate.warnings, ...(result.agent?.notes || [])];
+  warningItems.forEach((warning) => {
     const p = document.createElement("p");
     p.textContent = warning;
     warnings.appendChild(p);
@@ -126,6 +168,38 @@ function renderResult(result) {
 
   renderAlternatives(result.alternatives);
   jsonOutput.textContent = JSON.stringify(candidate, null, 2);
+}
+
+function renderParameterProfile(candidate) {
+  if (!candidate.visual_scores) {
+    profilePanel.classList.add("hidden");
+    return;
+  }
+
+  profilePanel.classList.remove("hidden");
+  const scores = ["security", "compactness", "performance"].map((key) => {
+    const score = candidate.visual_scores[key]?.score;
+    return Math.max(0, Math.min(1, Number(score) || 0));
+  });
+  const points = trianglePoints(scores);
+  document.querySelector("#profile-fill").setAttribute("points", points);
+}
+
+function trianglePoints(scores) {
+  const center = [80, 70];
+  const vertices = [
+    [80, 24],
+    [28, 94],
+    [132, 94],
+  ];
+  return vertices
+    .map(([x, y], index) => {
+      const score = scores[index];
+      const px = center[0] + (x - center[0]) * score;
+      const py = center[1] + (y - center[1]) * score;
+      return `${round1(px)},${round1(py)}`;
+    })
+    .join(" ");
 }
 
 function renderAlternatives(items) {
@@ -147,6 +221,34 @@ function distributionText(distribution) {
   return `${distribution.name}, σ=${distribution.stddev}, support [${distribution.support.join(", ")}]`;
 }
 
+function selectedHardProblem(data = new FormData(form)) {
+  const [category = "lwe", variant = "rlwe"] = String(data.get("hardProblem") || "lwe:rlwe").split(":");
+  return { category, variant };
+}
+
+function syncDistributionOptions() {
+  const { variant } = selectedHardProblem();
+  const useUniform = LWR_VARIANTS.has(variant);
+  const options = useUniform ? LWR_DISTRIBUTION_OPTIONS : DEFAULT_DISTRIBUTION_OPTIONS;
+  distributionSelect.replaceChildren(
+    ...options.map(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }),
+  );
+  distributionSelect.value = options[0][0];
+  distributionSelect.disabled = useUniform;
+}
+
+function formatHardProblem(request) {
+  const category = request?.hard_problem_category || request?.hardProblemCategory || "lwe";
+  const variant = request?.hard_problem_variant || request?.hardProblemVariant || "rlwe";
+  const variantLabel = HARD_PROBLEM_VARIANT_LABELS[variant] || variant.toUpperCase();
+  return `${category.toUpperCase()} / ${variantLabel}`;
+}
+
 function fillDefinitionList(selector, rows) {
   const node = document.querySelector(selector);
   node.innerHTML = "";
@@ -162,6 +264,10 @@ function fillDefinitionList(selector, rows) {
 function setMeter(selector, value, target) {
   const width = Math.max(4, Math.min(100, (Number(value) / Number(target)) * 100));
   document.querySelector(selector).style.width = `${width}%`;
+}
+
+function round1(value) {
+  return Math.round(Number(value) * 10) / 10;
 }
 
 function setText(selector, text) {
@@ -180,6 +286,10 @@ function setStatus(kind, text) {
 function updateNttScaleLabel() {
   const value = Number(nttScale.value);
   const ternary = ringFamily.value === "ternary";
+  if (value === 6) {
+    nttScaleLabel.textContent = "NTT scale: no restriction of n and q (NTT unfriendly)";
+    return;
+  }
   let label = ternary ? "6n" : "2n";
   if (ternary) {
     if (value === 0) label = "3n";
@@ -190,7 +300,7 @@ function updateNttScaleLabel() {
     if (value === 1) label = "n/2";
     if (value > 1) label = `n/2^${value}`;
   }
-  nttScaleLabel.textContent = `NTT 尺度：${label} | q - 1`;
+  nttScaleLabel.textContent = `NTT scale: ${label} | q - 1`;
 }
 
 requestRecommendation();
@@ -201,9 +311,27 @@ async function loadPublicConfig() {
     if (!response.ok) return;
     const config = await response.json();
     document.querySelector("#config-source").textContent = config.source;
-    document.querySelector("#config-model").textContent = `model: ${config.model.provider} / ${config.model.model}`;
-    const estimatorPath = config.estimator.lattice_estimator_path || "PYTHONPATH/default";
-    document.querySelector("#config-estimator").textContent = `estimator: ${config.estimator.sage_binary}, ${estimatorPath}`;
+    document.querySelector("#config-agent").textContent = "agent: deterministic default";
+    document.querySelector("#config-llm").textContent =
+      config.llm.enabled
+        ? `llm: ${config.llm.configured ? "ready" : "auth missing"} · ${config.llm.provider} / ${config.llm.model}`
+        : "llm: disabled";
+    useLLM.disabled = !config.llm.configured;
+    if (!config.llm.configured) {
+      useLLM.checked = false;
+    }
+    const estimatorPath = config.estimator.remote_configured
+      ? config.estimator.remote_url
+      : config.estimator.lattice_estimator_path || "PYTHONPATH/default";
+    const estimatorParts = [config.estimator.remote_configured ? "remote" : config.estimator.sage_binary];
+    if (config.estimator.version) {
+      estimatorParts.push(`version ${config.estimator.version}`);
+    }
+    if (config.estimator.remote_configured) {
+      estimatorParts.push(`timeout ${config.estimator.remote_timeout_seconds}s`);
+    }
+    estimatorParts.push(estimatorPath);
+    document.querySelector("#config-estimator").textContent = `estimator: ${estimatorParts.join(" · ")}`;
   } catch (_error) {
     return;
   }

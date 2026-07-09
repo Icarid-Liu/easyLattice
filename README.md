@@ -1,7 +1,13 @@
-# AILattice
+# easyLattice
 
-Local-first, open-source prototype for AI-assisted lattice-crypto parameter
-selection.
+Local-first, open-source prototype for lattice-crypto parameter selection.
+
+easyLattice is layered so the default path does not require any LLM token:
+
+1. deterministic core: fixed RLWE search policy and local security screening;
+2. estimator adapter: optional user-provided Sage/lattice-estimator validation;
+3. agent layer: deterministic by default, with an optional LLM intent parser;
+4. provider layer: user-owned OpenAI-compatible endpoint and authentication.
 
 This first version focuses on a basic RLWE instance selector:
 
@@ -16,6 +22,23 @@ This first version focuses on a basic RLWE instance selector:
   approximation;
 - fast local screening plus optional user-provided Sage/lattice-estimator validation;
 - a small web UI for interactive parameter search.
+
+There is also an initial NTRU selector behind the same agent API. It currently
+supports:
+
+- power-of-two cyclotomic NTRU over `Z_q[x] / (x^n + 1)`, matching the ring
+  family used by designs such as NEV/BAT/DAWN-style NTRU variants;
+- the same relaxed NTT default used by the RLWE prototype for power-of-two
+  rings, namely `n/2 | q - 1`;
+- two-stage distribution selection: first calibrate the minimum standard
+  deviation with a discrete-Gaussian proxy, then choose the closest
+  fast-sampling distribution whose standard deviation is above that lower
+  bound. Fast distributions may be single blocks or short sums of sparse
+  ternary, symmetric uniform, and centered-binomial blocks; summed
+  distributions are estimator moment approximations and are capped by the
+  Gaussian proxy calibration to avoid overstating security;
+- HPS-like and HRSS-like comparison candidates;
+- local `lattice-estimator` NTRU rough validation when `useEstimator=true`.
 
 The selector treats the user's requested security as a lower bound. It first
 chooses the polynomial/ring family, then degree `n`, then the smallest modulus
@@ -34,21 +57,22 @@ larger error standard deviation increases hardness. Correctness and scheme
 encoding may push in the opposite direction, so those checks belong in
 scheme-specific modules.
 
-For sparse ternary candidates, AILattice includes distributions with
+For sparse ternary candidates, easyLattice includes distributions with
 `Pr[+1] = Pr[-1] = (2^l0 - 1) / 2^(2*l0 + l1)` and all remaining probability on
 `0`. These are cheap to sample with bit operations. Since `lattice-estimator`
-models sparse ternary vectors by fixed Hamming weight, AILattice passes the
+models sparse ternary vectors by fixed Hamming weight, easyLattice passes the
 expected `+1` and `-1` counts as a fixed-weight approximation and reports that
 approximation in the JSON output.
 
-AILattice is designed as a local tool, not a hosted service. Users bring their
-own model endpoint/API key, their own estimator installation, and later their
+easyLattice is designed as a local tool, not a hosted service. Users bring their
+own estimator installation, optional model endpoint/API key, and later their
 own scheme-specific scripts such as decryption-error or smoothing-parameter
 calculators.
 
-No API key is required for the current RLWE prototype. Model configuration is
-present only so the agent layer can be added without committing secrets or
-depending on the maintainer's tokens.
+No API key is required for the default RLWE workflow. The LLM layer is disabled
+unless `llm.enabled=true` is set locally. When enabled, the model only converts
+free-form user intent into deterministic search constraints; final parameters
+still come from the fixed local search logic and optional estimator validation.
 
 ## Run
 
@@ -83,8 +107,15 @@ cp config.local.example.json config.local.json
   if Sage cannot already import `estimator`.
 - `estimator.default_timeout_seconds`: request-level timeout for optional
   estimator validation.
-- `model.base_url`, `model.model`, `model.api_key_env`: bring-your-own model
-  settings for the future agent layer.
+- `estimator.remote_url`: optional Hugging Face estimator worker URL. When set,
+  `useEstimator=true` calls this remote worker instead of local Sage.
+- `estimator.remote_timeout_seconds`: remote worker timeout, intended for
+  180-300 second live estimator runs.
+- `estimator.remote_poll_interval_seconds`: polling interval for remote jobs.
+- `llm.enabled`: disabled by default. Set to `true` only when you want LLM
+  intent parsing.
+- `llm.base_url`, `llm.model`, `llm.api_key_env`, `llm.auth_header`,
+  `llm.auth_prefix`: bring-your-own OpenAI-compatible model settings.
 - `scripts.decrypt_error`, `scripts.signature_smoothing`: future local script
   hooks for scheme-specific checks.
 
@@ -93,12 +124,67 @@ Equivalent environment variables:
 ```bash
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
-AILATTICE_MODEL_BASE_URL=http://localhost:11434/v1 \
-AILATTICE_MODEL=qwen2.5-coder:7b \
 python3 -m app.server
 ```
 
+Remote estimator worker:
+
+```bash
+EASYLATTICE_ESTIMATOR_REMOTE_URL=https://your-estimator-space.hf.space \
+EASYLATTICE_ESTIMATOR_REMOTE_TIMEOUT=240 \
+python3 -m app.server
+```
+
+Optional LLM enhancement:
+
+```bash
+export EASYLATTICE_LLM_ENABLED=true
+export EASYLATTICE_LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
+export EASYLATTICE_LLM_MODEL=your-model
+export EASYLATTICE_LLM_API_KEY=your-token
+python3 -m app.server
+```
+
+For local endpoints that do not require authentication, set
+`"auth_header": ""` in `config.local.json`.
+
 The API exposes only non-secret public config at `/api/config/public`.
+
+The main recommendation endpoint is:
+
+```text
+POST /api/agent/recommend
+```
+
+With `useLLM=false` or omitted, it runs only the deterministic core. With
+`useLLM=true`, it requires local LLM configuration and an `intent` string.
+The legacy-compatible `/api/rlwe/recommend` route is still available and uses
+the same agent layer.
+
+Use `"problem": "ntru"` to call the NTRU selector:
+
+```json
+{
+  "problem": "ntru",
+  "targetSecurity": 128,
+  "ringFamily": "power2",
+  "useEstimator": true
+}
+```
+
+## Hugging Face Live Estimator
+
+For a public website, keep the main site static and run Sage/lattice-estimator
+in a separate Hugging Face Docker Space. The template in
+[`deploy/huggingface-estimator`](deploy/huggingface-estimator) exposes:
+
+- `POST /jobs` for async estimator jobs;
+- `GET /jobs/{job_id}` for polling;
+- `POST /estimate` for synchronous debugging only;
+- a default 240 second timeout, clamped to a 300 second maximum.
+
+The Space worker accepts only validated estimator payloads and forwards them to
+`app/estimator_runner.py`; it does not run arbitrary user code or any LLM.
 
 ## Tests
 
@@ -110,22 +196,24 @@ python3 -m unittest discover -s tests
 
 This prototype is not a production parameter certification tool. It does not yet
 bind the RLWE instance to a concrete encryption/signature scheme, so it does not
-compute decryption failure, signing rejection/failure, smoothing-parameter
+compute decryption failure, rejection sampling times, smoothing-parameter
 conditions, or complete reduction-loss accounting.
 
 The `matzov` red-cost option means the classical ADPS16 Matzov-style
 dual-hybrid estimate. The `adps16` option reports the ADPS16 CoreSVP/uSVP
-estimate. With Sage validation enabled, AILattice calls `lattice-estimator` and
+estimate. With Sage validation enabled, easyLattice calls `lattice-estimator` and
 rounds bit counts downward to avoid overstating a lower bound.
 
 ## Planned Extension Points
 
-- `agent`: convert user intent into constraints and explain tradeoffs.
+- `agent`: convert user intent into constraints and explain tradeoffs. The
+  default implementation is deterministic; LLM assistance is opt-in.
 - `estimators`: queue/cache long-running lattice-estimator jobs.
 - `schemes/encryption`: decryption-error scripts for concrete PKE/KEM schemes.
 - `schemes/signature`: hash-and-sign smoothing and rejection checks.
 - `providers`: OpenAI-compatible, local Ollama/vLLM, or other user-owned model
-  endpoints.
+  endpoints. Providers must never use maintainer-owned tokens.
 
 See [docs/references.md](docs/references.md) for scheme-design references used
-to guide future extension work.
+to guide future extension work. See [docs/architecture.md](docs/architecture.md)
+for the deterministic-core and optional-LLM layering.
