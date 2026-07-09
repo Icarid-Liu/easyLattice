@@ -17,6 +17,7 @@ const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
 
 let lastResult = null;
+const API_BASE_URL = normalizeApiBaseUrl(apiBaseSetting());
 const DEFAULT_DISTRIBUTION_OPTIONS = [
   ["auto", "Auto"],
   ["centered_binomial", "Centered Binomial"],
@@ -83,20 +84,15 @@ async function requestRecommendation() {
     maxQBits: Number(data.get("maxQBits")),
     distribution: data.get("distribution"),
     useEstimator,
+    estimatorTimeout: useEstimator ? 240 : undefined,
     intent: String(data.get("intent") || ""),
     useLLM: data.get("useLLM") === "on",
   };
 
   try {
-    const response = await fetch("/api/agent/recommend", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || "request failed");
-    }
+    const result = useEstimator
+      ? await requestRecommendationJob(payload)
+      : await postJson("/api/agent/recommend", payload);
     lastResult = result;
     renderResult(result);
     setStatus("done", "Ready");
@@ -105,6 +101,53 @@ async function requestRecommendation() {
     title.textContent = "Request failed";
     subtitle.textContent = error.message;
   }
+}
+
+async function requestRecommendationJob(payload) {
+  const submitted = await postJson("/api/agent/jobs", payload, { accepted: true });
+  const jobId = submitted.job_id;
+  if (!jobId) {
+    throw new Error("estimator job did not return an id");
+  }
+
+  const timeoutMs = (Number(payload.estimatorTimeout) || 240) * 1000 + 30000;
+  const deadline = Date.now() + timeoutMs;
+  let job = submitted;
+  while (Date.now() < deadline) {
+    if (job.status === "succeeded") {
+      if (!job.result) throw new Error("estimator job completed without a result");
+      return job.result;
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || "estimator job failed");
+    }
+    subtitle.textContent = `Estimator job ${job.status}. Waiting for Sage/lattice-estimator.`;
+    await sleep(2000);
+    job = await getJson(`/api/agent/jobs/${jobId}`);
+  }
+  throw new Error("estimator job polling timed out");
+}
+
+async function postJson(path, payload, options = {}) {
+  const response = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok && !(options.accepted && response.status === 202)) {
+    throw new Error(result.error || "request failed");
+  }
+  return result;
+}
+
+async function getJson(path) {
+  const response = await fetch(apiUrl(path));
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.error || "request failed");
+  }
+  return result;
 }
 
 function renderResult(result) {
@@ -283,6 +326,23 @@ function setStatus(kind, text) {
   statusPill.textContent = text;
 }
 
+function apiBaseSetting() {
+  const queryValue = new URLSearchParams(window.location.search).get("apiBase");
+  return queryValue || window.EASYLATTICE_API_BASE_URL || "";
+}
+
+function normalizeApiBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function apiUrl(path) {
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : path;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function updateNttScaleLabel() {
   const value = Number(nttScale.value);
   const ternary = ringFamily.value === "ternary";
@@ -307,7 +367,7 @@ requestRecommendation();
 
 async function loadPublicConfig() {
   try {
-    const response = await fetch("/api/config/public");
+    const response = await fetch(apiUrl("/api/config/public"));
     if (!response.ok) return;
     const config = await response.json();
     document.querySelector("#config-source").textContent = config.source;

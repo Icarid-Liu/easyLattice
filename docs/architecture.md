@@ -36,6 +36,11 @@ For NTRU, set `"problem": "ntru"`:
 request JSON -> app.agent -> app.ntru_search -> response JSON
 ```
 
+When `useEstimator=true`, the browser submits the same request to
+`POST /api/agent/jobs` and polls `GET /api/agent/jobs/{job_id}`. This keeps
+3-5 minute Sage/lattice-estimator runs off a single long browser request while
+leaving the deterministic fast path synchronous.
+
 ## LLM-Assisted Path
 
 `POST /api/agent/recommend` with `useLLM=true` runs:

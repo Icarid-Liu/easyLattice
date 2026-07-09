@@ -247,7 +247,7 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         max_n=max_n,
         distribution=distribution,
         use_estimator=bool(raw.get("use_estimator", raw.get("useEstimator", False))),
-        estimator_timeout=max(4, min(90, int(estimator_timeout))),
+        estimator_timeout=max(4, min(300, int(estimator_timeout))),
         validation_count=validation_count,
         validation_attempts=max(validation_count, min(80, int(validation_attempts))),
     )

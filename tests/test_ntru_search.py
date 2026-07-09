@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.config import AppConfig, EstimatorConfig
-from app.ntru_search import recommend_ntru, run_ntru_estimator
+from app.ntru_search import parse_ntru_request, recommend_ntru, run_ntru_estimator
 
 
 class NTRUSearchTests(unittest.TestCase):
@@ -55,6 +55,11 @@ class NTRUSearchTests(unittest.TestCase):
         )
 
         self.assertEqual(result["recommendation"]["ring"]["ntru_type"], "matrix")
+
+    def test_ntru_estimator_timeout_allows_five_minute_live_runs(self):
+        request = parse_ntru_request({"estimatorTimeout": 999})
+
+        self.assertEqual(request.estimator_timeout, 300)
 
     def test_ntru_performance_is_max_for_n_or_2n_ntt_scale(self):
         n_scale_result = recommend_ntru(

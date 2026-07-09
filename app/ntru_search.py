@@ -165,7 +165,7 @@ def parse_ntru_request(raw: dict[str, Any]) -> NTRURequest:
         max_q_bits=max_q_bits,
         distribution=str(raw.get("distribution", "auto")),
         use_estimator=bool(raw.get("use_estimator", raw.get("useEstimator", False))),
-        estimator_timeout=max(4, min(120, estimator_timeout)),
+        estimator_timeout=max(4, min(300, estimator_timeout)),
         validation_count=validation_count,
         validation_attempts=max(validation_count, min(24, validation_attempts)),
     )

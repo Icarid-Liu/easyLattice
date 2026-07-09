@@ -182,6 +182,11 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(profile["error_support"], [-1, 1])
         self.assertEqual(profile["p"], 3)
 
+    def test_estimator_timeout_allows_five_minute_live_runs(self):
+        request = parse_request({"estimatorTimeout": 999})
+
+        self.assertEqual(request.estimator_timeout, 300)
+
     def test_remote_estimator_is_used_when_configured(self):
         result = recommend_rlwe({
             "targetSecurity": 128,

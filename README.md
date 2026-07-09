@@ -164,6 +164,16 @@ With `useLLM=false` or omitted, it runs only the deterministic core. With
 The legacy-compatible `/api/rlwe/recommend` route is still available and uses
 the same agent layer.
 
+For long estimator runs, the live API also exposes async recommendation jobs:
+
+```text
+POST /api/agent/jobs
+GET /api/agent/jobs/{job_id}
+```
+
+The browser UI uses these job endpoints when `useEstimator=true`, so 3-5 minute
+Sage/lattice-estimator runs do not depend on a single long HTTP request.
+
 Use `"problem": "ntru"` to call the NTRU selector:
 
 ```json
@@ -175,10 +185,24 @@ Use `"problem": "ntru"` to call the NTRU selector:
 }
 ```
 
-## Hugging Face Live Estimator
+## Hugging Face Live API
 
-For a public website, keep the main site static and run Sage/lattice-estimator
-in a separate Hugging Face Docker Space. The template in
+For a public live backend, deploy the Docker Space template in
+[`deploy/huggingface-live`](deploy/huggingface-live). It runs the deterministic
+selector and optional Sage/lattice-estimator validation behind the same API as
+the local server.
+
+```bash
+python3 -m pip install huggingface_hub
+HF_TOKEN=hf_xxx python3 deploy/huggingface-live/deploy_space.py \
+  --repo-id YOUR_HF_NAME/easyLattice-live \
+  --public
+```
+
+The live Space binds to `0.0.0.0:7860`, uses a 240 second default estimator
+timeout, and clamps estimator requests to 300 seconds.
+
+For a smaller estimator-only worker, the template in
 [`deploy/huggingface-estimator`](deploy/huggingface-estimator) exposes:
 
 - `POST /jobs` for async estimator jobs;
@@ -186,8 +210,9 @@ in a separate Hugging Face Docker Space. The template in
 - `POST /estimate` for synchronous debugging only;
 - a default 240 second timeout, clamped to a 300 second maximum.
 
-The Space worker accepts only validated estimator payloads and forwards them to
-`app/estimator_runner.py`; it does not run arbitrary user code or any LLM.
+The estimator-only worker accepts only validated estimator payloads and forwards
+them to `app/estimator_runner.py`; it does not run arbitrary user code or any
+LLM.
 
 ## Tests
 

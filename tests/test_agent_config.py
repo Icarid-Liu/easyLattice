@@ -7,6 +7,7 @@ from unittest.mock import patch
 from app.agent import recommend_with_agent
 from app.config import AppConfig, EstimatorConfig, LLMConfig, public_config
 from app.llm_provider import sanitize_overrides
+from app.server import cors_origin_for
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -98,6 +99,14 @@ class AgentConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(overrides, {"targetSecurity": 128, "ringFamily": "ternary"})
+
+    def test_cors_origin_matching(self):
+        self.assertEqual(cors_origin_for("https://icarid-liu.github.io", ["*"]), "*")
+        self.assertEqual(
+            cors_origin_for("https://icarid-liu.github.io", ["https://icarid-liu.github.io"]),
+            "https://icarid-liu.github.io",
+        )
+        self.assertIsNone(cors_origin_for("https://example.invalid", ["https://icarid-liu.github.io"]))
 
 
 if __name__ == "__main__":
