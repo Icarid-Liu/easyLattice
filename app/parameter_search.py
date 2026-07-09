@@ -166,13 +166,13 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
                 f"ring family first: {request.ring_family}",
                 "degree n second",
                 ntt_search_strategy_text(request),
-                "choose Xs/Xe distribution pair after q; prototype currently uses the same family for both",
+                distribution_strategy_text(request),
                 f"fast {request.red_cost_model.upper()} screen before optional Sage validation",
             ],
         },
         "next_question": (
             "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, "
-            "the next step is to add scheme-specific constraints such as correctness, rejection rate, "
+            "the next step is to add scheme-specific constraints such as correctness, rejection sampling times, "
             "and smoothing parameters."
         ),
     }
@@ -215,11 +215,12 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         raise ValueError("Require 256 <= min_n <= max_n.")
 
     distribution = str(raw.get("distribution", "auto"))
-    if is_lwr_variant(hard_problem_variant):
-        distribution = "uniform"
-    elif distribution == "uniform":
-        raise ValueError("uniform distribution is only available for LWR, RLWR, and MLWR variants.")
-    elif distribution not in {"auto", "centered_binomial", "sparse_ternary"}:
+    if distribution == "uniform":
+        raise ValueError(
+            "uniform is reserved for the LWR rounding-error distribution; "
+            "secret distribution must be one of auto, centered_binomial, sparse_ternary."
+        )
+    if distribution not in {"auto", "centered_binomial", "sparse_ternary"}:
         raise ValueError("distribution must be one of auto, centered_binomial, sparse_ternary.")
 
     estimator_timeout = raw.get(
@@ -293,8 +294,14 @@ def build_candidates(request: RequestOptions) -> list[dict[str, Any]]:
             ring_family=request.ring_family,
         )
         for q in primes:
-            for distribution in distribution_candidates(n, request):
-                candidate = make_candidate(n=n, q=q, distribution=distribution, request=request)
+            for secret_distribution, error_distribution in distribution_pairs(n, request):
+                candidate = make_candidate(
+                    n=n,
+                    q=q,
+                    secret_distribution=secret_distribution,
+                    error_distribution=error_distribution,
+                    request=request,
+                )
                 candidates.append(candidate)
     return candidates
 
@@ -318,13 +325,19 @@ def select_best_distribution_per_modulus(
     return selected
 
 
-def make_candidate(n: int, q: int, distribution: DistributionSpec, request: RequestOptions) -> dict[str, Any]:
+def make_candidate(
+    n: int,
+    q: int,
+    secret_distribution: DistributionSpec,
+    error_distribution: DistributionSpec,
+    request: RequestOptions,
+) -> dict[str, Any]:
     factors = factor_integer(q - 1)
     security = fast_security_estimate(
         n=n,
         q=q,
-        sigma=distribution.stddev,
-        sparse_penalty_bits=float(distribution.estimator.get("fast_screen_penalty_bits", 0.0)),
+        sigma=error_distribution.stddev,
+        sparse_penalty_bits=float(secret_distribution.estimator.get("fast_screen_penalty_bits", 0.0)),
     )
     ring = ring_profile(n=n, q=q, family=request.ring_family)
     ntt = (
@@ -336,6 +349,7 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
         "This is an RLWE/LWE fast screen. It is not bound to a concrete scheme, so decryption error "
         "or rejection sampling times are not computed.",
     ]
+    lwr_profile = lwr_rounding_profile(error_distribution) if is_lwr_variant(request.hard_problem_variant) else None
     candidate = {
         "ring": {
             **ring,
@@ -357,12 +371,18 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
             "small_factor_weight": ntt["small_factor_weight"],
         },
         "distribution": {
-            "family": distribution.family,
-            "name": distribution.name,
-            "parameters": distribution.parameters,
-            "secret": distribution_profile(distribution),
-            "error": distribution_profile(distribution),
-            "estimator": distribution.estimator,
+            "family": distribution_pair_family(secret_distribution, error_distribution),
+            "name": distribution_pair_name(secret_distribution, error_distribution),
+            "parameters": {
+                "secret": secret_distribution.parameters,
+                "error": error_distribution.parameters,
+            },
+            "secret": distribution_profile(secret_distribution),
+            "error": distribution_profile(error_distribution),
+            "estimator": {
+                "secret": secret_distribution.estimator,
+                "error": error_distribution.estimator,
+            },
         },
         "security": security,
         "selection": {
@@ -375,15 +395,25 @@ def make_candidate(n: int, q: int, distribution: DistributionSpec, request: Requ
         },
         "warnings": warnings,
     }
+    if lwr_profile:
+        candidate["lwr"] = lwr_profile
     candidate["visual_scores"] = visual_scores_for_candidate(candidate, request)
     return candidate
 
 
+def distribution_pairs(n: int, request: RequestOptions) -> list[tuple[DistributionSpec, DistributionSpec]]:
+    secret_candidates = distribution_candidates(n, request)
+    if not is_lwr_variant(request.hard_problem_variant):
+        return [(distribution, distribution) for distribution in secret_candidates]
+    return [
+        (secret_distribution, error_distribution)
+        for secret_distribution in secret_candidates
+        for error_distribution in lwr_error_distribution_candidates()
+    ]
+
+
 def distribution_candidates(n: int, request: RequestOptions) -> list[DistributionSpec]:
     candidates: list[DistributionSpec] = []
-    if request.distribution == "uniform":
-        candidates.extend(uniform_spec(radius) for radius in UNIFORM_RADII)
-        return candidates
     if request.distribution in {"auto", "centered_binomial"}:
         candidates.extend(centered_binomial_spec(eta) for eta in ETA_VALUES)
     if request.distribution in {"auto", "sparse_ternary"}:
@@ -392,6 +422,10 @@ def distribution_candidates(n: int, request: RequestOptions) -> list[Distributio
             if spec.estimator["plus_weight"] >= 1 and spec.estimator["minus_weight"] >= 1:
                 candidates.append(spec)
     return candidates
+
+
+def lwr_error_distribution_candidates() -> list[DistributionSpec]:
+    return [uniform_spec(radius) for radius in UNIFORM_RADII]
 
 
 def centered_binomial_spec(eta: int) -> DistributionSpec:
@@ -470,6 +504,7 @@ def sparse_ternary_fast_screen_penalty_bits(probability_each: float) -> float:
 
 def distribution_profile(distribution: DistributionSpec) -> dict[str, Any]:
     return {
+        "family": distribution.family,
         "name": distribution.name,
         "mean": distribution.mean,
         "variance": round(distribution.variance, 9),
@@ -477,6 +512,32 @@ def distribution_profile(distribution: DistributionSpec) -> dict[str, Any]:
         "support": distribution.support,
         "symmetric": distribution.symmetric,
         "sampling": distribution.sampling,
+        "estimator": distribution.estimator,
+    }
+
+
+def distribution_pair_family(secret_distribution: DistributionSpec, error_distribution: DistributionSpec) -> str:
+    if secret_distribution.family == error_distribution.family:
+        return secret_distribution.family
+    return f"{secret_distribution.family} / {error_distribution.family}"
+
+
+def distribution_pair_name(secret_distribution: DistributionSpec, error_distribution: DistributionSpec) -> str:
+    if secret_distribution.name == error_distribution.name:
+        return secret_distribution.name
+    return f"Xs={secret_distribution.name}, Xe={error_distribution.name}"
+
+
+def lwr_rounding_profile(error_distribution: DistributionSpec) -> dict[str, Any]:
+    lower_bound = int(error_distribution.estimator["lower_bound"])
+    upper_bound = int(error_distribution.estimator["upper_bound"])
+    p = upper_bound - lower_bound + 1
+    return {
+        "p": p,
+        "rounding_modulus": p,
+        "error_distribution": error_distribution.name,
+        "error_support": [lower_bound, upper_bound],
+        "note": "p is derived from the uniform rounding-error support size.",
     }
 
 
@@ -586,10 +647,13 @@ def candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[
 def distribution_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[float, ...]:
     margin = security_margin_bits(candidate["security"], request)
     stddev = float(candidate["distribution"]["secret"]["stddev"])
-    family_rank = 0 if candidate["distribution"]["family"] == "sparse_ternary" else 1
+    error_stddev = float(candidate["distribution"]["error"]["stddev"])
+    family_rank = 0 if candidate["distribution"]["secret"].get("family") == "sparse_ternary" else 1
     overkill = max(0.0, margin)
     shortage = abs(min(0.0, margin)) * 10_000.0
-    return (shortage, overkill, stddev, family_rank)
+    if is_lwr_variant(request.hard_problem_variant):
+        return (shortage, error_stddev, overkill, stddev, family_rank)
+    return (shortage, overkill, error_stddev, stddev, family_rank)
 
 
 def visual_scores_for_candidate(candidate: dict[str, Any], request: RequestOptions) -> dict[str, Any]:
@@ -859,6 +923,12 @@ def ntt_search_strategy_text(request: RequestOptions) -> str:
     return f"prime q with {label} | q-1"
 
 
+def distribution_strategy_text(request: RequestOptions) -> str:
+    if is_lwr_variant(request.hard_problem_variant):
+        return "choose secret distribution after q; LWR rounding error is searched as a uniform distribution"
+    return "choose paired Xs = Xe distribution after q"
+
+
 def ntt_profile(n: int, q: int, factors: dict[int, int] | None = None, ring_family: str = "power2") -> dict[str, Any]:
     factors = factors or factor_integer(q - 1)
     two_adicity = factors.get(2, 0)
@@ -1056,6 +1126,8 @@ def run_sage_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any
         "n": candidate["ring"]["n"],
         "q": candidate["modulus"]["q"],
         "distribution": candidate["distribution"],
+        "secret_distribution": candidate["distribution"]["secret"],
+        "error_distribution": candidate["distribution"]["error"],
         "per_attack_timeout": max(3, min(90, config.estimator.per_attack_timeout_seconds or timeout // 2)),
     }
     if config.estimator.remote_url:

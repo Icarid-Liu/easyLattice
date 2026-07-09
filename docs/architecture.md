@@ -52,6 +52,11 @@ The provider may only return a small whitelist of constraint keys such as
 `targetSecurity`, `ringFamily`, `redCostModel`, `nttScalePower`, and
 `distribution`. Unsupported keys are dropped before search.
 
+For LWR, RLWR, and MLWR requests, `distribution` is interpreted as the secret
+distribution selector. The rounding-error distribution is generated
+deterministically as a symmetric uniform distribution, and the selected instance
+reports the corresponding LWR `p` derived from that support size.
+
 ## Secret Handling
 
 `config.local.json` is ignored by git. The public config endpoint never returns

@@ -89,12 +89,15 @@ def run_lwe(payload: dict) -> dict:
     q = int(payload["q"])
     distribution = payload["distribution"]
     per_attack_timeout = int(payload.get("per_attack_timeout", 8))
-    X = estimator_distribution(ND, distribution, n)
+    secret_distribution = payload.get("secret_distribution", distribution)
+    error_distribution = payload.get("error_distribution", distribution)
+    Xs = estimator_distribution(ND, secret_distribution, n)
+    Xe = estimator_distribution(ND, error_distribution, n)
     params = LWE.Parameters(
         n=n,
         q=q,
-        Xs=X,
-        Xe=X,
+        Xs=Xs,
+        Xe=Xe,
         m=n,
         tag=f"RLWE screen n={n}, q={q}, {distribution.get('name', distribution.get('family'))}",
     ).normalize()
@@ -141,7 +144,14 @@ def run_lwe(payload: dict) -> dict:
         "ok": ok,
         "estimator_commit": estimator_commit(),
         "modes": modes,
-        "parameters": {"n": n, "q": q, "distribution": distribution, "m": n},
+        "parameters": {
+            "n": n,
+            "q": q,
+            "distribution": distribution,
+            "secret_distribution": secret_distribution,
+            "error_distribution": error_distribution,
+            "m": n,
+        },
     }
 
 

@@ -12,6 +12,7 @@ from app.parameter_search import (
     parse_request,
     sparse_ternary_spec,
     uniform_spec,
+    lwr_rounding_profile,
     ring_dimensions,
 )
 from app.estimator_runner import estimator_distribution
@@ -104,14 +105,14 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(candidate["modulus"]["q"], 257)
         self.assertEqual(candidate["distribution"]["name"], "ST(l0=1, l1=0)")
 
-    def test_lwr_variants_force_uniform_distribution(self):
+    def test_lwr_variants_use_uniform_error_with_configurable_secret(self):
         request = parse_request({
             "hardProblemCategory": "LWE",
             "hardProblemVariant": "LWR",
             "distribution": "centered_binomial",
         })
 
-        self.assertEqual(request.distribution, "uniform")
+        self.assertEqual(request.distribution, "centered_binomial")
 
         result = recommend_rlwe({
             "hardProblemCategory": "LWE",
@@ -125,9 +126,13 @@ class ParameterSearchTests(unittest.TestCase):
         })
 
         candidate = result["recommendation"]
-        self.assertEqual(result["request"]["distribution"], "uniform")
-        self.assertEqual(candidate["distribution"]["family"], "uniform")
-        self.assertEqual(candidate["distribution"]["estimator"]["type"], "uniform")
+        self.assertEqual(result["request"]["distribution"], "sparse_ternary")
+        self.assertEqual(candidate["distribution"]["secret"]["family"], "sparse_ternary")
+        self.assertEqual(candidate["distribution"]["error"]["family"], "uniform")
+        self.assertEqual(candidate["distribution"]["error"]["estimator"]["type"], "uniform")
+        lower_bound, upper_bound = candidate["lwr"]["error_support"]
+        self.assertEqual(candidate["lwr"]["p"], upper_bound - lower_bound + 1)
+        self.assertEqual(candidate["lwr"]["p"] % 2, 1)
 
         with self.assertRaises(ValueError):
             parse_request({
@@ -135,6 +140,25 @@ class ParameterSearchTests(unittest.TestCase):
                 "hardProblemVariant": "LWE",
                 "distribution": "uniform",
             })
+
+    def test_lwr_auto_prefers_smallest_uniform_error_support(self):
+        result = recommend_rlwe({
+            "hardProblemCategory": "LWE",
+            "hardProblemVariant": "RLWR",
+            "targetSecurity": 128,
+            "securityModel": "min",
+            "redCostModel": "matzov",
+            "nttScalePower": 1,
+            "maxQBits": 24,
+            "distribution": "auto",
+        })
+
+        candidate = result["recommendation"]
+        self.assertEqual(candidate["ring"]["n"], 512)
+        self.assertEqual(candidate["modulus"]["q"], 257)
+        self.assertEqual(candidate["distribution"]["error"]["name"], "Uniform(-1,1)")
+        self.assertEqual(candidate["lwr"]["p"], 3)
+        self.assertTrue(candidate["selection"]["meets_target"])
 
     def test_uniform_distribution_uses_nd_uniform_estimator(self):
         spec = uniform_spec(2)
@@ -151,6 +175,12 @@ class ParameterSearchTests(unittest.TestCase):
             estimator_distribution(FakeND, {"estimator": spec.estimator}, 512),
             ("uniform", -2, 2),
         )
+
+    def test_lwr_p_comes_from_uniform_error_support_size(self):
+        profile = lwr_rounding_profile(uniform_spec(1))
+
+        self.assertEqual(profile["error_support"], [-1, 1])
+        self.assertEqual(profile["p"], 3)
 
     def test_remote_estimator_is_used_when_configured(self):
         result = recommend_rlwe({

@@ -190,6 +190,9 @@ def validate_payload(payload: dict[str, Any]) -> None:
             raise ValueError("ntru_type must be circulant or matrix")
         require_distribution(payload, "secret_distribution")
         require_distribution(payload, "error_distribution")
+    elif "secret_distribution" in payload or "error_distribution" in payload:
+        require_distribution(payload, "secret_distribution")
+        require_distribution(payload, "error_distribution")
     else:
         require_distribution(payload, "distribution")
 

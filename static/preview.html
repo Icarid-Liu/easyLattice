@@ -856,7 +856,6 @@
         ["centered_binomial", "Centered Binomial"],
         ["sparse_ternary", "Sparse Ternary"],
       ];
-      const LWR_DISTRIBUTION_OPTIONS = [["uniform", "Uniform"]];
       const HARD_PROBLEM_VARIANT_LABELS = {
         matrix: "matrix",
         ring: "ring",
@@ -927,7 +926,7 @@
         result.request.distribution = data.get("distribution") || "uniform";
         result.request.use_estimator = data.get("useEstimator") === "on";
         if (LWR_VARIANTS.has(hardProblem.variant)) {
-          result.recommendation.distribution = uniformDistribution(1);
+          applyLwrPreviewProfile(result.recommendation);
         }
         result.recommendation.selection.target_security = result.request.target_security;
         result.recommendation.selection.security_model = result.request.security_model;
@@ -964,7 +963,7 @@
         setMeter("#quantum-meter", candidate.security.quantum_bits, target);
         renderParameterProfile(candidate);
 
-        fillDefinitionList("#instance-list", [
+        const instanceRows = [
           ["Hard problem", formatHardProblem(result.request)],
           ["Family", candidate.ring.family],
           ["Ring", candidate.ring.quotient],
@@ -975,7 +974,11 @@
           ["NTT quality", `${candidate.modulus.ntt_quality}, remaining layers ${candidate.modulus.ntt_layers_remaining}`],
           ["Secret", distributionText(candidate.distribution.secret)],
           ["Error", distributionText(candidate.distribution.error)],
-        ]);
+        ];
+        if (candidate.lwr) {
+          instanceRows.push(["LWR p", String(candidate.lwr.p)]);
+        }
+        fillDefinitionList("#instance-list", instanceRows);
 
         fillDefinitionList("#security-list", [
           ["Source", candidate.security.source],
@@ -1130,9 +1133,7 @@
       }
 
       function syncDistributionOptions() {
-        const { variant } = selectedHardProblem();
-        const useUniform = LWR_VARIANTS.has(variant);
-        const options = useUniform ? LWR_DISTRIBUTION_OPTIONS : DEFAULT_DISTRIBUTION_OPTIONS;
+        const options = DEFAULT_DISTRIBUTION_OPTIONS;
         distributionSelect.replaceChildren(
           ...options.map(([value, label]) => {
             const option = document.createElement("option");
@@ -1142,7 +1143,7 @@
           }),
         );
         distributionSelect.value = options[0][0];
-        distributionSelect.disabled = useUniform;
+        distributionSelect.disabled = false;
       }
 
       function formatHardProblem(request) {
@@ -1367,6 +1368,31 @@
         };
       }
 
+      function applyLwrPreviewProfile(candidate) {
+        const uniform = uniformDistribution(1);
+        candidate.distribution = {
+          ...candidate.distribution,
+          family: `${candidate.distribution.secret.family || candidate.distribution.family} / uniform`,
+          name: `Xs=${candidate.distribution.secret.name}, Xe=${uniform.error.name}`,
+          parameters: {
+            secret: candidate.distribution.parameters,
+            error: uniform.parameters,
+          },
+          error: uniform.error,
+          estimator: {
+            secret: candidate.distribution.estimator,
+            error: uniform.estimator,
+          },
+        };
+        candidate.lwr = {
+          p: 3,
+          rounding_modulus: 3,
+          error_distribution: uniform.error.name,
+          error_support: [-1, 1],
+          note: "p is derived from the uniform rounding-error support size.",
+        };
+      }
+
       function makePower2Sample() {
         const st20 = sparseDistribution(
           "ST(l0=2, l1=0)",
@@ -1478,7 +1504,7 @@
             ],
           },
           next_question:
-            "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, the next step is to add scheme-specific constraints such as correctness, rejection rate, and smoothing parameters.",
+            "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, the next step is to add scheme-specific constraints such as correctness, rejection sampling times, and smoothing parameters.",
         };
       }
 
@@ -1593,7 +1619,7 @@
             ],
           },
           next_question:
-            "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, the next step is to add scheme-specific constraints such as correctness, rejection rate, and smoothing parameters.",
+            "Do you accept this RLWE instance? To bind it to a concrete encryption or signature scheme, the next step is to add scheme-specific constraints such as correctness, rejection sampling times, and smoothing parameters.",
         };
       }
 

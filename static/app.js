@@ -17,13 +17,11 @@ const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
 
 let lastResult = null;
-const LWR_VARIANTS = new Set(["lwr", "rlwr", "mlwr"]);
 const DEFAULT_DISTRIBUTION_OPTIONS = [
   ["auto", "Auto"],
   ["centered_binomial", "Centered Binomial"],
   ["sparse_ternary", "Sparse Ternary"],
 ];
-const LWR_DISTRIBUTION_OPTIONS = [["uniform", "Uniform"]];
 const HARD_PROBLEM_VARIANT_LABELS = {
   matrix: "matrix",
   ring: "ring",
@@ -130,7 +128,7 @@ function renderResult(result) {
   setMeter("#quantum-meter", candidate.security.quantum_bits, target);
   renderParameterProfile(candidate);
 
-  fillDefinitionList("#instance-list", [
+  const instanceRows = [
     ["Hard problem", formatHardProblem(result.request)],
     ["Family", candidate.ring.family],
     ["Ring", candidate.ring.quotient],
@@ -141,7 +139,11 @@ function renderResult(result) {
     ["NTT quality", `${candidate.modulus.ntt_quality}, remaining layers ${candidate.modulus.ntt_layers_remaining}`],
     ["Secret", distributionText(candidate.distribution.secret)],
     ["Error", distributionText(candidate.distribution.error)],
-  ]);
+  ];
+  if (candidate.lwr) {
+    instanceRows.push(["LWR p", String(candidate.lwr.p)]);
+  }
+  fillDefinitionList("#instance-list", instanceRows);
 
   fillDefinitionList("#security-list", [
     ["Agent", result.agent ? result.agent.name : "deterministic"],
@@ -227,9 +229,7 @@ function selectedHardProblem(data = new FormData(form)) {
 }
 
 function syncDistributionOptions() {
-  const { variant } = selectedHardProblem();
-  const useUniform = LWR_VARIANTS.has(variant);
-  const options = useUniform ? LWR_DISTRIBUTION_OPTIONS : DEFAULT_DISTRIBUTION_OPTIONS;
+  const options = DEFAULT_DISTRIBUTION_OPTIONS;
   distributionSelect.replaceChildren(
     ...options.map(([value, label]) => {
       const option = document.createElement("option");
@@ -239,7 +239,7 @@ function syncDistributionOptions() {
     }),
   );
   distributionSelect.value = options[0][0];
-  distributionSelect.disabled = useUniform;
+  distributionSelect.disabled = false;
 }
 
 function formatHardProblem(request) {

@@ -17,9 +17,11 @@ This first version focuses on a basic RLWE instance selector:
 - NTT-friendly prime modulus with `n | q - 1`; full splitting
   `2n | q - 1` is preferred, but leaving one NTT layer unresolved is treated as
   nearly as good;
-- centered binomial secret/error distributions;
-- iid sparse ternary secret/error distributions with fixed-weight estimator
-  approximation;
+- centered binomial and iid sparse ternary secret distributions;
+- paired centered binomial or iid sparse ternary error distributions for
+  LWE/RLWE/MLWE, with fixed-weight estimator approximation for sparse ternary;
+- uniform rounding-error distributions for LWR/RLWR/MLWR, reported with the
+  derived LWR modulus `p`;
 - fast local screening plus optional user-provided Sage/lattice-estimator validation;
 - a small web UI for interactive parameter search.
 
@@ -46,10 +48,11 @@ satisfying the chosen NTT scale, and only then chooses the secret/error
 distribution for that modulus. Within a fixed modulus it still avoids
 unnecessary security margin.
 
-The JSON output already separates `secret` and `error` distribution fields. The
-current prototype searches paired `Xs = Xe` distributions; independent `Xs, Xe`
-search is the next natural extension once scheme-specific correctness scripts
-are added.
+The JSON output separates `secret` and `error` distribution fields. For
+LWE/RLWE/MLWE the current prototype searches paired `Xs = Xe` distributions. For
+LWR/RLWR/MLWR, the distribution selector controls only the secret; the
+rounding-error distribution is always uniform, and each recommendation reports
+the corresponding LWR `p` as the size of the uniform error support.
 
 The basic monotonicity heuristic remembered by the selector is: smaller `q`
 usually increases LWE/RLWE hardness, larger dimension increases hardness, and
@@ -66,8 +69,8 @@ approximation in the JSON output.
 
 easyLattice is designed as a local tool, not a hosted service. Users bring their
 own estimator installation, optional model endpoint/API key, and later their
-own scheme-specific scripts such as decryption-error or smoothing-parameter
-calculators.
+own scheme-specific scripts such as decryption-error, rejection-sampling, or
+smoothing-parameter calculators.
 
 No API key is required for the default RLWE workflow. The LLM layer is disabled
 unless `llm.enabled=true` is set locally. When enabled, the model only converts
