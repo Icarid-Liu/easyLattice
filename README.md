@@ -171,16 +171,17 @@ The hosted UI does not expose a shared compute service. Download the release
 python3 easyLattice-runner.pyz
 ```
 
-The runner detects Sage and `lattice-estimator` from `SAGE_BINARY`,
-`LATTICE_ESTIMATOR_PATH`, the command path, and common local directories. It
-opens the public web UI automatically. Only when detection is incomplete does
-the UI ask for the Sage executable and estimator root paths. The estimator root
-must contain `estimator/__init__.py`.
+The runner listens on `127.0.0.1:8127`, detects Sage and `lattice-estimator`
+from `SAGE_BINARY`, `LATTICE_ESTIMATOR_PATH`, the command path, and common
+local directories. Open the normal GitHub Pages URL at any time; it detects a
+running runner automatically. Only when detection is incomplete does the UI
+ask for the Sage executable and estimator root paths. The estimator root must
+contain `estimator/__init__.py`; no API base URL or token needs to be copied.
 
 The runner listens only on `127.0.0.1`, uses a process-local random token, and
-accepts requests only from the public page origin or local development origins.
-It never uploads local paths, Sage output, estimator source, or API keys to the
-public site.
+allows the hosted page to obtain that token only through its exact configured
+origin. All subsequent API requests require the token. It never uploads local
+paths, Sage output, estimator source, or API keys to the public site.
 
 托管 UI 不提供共享计算服务。下载发布包中的 `easyLattice-runner.pyz`，用 Python
 3.10 或更高版本运行：
@@ -189,14 +190,15 @@ public site.
 python3 easyLattice-runner.pyz
 ```
 
-运行器会从 `SAGE_BINARY`、`LATTICE_ESTIMATOR_PATH`、命令路径及常见本地目录检测
-Sage 与 `lattice-estimator`，然后自动打开公开网页。只有自动检测不完整时，网页才会
-要求输入 Sage 可执行文件和 estimator 根目录；该根目录必须包含
-`estimator/__init__.py`。
+运行器固定监听 `127.0.0.1:8127`，并会从 `SAGE_BINARY`、
+`LATTICE_ESTIMATOR_PATH`、命令路径及常见本地目录检测 Sage 与
+`lattice-estimator`。之后直接打开普通 GitHub Pages 地址即可自动连接运行器。只有
+自动检测不完整时，网页才会要求输入 Sage 可执行文件和 estimator 根目录；该根目录必须
+包含 `estimator/__init__.py`，无需填写 API Base 或复制 token。
 
-运行器只监听 `127.0.0.1`，使用进程生命周期内有效的随机令牌，并且只接受公开网页
-源或本地开发源的请求。它不会将本地路径、Sage 输出、estimator 源码或 API key 上传到
-公开站点。
+运行器只监听 `127.0.0.1`，使用进程生命周期内有效的随机令牌。公开网页只能从精确
+配置的来源取得该令牌，之后的所有 API 请求仍需携带令牌。它不会将本地路径、Sage 输出、
+estimator 源码或 API key 上传到公开站点。
 
 For development builds from this checkout:
 

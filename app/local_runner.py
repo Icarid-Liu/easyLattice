@@ -29,6 +29,7 @@ from .decryption_failure import calculate_decryption_failure
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "static"
 DEFAULT_PUBLIC_URL = "https://icarid-liu.github.io/easyLattice/static/index.html"
+DEFAULT_RUNNER_PORT = 8127
 RUNNER_TOKEN_HEADER = "X-EasyLattice-Runner-Token"
 
 
@@ -156,6 +157,9 @@ class LocalRunnerState:
         parsed = urlparse(origin)
         return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
 
+    def is_bootstrap_origin(self, origin: str) -> bool:
+        return bool(origin) and origin in self.allowed_origins
+
     def close(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -181,6 +185,20 @@ def local_runner_handler(state: LocalRunnerState):
             parsed = urlparse(self.path)
             if parsed.path == "/api/health":
                 self.write_json({"ok": True, "runner": True})
+                return
+            if parsed.path == "/api/runner/connect":
+                if not state.is_bootstrap_origin(self.headers.get("Origin", "")):
+                    self.write_error(HTTPStatus.FORBIDDEN, "origin is not allowed to connect to the local runner")
+                    return
+                port = int(self.server.server_address[1])
+                self.write_json(
+                    {
+                        "ok": True,
+                        "api_base": f"http://127.0.0.1:{port}",
+                        "runner_token": state.token,
+                        "status": state.status(),
+                    }
+                )
                 return
             if parsed.path == "/api/runner/status":
                 if self.require_token():
@@ -389,16 +407,24 @@ def public_origin(public_url: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="easyLattice localhost runner")
-    parser.add_argument("--port", type=int, default=0, help="loopback port; 0 chooses a free port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_RUNNER_PORT,
+        help=f"loopback port; default {DEFAULT_RUNNER_PORT}, 0 chooses a free port",
+    )
     parser.add_argument("--public-url", default=os.environ.get("EASYLATTICE_PUBLIC_URL", DEFAULT_PUBLIC_URL))
     parser.add_argument("--allow-origin", action="append", default=[])
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
 
     state = LocalRunnerState(public_url=args.public_url, allowed_origins=set(args.allow_origin))
-    server = create_runner_server(state, port=max(0, args.port))
+    try:
+        server = create_runner_server(state, port=max(0, args.port))
+    except OSError as exc:
+        parser.error(f"could not listen on 127.0.0.1:{args.port}: {exc}")
     port = int(server.server_address[1])
-    page_url = runner_page_url(state.public_url, port, state.token)
+    page_url = state.public_url if port == DEFAULT_RUNNER_PORT else runner_page_url(state.public_url, port, state.token)
     print(f"easyLattice local runner listening on http://127.0.0.1:{port}")
     print(f"Open: {page_url}")
     if not args.no_browser:

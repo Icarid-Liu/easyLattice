@@ -54,8 +54,11 @@ leaving the deterministic fast path synchronous.
 `python3 easyLattice-runner.pyz` is a single-file distribution for users who do
 not want to clone the project or maintain `config.local.json`. It extracts its
 bundled application and static assets to a versioned user cache, detects local
-Sage and `lattice-estimator`, starts an HTTP server on `127.0.0.1`, then opens
-the hosted UI with the loopback API base and a process-local token in the URL.
+Sage and `lattice-estimator`, and listens on the fixed loopback port `8127`.
+The normal hosted-page URL bootstraps that connection from the exact configured
+origin and receives the process-local token only in memory. The runner opens
+the same clean URL by default; a non-default port retains legacy URL parameters
+for explicit compatibility.
 
 The public UI sends that token in `X-EasyLattice-Runner-Token`. The runner only
 exposes its fixed configuration, recommendation, job polling, and DFR routes;
