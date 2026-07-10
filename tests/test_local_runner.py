@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from app.server import EasyLatticeHandler
 from app.local_runner import (
+    DEFAULT_RUNNER_PORT,
     RUNNER_TOKEN_HEADER,
     LocalRunnerState,
     RunnerJob,
@@ -133,6 +134,56 @@ class LocalRunnerTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 state.close()
+
+    def test_public_origin_can_bootstrap_the_runner_connection(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            estimator = root / "estimator"
+            estimator.mkdir()
+            (estimator / "__init__.py").write_text("", encoding="utf-8")
+            state = LocalRunnerState(sage_binary=sys.executable, lattice_estimator_path=str(root))
+            server = create_runner_server(state)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+            try:
+                connection.request("GET", "/api/runner/connect")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+
+                connection.request(
+                    "GET",
+                    "/api/runner/connect",
+                    headers={"Origin": "https://icarid-liu.github.io"},
+                )
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(response.status, 200)
+                self.assertEqual(payload["api_base"], f"http://127.0.0.1:{server.server_address[1]}")
+                self.assertEqual(payload["runner_token"], state.token)
+                self.assertTrue(payload["status"]["configured"])
+                self.assertEqual(
+                    response.headers["Access-Control-Allow-Origin"],
+                    "https://icarid-liu.github.io",
+                )
+
+                connection.request(
+                    "GET",
+                    "/api/runner/connect",
+                    headers={"Origin": "https://example.invalid"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+            finally:
+                connection.close()
+                server.shutdown()
+                server.server_close()
+                state.close()
+
+    def test_default_runner_port_is_stable(self):
+        self.assertEqual(DEFAULT_RUNNER_PORT, 8127)
 
     def test_runner_url_preserves_public_url_and_uses_loopback_api(self):
         page = runner_page_url(
