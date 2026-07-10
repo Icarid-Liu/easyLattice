@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .compression_noise import compression_noise_profile
-from .config import load_config
+from .config import AppConfig, load_config
 from .remote_estimator import estimate_remotely
 
 
@@ -101,9 +101,10 @@ class DistributionSpec:
     estimator: dict[str, Any]
 
 
-def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
     """Return an RLWE recommendation and a small list of alternatives."""
-    request = parse_request(raw or {})
+    config = config or load_config()
+    request = parse_request(raw or {}, config=config)
     started = time.perf_counter()
 
     raw_candidates = build_candidates(request)
@@ -133,7 +134,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
             if attempts >= max_validation_attempts:
                 break
             attempts += 1
-            result = run_sage_estimator(candidate, request.estimator_timeout)
+            result = run_sage_estimator(candidate, request.estimator_timeout, config=config)
             estimator_result["validated"].append(result)
             if result.get("ok"):
                 apply_estimator_result(candidate, result, request)
@@ -184,7 +185,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def parse_request(raw: dict[str, Any]) -> RequestOptions:
+def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> RequestOptions:
     target = int(raw.get("target_security", raw.get("targetSecurity", 128)))
     if target < 40 or target > 512:
         raise ValueError("target_security must be between 40 and 512 bits.")
@@ -240,7 +241,7 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
 
     estimator_timeout = raw.get(
         "estimator_timeout",
-        raw.get("estimatorTimeout", load_config().estimator.default_timeout_seconds),
+        raw.get("estimatorTimeout", (config or load_config()).estimator.default_timeout_seconds),
     )
     validation_count = max(1, min(12, int(raw.get("validation_count", raw.get("validationCount", 1)))))
     validation_attempts = raw.get(
@@ -1240,8 +1241,12 @@ def format_factorization(factors: dict[int, int]) -> str:
     return " * ".join(pieces)
 
 
-def run_sage_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any]:
-    config = load_config()
+def run_sage_estimator(
+    candidate: dict[str, Any],
+    timeout: int,
+    config: AppConfig | None = None,
+) -> dict[str, Any]:
+    config = config or load_config()
     payload = {
         "problem": "lwe",
         "n": candidate["ring"]["n"],

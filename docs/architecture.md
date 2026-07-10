@@ -19,8 +19,11 @@ not part of the security calculation.
    LWE correctness expressions. It converts estimator-style distribution
    descriptors into finite `value -> probability` maps without modifying the
    third-party estimator.
-6. `app.server`: HTTP routing and static UI serving.
-7. `static`: browser UI. The LLM checkbox is disabled unless public config says
+6. `app.server`: HTTP routing and static UI serving for a local checkout.
+7. `app.local_runner`: token-protected loopback companion that detects local
+   Sage/estimator paths, constructs an in-memory `AppConfig`, and serves the
+   same fixed API boundary to the public browser UI.
+8. `static`: browser UI. The LLM checkbox is disabled unless public config says
    the local LLM provider is enabled and authenticated.
 
 ## Default Path
@@ -44,6 +47,26 @@ When `useEstimator=true`, the browser submits the same request to
 `POST /api/agent/jobs` and polls `GET /api/agent/jobs/{job_id}`. This keeps
 3-5 minute Sage/lattice-estimator runs off a single long browser request while
 leaving the deterministic fast path synchronous.
+
+## Public UI with Local Runner
+
+`python3 easyLattice-runner.pyz` is a single-file distribution for users who do
+not want to clone the project or maintain `config.local.json`. It extracts its
+bundled application and static assets to a versioned user cache, detects local
+Sage and `lattice-estimator`, starts an HTTP server on `127.0.0.1`, then opens
+the hosted UI with the loopback API base and a process-local token in the URL.
+
+The public UI sends that token in `X-EasyLattice-Runner-Token`. The runner only
+exposes its fixed configuration, recommendation, job polling, and DFR routes;
+it does not provide a command execution or arbitrary file API. CORS accepts the
+configured public UI origin and local development origins only. Each accepted
+recommendation job stores the runner's in-memory `AppConfig`, so local paths do
+not leak into or depend on repository configuration files.
+
+When Sage or the estimator root cannot be detected, `GET /api/runner/status`
+marks the runner incomplete. The public UI then submits only the two explicit
+paths to `POST /api/runner/configure`; Sage must resolve to an executable and
+the estimator root must contain `estimator/__init__.py`.
 
 ## Decryption Failure Path
 

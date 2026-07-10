@@ -11,7 +11,7 @@ from itertools import combinations_with_replacement
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .config import AppConfig, load_config
 from .parameter_search import (
     NTT_UNFRIENDLY_SCALE_POWER,
     compactness_profile,
@@ -65,8 +65,9 @@ class NTRUCandidateSpec:
     calibration: dict[str, Any] | None = None
 
 
-def recommend_ntru(raw: dict[str, Any] | None = None) -> dict[str, Any]:
-    request = parse_ntru_request(raw or {})
+def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
+    config = config or load_config()
+    request = parse_ntru_request(raw or {}, config=config)
     started = time.perf_counter()
     specs = ntru_candidate_specs(request)
     if not specs:
@@ -80,7 +81,7 @@ def recommend_ntru(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         estimator_result = {"ok": True, "validated": []}
         validated = []
         for candidate in sorted(candidates, key=lambda c: candidate_rank(c, request))[: request.validation_attempts]:
-            result = run_ntru_estimator(candidate, request.estimator_timeout)
+            result = run_ntru_estimator(candidate, request.estimator_timeout, config=config)
             estimator_result["validated"].append(result)
             if result.get("ok"):
                 apply_ntru_estimator_result(candidate, result, request)
@@ -124,7 +125,7 @@ def recommend_ntru(raw: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def parse_ntru_request(raw: dict[str, Any]) -> NTRURequest:
+def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> NTRURequest:
     target = int(raw.get("target_security", raw.get("targetSecurity", 128)))
     if target < 40 or target > 512:
         raise ValueError("target_security must be between 40 and 512 bits.")
@@ -144,7 +145,7 @@ def parse_ntru_request(raw: dict[str, Any]) -> NTRURequest:
     ntt_scale_power = int(raw.get("ntt_scale_power", raw.get("nttScalePower", 1)))
     if ntt_scale_power < -1 or ntt_scale_power > NTT_UNFRIENDLY_SCALE_POWER:
         raise ValueError("ntt_scale_power must be between -1 and 6.")
-    config = load_config()
+    config = config or load_config()
     estimator_timeout = int(
         raw.get(
             "estimator_timeout",
@@ -421,8 +422,12 @@ def candidate_rank(candidate: dict[str, Any], request: NTRURequest) -> tuple[flo
     return rank
 
 
-def run_ntru_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any]:
-    config = load_config()
+def run_ntru_estimator(
+    candidate: dict[str, Any],
+    timeout: int,
+    config: AppConfig | None = None,
+) -> dict[str, Any]:
+    config = config or load_config()
     payload = {
         "problem": "ntru",
         "n": candidate["ring"]["n"],

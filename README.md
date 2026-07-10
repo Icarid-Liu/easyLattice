@@ -6,13 +6,16 @@ Local-first, open-source prototype for lattice-crypto parameter selection.
 
 面向格密码参数选择的本地优先、开源原型工具。
 
-The public GitHub Pages site is a static example. It does not run a backend,
-call an LLM, call Sage, or call `lattice-estimator`. Dynamic estimation is
-available only when you run the local service or deploy your own backend.
+The public GitHub Pages site is a browser UI. Opened normally, it has no
+backend and does not call an LLM, Sage, or `lattice-estimator`. Run the single
+local companion below and it opens the same public UI connected only to your
+loopback machine, so live calculations use your local Sage and estimator
+without cloning this repository or editing `config.local.json`.
 
-公开的 GitHub Pages 页面只是静态示例。它不会运行后端、调用 LLM、调用
-Sage，也不会调用 `lattice-estimator`。动态估计只在你运行本地服务或部署自己
-的后端时可用。
+公开的 GitHub Pages 页面是浏览器 UI。直接打开时它没有后端，不会调用 LLM、Sage
+或 `lattice-estimator`。运行下面的单文件本地运行器后，它会打开同一个公开 UI，
+并且只连接你的本机回环地址；因此实时计算使用你的本地 Sage 和 estimator，
+无需 clone 本仓库或编辑 `config.local.json`。
 
 ## Overview
 
@@ -154,14 +157,55 @@ still come from the fixed local search logic and optional estimator validation.
 默认关闭。启用后，模型只把自由文本意图转换为确定性搜索约束；最终参数仍由
 固定的本地搜索逻辑和可选 estimator 验证产生。
 
-## Public Static Example
+## Public Web and Local Runner
 
-The hosted GitHub Pages version is intentionally static. It demonstrates the UI
-and fixed example outputs for this prototype, but all values should be treated
-as examples rather than live parameter certification.
+The hosted UI does not expose a shared compute service. Download the release
+`easyLattice-runner.pyz` and run it with Python 3.10 or later:
 
-托管的 GitHub Pages 版本是有意做成静态页面的。它展示 UI 和固定示例输出，
-但所有数值都应视为示例，而不是实时参数认证。
+```bash
+python3 easyLattice-runner.pyz
+```
+
+The runner detects Sage and `lattice-estimator` from `SAGE_BINARY`,
+`LATTICE_ESTIMATOR_PATH`, the command path, and common local directories. It
+opens the public web UI automatically. Only when detection is incomplete does
+the UI ask for the Sage executable and estimator root paths. The estimator root
+must contain `estimator/__init__.py`.
+
+The runner listens only on `127.0.0.1`, uses a process-local random token, and
+accepts requests only from the public page origin or local development origins.
+It never uploads local paths, Sage output, estimator source, or API keys to the
+public site.
+
+托管 UI 不提供共享计算服务。下载发布包中的 `easyLattice-runner.pyz`，用 Python
+3.10 或更高版本运行：
+
+```bash
+python3 easyLattice-runner.pyz
+```
+
+运行器会从 `SAGE_BINARY`、`LATTICE_ESTIMATOR_PATH`、命令路径及常见本地目录检测
+Sage 与 `lattice-estimator`，然后自动打开公开网页。只有自动检测不完整时，网页才会
+要求输入 Sage 可执行文件和 estimator 根目录；该根目录必须包含
+`estimator/__init__.py`。
+
+运行器只监听 `127.0.0.1`，使用进程生命周期内有效的随机令牌，并且只接受公开网页
+源或本地开发源的请求。它不会将本地路径、Sage 输出、estimator 源码或 API key 上传到
+公开站点。
+
+For development builds from this checkout:
+
+对于从本仓库构建开发版：
+
+```bash
+python3 scripts/build-runner.py
+python3 dist/easyLattice-runner.pyz
+```
+
+The table below records representative prototype settings. Use the local runner
+for live output; none of the displayed values is a parameter certification.
+
+下表记录原型中的代表性设置。实时结果请使用本地运行器；展示数值均不构成参数认证。
 
 The table below fixes the controls to:
 
@@ -237,7 +281,7 @@ DFR；原始概率通过 API 和复制 JSON 中的显式字段保留，供外部
 该计算器刻意不建模纠错码。LAC、DAWN 等带编码的方案应把纠错前输出交给具体方案
 的纠错概率脚本。
 
-## Run
+## Local Checkout
 
 For a fresh local checkout, the simplest path is:
 

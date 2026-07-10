@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easyLattice Lattice Parameter Assistant</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -28,6 +28,27 @@
           <small id="config-llm"></small>
           <small id="config-estimator"></small>
         </div>
+
+        <section id="runner-panel" class="runner-panel hidden">
+          <div class="runner-heading">
+            <span data-i18n="localRunner">Local runner</span>
+            <strong id="runner-status"></strong>
+          </div>
+          <form id="runner-config-form" class="runner-form">
+            <div id="runner-path-fields" class="runner-path-fields hidden">
+              <label>
+                <span data-i18n="sagePath">Sage path</span>
+                <input id="runner-sage-path" name="sageBinary" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span data-i18n="estimatorPath">Estimator path</span>
+                <input id="runner-estimator-path" name="latticeEstimatorPath" type="text" autocomplete="off" />
+              </label>
+              <button id="runner-save" type="submit" class="secondary-button" data-i18n="saveRunnerPaths">Save paths</button>
+            </div>
+            <button id="runner-change" type="button" class="secondary-button hidden" data-i18n="changeRunnerPaths">Change paths</button>
+          </form>
+        </section>
 
         <fieldset class="workspace-mode">
           <legend data-i18n="workspace">Workspace</legend>
@@ -323,6 +344,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>
