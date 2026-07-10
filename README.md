@@ -83,8 +83,8 @@ search constraints.
 ## Public Preview and Local Running
 
 [GitHub Pages](https://icarid-liu.github.io/easyLattice/) is a static preview
-of the interface. It is intended for inspection only and does not run a shared
-backend.
+of the interface. It includes illustrative security, NTRU DFR, and LWE DFR
+fixtures for inspection only; it does not run a shared backend.
 
 For live parameter search and DFR calculation, clone the repository and start
 the local service:

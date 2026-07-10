@@ -126,7 +126,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self.serve_file(STATIC_ROOT / "index.html")
             return
-        if parsed.path in ("/app.js", "/styles.css"):
+        if parsed.path in ("/app.js", "/preview-data.js", "/styles.css"):
             self.serve_file(STATIC_ROOT / parsed.path.lstrip("/"))
             return
         if parsed.path.startswith("/static/"):

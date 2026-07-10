@@ -13,7 +13,12 @@ class ServerTests(unittest.TestCase):
         thread.start()
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
         try:
-            for path, expected_type in (("/", "text/html"), ("/styles.css", "text/css"), ("/app.js", "javascript")):
+            for path, expected_type in (
+                ("/", "text/html"),
+                ("/styles.css", "text/css"),
+                ("/app.js", "javascript"),
+                ("/preview-data.js", "javascript"),
+            ):
                 connection.request("GET", path)
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200, path)

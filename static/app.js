@@ -30,6 +30,9 @@ let lastDfrResult = null;
 let publicConfig = null;
 let currentLanguage = supportedLanguage(localStorage.getItem("easyLatticeLanguage") || navigator.language || "en");
 let activeWorkspace = "search";
+let renderedDfrType = null;
+const PREVIEW_MODE = new URLSearchParams(window.location.search).get("preview") === "1"
+  && Boolean(window.EASYLATTICE_PREVIEW_FIXTURES);
 const DEFAULT_DISTRIBUTION_OPTIONS = [
   ["auto", "distributionAuto"],
   ["centered_binomial", "centeredBinomial"],
@@ -409,13 +412,13 @@ syncWorkspace();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!hasLiveApi()) return;
+  if (!hasLiveApi() && !PREVIEW_MODE) return;
   await requestRecommendation();
 });
 
 dfrForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!hasLiveApi()) return;
+  if (!hasLiveApi() && !PREVIEW_MODE) return;
   await requestDfr();
 });
 
@@ -501,9 +504,11 @@ async function requestRecommendation() {
   };
 
   try {
-    const result = useEstimator
-      ? await requestRecommendationJob(payload)
-      : await postJson("/api/agent/recommend", payload);
+    const result = PREVIEW_MODE
+      ? previewRecommendation(payload)
+      : useEstimator
+        ? await requestRecommendationJob(payload)
+        : await postJson("/api/agent/recommend", payload);
     lastResult = result;
     if (activeWorkspace === "search") {
       renderResult(result);
@@ -524,7 +529,9 @@ async function requestDfr() {
   subtitle.textContent = t("dfrCalculatingSubtitle");
 
   try {
-    const result = await postJson("/api/decryption-failure/calculate", buildDfrPayload());
+    const result = PREVIEW_MODE
+      ? previewDfrResult(selectedDfrType())
+      : await postJson("/api/decryption-failure/calculate", buildDfrPayload());
     lastDfrResult = result;
     renderDfrResult(result);
     setStatus("done", t("statusReady"));
@@ -862,7 +869,12 @@ function syncDfrForm() {
   const type = selectedDfrType();
   dfrNtruFields.classList.toggle("hidden", type !== "ntru");
   dfrLweFields.classList.toggle("hidden", type !== "lwe");
-  renderDfrDistributionEditors();
+  renderDfrDistributionEditors(PREVIEW_MODE && renderedDfrType !== null && renderedDfrType !== type);
+  if (PREVIEW_MODE) {
+    lastDfrResult = previewDfrResult(type);
+    if (activeWorkspace === "dfr") renderDfrResult(lastDfrResult);
+    return;
+  }
   if (activeWorkspace === "dfr" && !lastDfrResult) {
     setDfrIdleHeading();
   }
@@ -872,12 +884,13 @@ function selectedDfrType() {
   return document.querySelector('input[name="dfrType"]:checked')?.value || "lwe";
 }
 
-function renderDfrDistributionEditors() {
-  const previous = dfrDistributionState();
+function renderDfrDistributionEditors(useDefaults = false) {
+  const previous = useDefaults ? {} : dfrDistributionState();
   const type = selectedDfrType();
   dfrDistributionEditors.replaceChildren(
     ...DFR_FIELDS[type].map((name) => createDfrDistributionEditor(name, previous[name], type)),
   );
+  renderedDfrType = type;
 }
 
 function dfrDistributionState() {
@@ -1132,8 +1145,24 @@ function apiHeaders(headers = {}) {
   return headers;
 }
 
+function previewFixtures() {
+  return window.EASYLATTICE_PREVIEW_FIXTURES;
+}
+
+function previewRecommendation(payload) {
+  const fixture = previewFixtures();
+  if (!fixture?.recommendation) throw new Error("preview recommendation data is unavailable");
+  return fixture.recommendation(payload);
+}
+
+function previewDfrResult(type) {
+  const fixture = previewFixtures()?.dfr?.[type];
+  if (!fixture) throw new Error(`preview ${type} DFR data is unavailable`);
+  return JSON.parse(JSON.stringify(fixture));
+}
+
 function hasLiveApi() {
-  return window.location.protocol !== "file:" && window.location.hostname !== "icarid-liu.github.io";
+  return !PREVIEW_MODE && window.location.protocol !== "file:" && window.location.hostname !== "icarid-liu.github.io";
 }
 
 function sleep(ms) {
@@ -1163,6 +1192,11 @@ function updateNttScaleLabel() {
 void initializeApp();
 
 async function initializeApp() {
+  if (PREVIEW_MODE) {
+    await loadPublicConfig();
+    await requestRecommendation();
+    return;
+  }
   if (!hasLiveApi()) {
     setStatus("idle", t("statusIdle"));
     return;
@@ -1173,7 +1207,7 @@ async function initializeApp() {
 
 async function loadPublicConfig() {
   try {
-    const config = await getJson("/api/config/public");
+    const config = PREVIEW_MODE ? previewFixtures().config : await getJson("/api/config/public");
     publicConfig = config;
     renderPublicConfig(config);
     useLLM.disabled = !config.llm.configured;

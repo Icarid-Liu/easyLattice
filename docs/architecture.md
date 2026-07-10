@@ -48,8 +48,9 @@ leaving the deterministic fast path synchronous.
 
 ## Public Preview and Local Server
 
-GitHub Pages serves `static/preview.html` as a static interface preview. It has
-no compute API and does not access local software.
+GitHub Pages serves `static/index.html?preview=1` as a static interface preview.
+It uses built-in security and NTRU/LWE DFR fixtures, has no compute API, and
+does not access local software.
 
 Live interaction starts from a local checkout with:
 

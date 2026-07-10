@@ -69,8 +69,8 @@ endpoint/API key，以及具体方案所需的纠错、拒绝采样或 smoothing
 
 ## 公开预览与本地运行
 
-[GitHub Pages](https://icarid-liu.github.io/easyLattice/) 只用于静态展示界面，不提供
-共享后端。
+[GitHub Pages](https://icarid-liu.github.io/easyLattice/) 只用于静态展示界面，提供
+安全评估、NTRU DFR 和 LWE DFR 的示例数据，不提供共享后端。
 
 如需实时参数搜索和 DFR 计算，请 clone 本仓库并启动本地服务：
 
