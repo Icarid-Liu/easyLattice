@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>easyLattice Lattice Parameter Assistant</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -13,22 +13,55 @@
           <div class="brand-mark">A</div>
           <div>
             <h1>easyLattice</h1>
-            <p>Local lattice parameter assistant</p>
+            <p data-i18n="brandSubtitle">Local lattice parameter assistant</p>
           </div>
+          <select id="language-select" class="language-select" aria-label="Language">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
         </div>
 
         <div id="config-panel" class="config-panel">
-          <span>Local configuration</span>
-          <strong id="config-source">defaults</strong>
-          <small id="config-agent">agent: deterministic</small>
-          <small id="config-llm">llm: disabled</small>
-          <small id="config-estimator">estimator: sage</small>
+          <span data-i18n="localConfiguration">Local configuration</span>
+          <strong id="config-source" data-i18n="defaults">defaults</strong>
+          <small id="config-agent"></small>
+          <small id="config-llm"></small>
+          <small id="config-estimator"></small>
         </div>
+
+        <section id="runner-panel" class="runner-panel hidden">
+          <div class="runner-heading">
+            <span data-i18n="localRunner">Local runner</span>
+            <strong id="runner-status"></strong>
+          </div>
+          <form id="runner-config-form" class="runner-form">
+            <div id="runner-path-fields" class="runner-path-fields hidden">
+              <label>
+                <span data-i18n="sagePath">Sage path</span>
+                <input id="runner-sage-path" name="sageBinary" type="text" autocomplete="off" />
+              </label>
+              <label>
+                <span data-i18n="estimatorPath">Estimator path</span>
+                <input id="runner-estimator-path" name="latticeEstimatorPath" type="text" autocomplete="off" />
+              </label>
+              <button id="runner-save" type="submit" class="secondary-button" data-i18n="saveRunnerPaths">Save paths</button>
+            </div>
+            <button id="runner-change" type="button" class="secondary-button hidden" data-i18n="changeRunnerPaths">Change paths</button>
+          </form>
+        </section>
+
+        <fieldset class="workspace-mode">
+          <legend data-i18n="workspace">Workspace</legend>
+          <div class="segmented">
+            <label><input type="radio" name="workspaceMode" value="search" checked /><span data-i18n="parameterSearch">Parameter search</span></label>
+            <label><input type="radio" name="workspaceMode" value="dfr" /><span data-i18n="decryptionFailure">Decryption failure</span></label>
+          </div>
+        </fieldset>
 
         <form id="parameter-form" class="form-stack">
           <fieldset class="hard-problem-fieldset">
-            <legend>Underlying hard problem</legend>
-            <div class="problem-groups" role="radiogroup" aria-label="Underlying hard problem">
+            <legend data-i18n="underlyingHardProblem">Underlying hard problem</legend>
+            <div class="problem-groups" role="radiogroup" aria-label="Underlying hard problem" data-i18n-aria-label="underlyingHardProblem">
               <div class="problem-group">
                 <strong>NTRU</strong>
                 <div class="problem-options">
@@ -58,7 +91,7 @@
           </fieldset>
 
           <label>
-            <span>Polynomial form</span>
+            <span data-i18n="polynomialForm">Polynomial form</span>
             <select id="ring-family" name="ringFamily">
               <option value="power2">x^n + 1</option>
               <option value="ternary">x^n - x^(n/2) + 1</option>
@@ -66,20 +99,20 @@
           </label>
 
           <label>
-            <span>Target security bits</span>
+            <span data-i18n="targetSecurityBits">Target security bits</span>
             <input id="target-security" name="targetSecurity" type="number" min="40" max="512" step="1" value="128" />
           </label>
 
           <fieldset>
-            <legend>Security metric</legend>
+            <legend data-i18n="securityMetric">Security metric</legend>
             <div class="segmented">
-              <label><input type="radio" name="securityModel" value="classical" checked /><span>Classical</span></label>
-              <label><input type="radio" name="securityModel" value="quantum" /><span>Quantum</span></label>
+              <label><input type="radio" name="securityModel" value="classical" checked /><span data-i18n="classical">Classical</span></label>
+              <label><input type="radio" name="securityModel" value="quantum" /><span data-i18n="quantum">Quantum</span></label>
             </div>
           </fieldset>
 
           <label>
-            <span>Reduction cost model</span>
+            <span data-i18n="reductionCostModel">Reduction cost model</span>
             <select id="red-cost-model" name="redCostModel">
               <option value="matzov">MATZOV</option>
               <option value="adps16">ADPS16 / CoreSVP</option>
@@ -92,18 +125,27 @@
           </label>
 
           <label>
-            <span>Minimum modulus bits</span>
+            <span data-i18n="minimumModulusBits">Minimum modulus bits</span>
             <input id="min-q-bits" name="minQBits" type="number" min="2" max="63" step="1" value="2" />
           </label>
 
           <label>
-            <span>Maximum modulus bits</span>
+            <span data-i18n="maximumModulusBits">Maximum modulus bits</span>
             <input id="max-q-bits" name="maxQBits" type="number" min="12" max="63" step="1" value="24" />
           </label>
 
           <label>
-            <span>Distribution</span>
-            <select id="distribution" name="distribution">
+            <span data-i18n="secretDistribution">Secret distribution</span>
+            <select id="secret-distribution" name="secretDistribution">
+              <option value="auto">Auto</option>
+              <option value="centered_binomial">Centered Binomial</option>
+              <option value="sparse_ternary">Sparse Ternary</option>
+            </select>
+          </label>
+
+          <label>
+            <span id="error-distribution-label" data-i18n="errorDistribution">Error distribution</span>
+            <select id="error-distribution" name="errorDistribution">
               <option value="auto">Auto</option>
               <option value="centered_binomial">Centered Binomial</option>
               <option value="sparse_ternary">Sparse Ternary</option>
@@ -112,27 +154,72 @@
 
           <label class="check-row">
             <input id="use-estimator" name="useEstimator" type="checkbox" />
-            <span>Refine with Sage estimator</span>
+            <span data-i18n="refineWithSage">Refine with Sage estimator</span>
           </label>
 
           <label>
-            <span>Natural-language constraints</span>
+            <span data-i18n="naturalLanguageConstraints">Natural-language constraints</span>
             <textarea
               id="intent"
               name="intent"
               rows="4"
               placeholder="Example: 128-bit MATZOV, ternary cyclotomic ring, prefer n/2 NTT scale, smallest possible modulus"
+              data-i18n-placeholder="intentPlaceholder"
             ></textarea>
           </label>
 
           <label class="check-row">
             <input id="use-llm" name="useLLM" type="checkbox" disabled />
-            <span>Use the locally configured LLM to parse constraints</span>
+            <span data-i18n="useConfiguredLlm">Use the locally configured LLM to parse constraints</span>
           </label>
 
           <button class="primary-button" type="submit">
             <span class="button-icon">↻</span>
-            Generate recommendation
+            <span data-i18n="generateRecommendation">Generate recommendation</span>
+          </button>
+        </form>
+
+        <form id="dfr-form" class="form-stack hidden">
+          <fieldset>
+            <legend data-i18n="decryptionFailureType">Calculator type</legend>
+            <div class="segmented">
+              <label><input type="radio" name="dfrType" value="ntru" /><span>NTRU</span></label>
+              <label><input type="radio" name="dfrType" value="lwe" checked /><span>LWE</span></label>
+            </div>
+          </fieldset>
+
+          <div id="dfr-ntru-fields" class="dfr-input-group hidden">
+            <div class="dfr-field-grid">
+              <label><span data-i18n="ringDimensionN">Ring dimension n</span><input name="dfrNtruN" type="number" min="1" step="1" value="509" /></label>
+              <label><span>Delta</span><input name="dfrNtruDelta" type="text" value="1024" /></label>
+              <label><span>p0</span><input name="dfrP0" type="text" value="3" /></label>
+              <label><span>p1</span><input name="dfrP1" type="text" value="0" /></label>
+              <label><span>p2</span><input name="dfrP2" type="text" value="1" /></label>
+              <label><span>p3</span><input name="dfrP3" type="text" value="0" /></label>
+            </div>
+          </div>
+
+          <div id="dfr-lwe-fields" class="dfr-input-group">
+            <div class="dfr-field-grid">
+              <label><span data-i18n="productDimensionM">Product dimension m</span><input name="dfrLweM" type="number" min="1" step="1" value="512" /></label>
+              <label><span data-i18n="outputDimensionN">Output dimension n</span><input name="dfrLweN" type="number" min="1" step="1" value="256" /></label>
+              <label><span>Delta</span><input name="dfrLweDelta" type="text" value="832" /></label>
+            </div>
+          </div>
+
+          <div class="dfr-field-grid">
+            <label><span data-i18n="workingPrecision">Working precision (bits)</span><input name="dfrPrecisionBits" type="number" min="64" max="4096" step="1" value="512" /></label>
+            <label><span data-i18n="tailBits">Gaussian tail bits</span><input name="dfrTailBits" type="number" min="1" max="1024" step="1" value="128" /></label>
+          </div>
+
+          <section class="dfr-distribution-section">
+            <h2 data-i18n="distributions">Distributions</h2>
+            <div id="dfr-distribution-editors" class="dfr-distribution-editors"></div>
+          </section>
+
+          <button class="primary-button" type="submit">
+            <span class="button-icon">=</span>
+            <span data-i18n="calculateDfr">Calculate DFR</span>
           </button>
         </form>
       </aside>
@@ -140,46 +227,48 @@
       <main class="workspace">
         <section class="top-strip">
           <div>
-            <h2 id="summary-title">Waiting for input</h2>
-            <p id="summary-subtitle">Choose a target to generate a lattice instance.</p>
+            <h2 id="summary-title" data-i18n="waitingForInput">Waiting for input</h2>
+            <p id="summary-subtitle" data-i18n="chooseTarget">Choose a target to generate a lattice instance.</p>
           </div>
-          <div id="status-pill" class="status-pill idle">Idle</div>
+          <div id="status-pill" class="status-pill idle" data-i18n="statusIdle">Idle</div>
         </section>
 
+        <div id="search-results">
         <section id="result-grid" class="result-grid hidden">
           <div class="metric-panel">
-            <span>Classical security</span>
+            <span data-i18n="classicalSecurity">Classical security</span>
             <strong id="classic-bits">-</strong>
             <div class="meter"><div id="classic-meter"></div></div>
           </div>
           <div class="metric-panel">
-            <span>Quantum security</span>
+            <span data-i18n="quantumSecurity">Quantum security</span>
             <strong id="quantum-bits">-</strong>
             <div class="meter"><div id="quantum-meter"></div></div>
           </div>
           <div class="metric-panel">
-            <span>Ring dimension</span>
+            <span data-i18n="ringDimension">Ring dimension</span>
             <strong id="ring-n">-</strong>
             <small id="ring-poly">-</small>
           </div>
           <div class="metric-panel">
-            <span>Modulus</span>
+            <span data-i18n="modulus">Modulus</span>
             <strong id="modulus-q">-</strong>
             <small id="modulus-bits">-</small>
           </div>
           <div class="metric-panel">
-            <span>Selected metric</span>
+            <span data-i18n="selectedMetric">Selected metric</span>
             <strong id="selected-bits">-</strong>
+            <small id="security-level">-</small>
             <small id="security-margin">-</small>
           </div>
           <div id="profile-panel" class="metric-panel triangle-panel hidden">
             <div class="triangle-heading">
-              <span>Parameter profile</span>
+              <span data-i18n="parameterProfile">Parameter profile</span>
             </div>
             <svg class="triangle-chart" viewBox="0 0 160 122" role="img" aria-label="Security compactness efficiency profile">
-              <text class="triangle-label triangle-label-top" x="80" y="12">Security</text>
-              <text class="triangle-label triangle-label-left" x="8" y="116">Compactness</text>
-              <text class="triangle-label triangle-label-right" x="152" y="116">Efficiency</text>
+              <text class="triangle-label triangle-label-top" x="80" y="12" data-i18n="security">Security</text>
+              <text class="triangle-label triangle-label-left" x="8" y="116" data-i18n="compactness">Compactness</text>
+              <text class="triangle-label triangle-label-right" x="152" y="116" data-i18n="efficiency">Efficiency</text>
               <polygon class="triangle-frame" points="80,24 28,94 132,94"></polygon>
               <line class="triangle-axis" x1="80" y1="70" x2="80" y2="24"></line>
               <line class="triangle-axis" x1="80" y1="70" x2="132" y2="94"></line>
@@ -191,11 +280,11 @@
 
         <section id="details" class="details-layout hidden">
           <div class="detail-column">
-            <h3>Instance</h3>
+            <h3 data-i18n="instance">Instance</h3>
             <dl id="instance-list"></dl>
           </div>
           <div class="detail-column">
-            <h3>Estimate</h3>
+            <h3 data-i18n="estimate">Estimate</h3>
             <dl id="security-list"></dl>
           </div>
         </section>
@@ -204,18 +293,57 @@
 
         <section id="alternatives" class="alternatives hidden">
           <div class="section-heading">
-            <h3>Alternative candidates</h3>
-            <button id="copy-json" type="button" class="secondary-button">Copy JSON</button>
+            <h3 data-i18n="alternativeCandidates">Alternative candidates</h3>
+            <button id="copy-json" type="button" class="secondary-button" data-i18n="copyJson">Copy JSON</button>
           </div>
           <div id="candidate-list" class="candidate-list"></div>
         </section>
+        </div>
 
-        <section id="json-panel" class="json-panel hidden">
-          <pre id="json-output"></pre>
+        <section id="dfr-results" class="dfr-results hidden">
+          <section class="result-grid">
+            <div class="metric-panel">
+              <span data-i18n="singleCoefficientDfr">Single-coefficient DFR</span>
+              <strong id="dfr-single">-</strong>
+            </div>
+            <div class="metric-panel">
+              <span data-i18n="vectorDfr">Vector DFR before ECC</span>
+              <strong id="dfr-vector">-</strong>
+            </div>
+            <div class="metric-panel">
+              <span data-i18n="workingPrecision">Working precision</span>
+              <strong id="dfr-precision">-</strong>
+              <small id="dfr-tail">-</small>
+            </div>
+            <div class="metric-panel">
+              <span data-i18n="distributionSupport">Error support</span>
+              <strong id="dfr-support">-</strong>
+              <small id="dfr-support-range">-</small>
+            </div>
+          </section>
+
+          <section class="details-layout">
+            <div class="detail-column">
+              <h3 data-i18n="calculation">Calculation</h3>
+              <dl id="dfr-calculation-list"></dl>
+            </div>
+            <div class="detail-column">
+              <h3 data-i18n="distributions">Distributions</h3>
+              <dl id="dfr-distribution-list"></dl>
+            </div>
+          </section>
+
+          <section id="dfr-warnings" class="warning-band hidden"></section>
+
+          <div class="section-heading dfr-copy-row">
+            <h3 data-i18n="decryptionFailure">Decryption failure</h3>
+            <button id="copy-dfr-json" type="button" class="secondary-button" data-i18n="copyJson">Copy JSON</button>
+          </div>
         </section>
+
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

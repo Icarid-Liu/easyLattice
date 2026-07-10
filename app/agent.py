@@ -37,7 +37,7 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
     use_llm = bool(payload.get("use_llm", payload.get("useLLM", payload.get("useLlm", False))))
 
     if not use_llm:
-        result = run_deterministic_search(deterministic_request)
+        result = run_deterministic_search(deterministic_request, config=config)
         result["agent"] = {
             **asdict(DETERMINISTIC_MODE),
             "intent_present": bool(intent),
@@ -55,7 +55,7 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
 
     interpretation = OpenAICompatibleLLM(config.llm).interpret_request(intent, deterministic_request)
     merged_request = {**deterministic_request, **interpretation.overrides}
-    result = run_deterministic_search(merged_request)
+    result = run_deterministic_search(merged_request, config=config)
     result["agent"] = {
         **asdict(LLM_ASSISTED_MODE),
         "provider": config.llm.provider,
@@ -70,12 +70,12 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
     return result
 
 
-def run_deterministic_search(payload: dict[str, Any]) -> dict[str, Any]:
+def run_deterministic_search(payload: dict[str, Any], config: AppConfig | None = None) -> dict[str, Any]:
     problem = str(payload.get("problem", "rlwe")).lower()
     if problem == "ntru":
-        return recommend_ntru(payload)
+        return recommend_ntru(payload, config=config)
     if problem == "rlwe":
-        return recommend_rlwe(payload)
+        return recommend_rlwe(payload, config=config)
     raise ValueError("problem must be one of rlwe, ntru.")
 
 

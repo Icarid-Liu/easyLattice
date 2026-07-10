@@ -10,13 +10,21 @@ not part of the security calculation.
    fast screening, and optional Sage/lattice-estimator validation.
 2. `app.ntru_search`: deterministic NTRU candidate generation for power-of-two
    cyclotomic, HPS-like, and HRSS-like instances, with optional
-   lattice-estimator NTRU rough validation.
+   lattice-estimator NTRU validation with MATZOV/ADPS16 classical and quantum
+   reduction-cost models.
 3. `app.agent`: orchestration boundary. It always returns the same response
    shape and records whether an LLM was used.
 4. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
    is loaded only when `useLLM=true` and `llm.enabled=true`.
-5. `app.server`: HTTP routing and static UI serving.
-6. `static`: browser UI. The LLM checkbox is disabled unless public config says
+5. `app.decryption_failure`: independent finite-PMF DFR engine for NTRU and
+   LWE correctness expressions. It converts estimator-style distribution
+   descriptors into finite `value -> probability` maps without modifying the
+   third-party estimator.
+6. `app.server`: HTTP routing and static UI serving for a local checkout.
+7. `app.local_runner`: token-protected loopback companion that detects local
+   Sage/estimator paths, constructs an in-memory `AppConfig`, and serves the
+   same fixed API boundary to the public browser UI.
+8. `static`: browser UI. The LLM checkbox is disabled unless public config says
    the local LLM provider is enabled and authenticated.
 
 ## Default Path
@@ -41,6 +49,52 @@ When `useEstimator=true`, the browser submits the same request to
 3-5 minute Sage/lattice-estimator runs off a single long browser request while
 leaving the deterministic fast path synchronous.
 
+## Public UI with Local Runner
+
+`python3 easyLattice-runner.pyz` is a single-file distribution for users who do
+not want to clone the project or maintain `config.local.json`. It extracts its
+bundled application and static assets to a versioned user cache, detects local
+Sage and `lattice-estimator`, starts an HTTP server on `127.0.0.1`, then opens
+the hosted UI with the loopback API base and a process-local token in the URL.
+
+The public UI sends that token in `X-EasyLattice-Runner-Token`. The runner only
+exposes its fixed configuration, recommendation, job polling, and DFR routes;
+it does not provide a command execution or arbitrary file API. CORS accepts the
+configured public UI origin and local development origins only. Each accepted
+recommendation job stores the runner's in-memory `AppConfig`, so local paths do
+not leak into or depend on repository configuration files.
+
+When Sage or the estimator root cannot be detected, `GET /api/runner/status`
+marks the runner incomplete. The public UI then submits only the two explicit
+paths to `POST /api/runner/configure`; Sage must resolve to an executable and
+the estimator root must contain `estimator/__init__.py`.
+
+## Decryption Failure Path
+
+`POST /api/decryption-failure/calculate` bypasses the agent and estimator. It
+runs locally and synchronously:
+
+```text
+DFR request JSON -> app.decryption_failure -> finite PMF result JSON
+```
+
+The calculator accepts NTRU and LWE forms. It uses `|E| <= Delta` as the
+success boundary and returns single-coefficient and pre-error-correction vector
+DFR as `log2(DFR)`, using a union bound that does not assume independent output
+coefficients. Explicit raw probability fields are retained only for external
+ECC calculations.
+
+Bounded estimator-style distributions, custom finite PMFs, LWR floor
+compression, and Kyber nearest-integer compression are converted into the same
+PMF representation. A generic `ND.NoiseDistribution` has only moments and is
+therefore rejected unless the caller supplies a custom PMF. Fixed-weight sparse
+ternary is converted to its coefficient marginal with an explicit correlation
+warning. The default arithmetic precision is 512 bits; discrete-Gaussian tails
+are bounded and reported rather than silently discarded.
+
+Error correction is outside this boundary. Concrete schemes such as LAC and
+DAWN must consume the reported pre-correction values in their own ECC model.
+
 ## LLM-Assisted Path
 
 `POST /api/agent/recommend` with `useLLM=true` runs:
@@ -54,13 +108,16 @@ intent + current controls
 ```
 
 The provider may only return a small whitelist of constraint keys such as
-`targetSecurity`, `ringFamily`, `redCostModel`, `nttScalePower`, and
-`distribution`. Unsupported keys are dropped before search.
+`targetSecurity`, `ringFamily`, `redCostModel`, `nttScalePower`,
+`secretDistribution`, `errorDistribution`, and `compressionP`. Unsupported keys
+are dropped before search.
 
 For LWR, RLWR, and MLWR requests, `distribution` is interpreted as the secret
-distribution selector. The rounding-error distribution is generated
-deterministically as a symmetric uniform distribution, and the selected instance
-reports the corresponding LWR `p` derived from that support size.
+distribution selector for legacy requests. New requests use
+`secretDistribution` for `Xs`; `errorDistribution` is a compression modulus
+`p`. The rounding-error distribution is generated deterministically as the
+centered `q -> p` compression-noise law and is passed to the estimator through a
+project-local mediator that creates an `ND.NoiseDistribution` moment profile.
 
 ## Secret Handling
 

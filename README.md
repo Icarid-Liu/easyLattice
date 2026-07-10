@@ -1,10 +1,23 @@
 # easyLattice
 
+English / 中文
+
 Local-first, open-source prototype for lattice-crypto parameter selection.
 
-The public GitHub Pages site is a static example. It does not run a backend,
-call an LLM, call Sage, or call `lattice-estimator`. Dynamic estimation is
-available only when you run the local service or deploy your own backend.
+面向格密码参数选择的本地优先、开源原型工具。
+
+The public GitHub Pages site is a browser UI. Opened normally, it has no
+backend and does not call an LLM, Sage, or `lattice-estimator`. Run the single
+local companion below and it opens the same public UI connected only to your
+loopback machine, so live calculations use your local Sage and estimator
+without cloning this repository or editing `config.local.json`.
+
+公开的 GitHub Pages 页面是浏览器 UI。直接打开时它没有后端，不会调用 LLM、Sage
+或 `lattice-estimator`。运行下面的单文件本地运行器后，它会打开同一个公开 UI，
+并且只连接你的本机回环地址；因此实时计算使用你的本地 Sage 和 estimator，
+无需 clone 本仓库或编辑 `config.local.json`。
+
+## Overview
 
 easyLattice is layered so the default path does not require any LLM token:
 
@@ -12,6 +25,13 @@ easyLattice is layered so the default path does not require any LLM token:
 2. estimator adapter: optional user-provided Sage/lattice-estimator validation;
 3. agent layer: deterministic by default, with an optional LLM intent parser;
 4. provider layer: user-owned OpenAI-compatible endpoint and authentication.
+
+easyLattice 采用分层设计，因此默认路径不需要任何 LLM token：
+
+1. 确定性核心：固定的 RLWE 搜索策略和本地安全筛选；
+2. estimator 适配层：可选的用户自备 Sage/lattice-estimator 验证；
+3. agent 层：默认确定性运行，可选 LLM 意图解析；
+4. provider 层：用户自有的 OpenAI-compatible endpoint 和认证信息。
 
 This first version focuses on a basic RLWE instance selector:
 
@@ -22,12 +42,27 @@ This first version focuses on a basic RLWE instance selector:
   `2n | q - 1` is preferred, but leaving one NTT layer unresolved is treated as
   nearly as good;
 - centered binomial and iid sparse ternary secret distributions;
-- paired centered binomial or iid sparse ternary error distributions for
-  LWE/RLWE/MLWE, with fixed-weight estimator approximation for sparse ternary;
-- uniform rounding-error distributions for LWR/RLWR/MLWR, reported with the
-  derived LWR modulus `p`;
+- independently searched centered binomial or iid sparse ternary error
+  distributions for LWE/RLWE/MLWE, with fixed-weight estimator approximation
+  for sparse ternary;
+- compression-noise error distributions for LWR/RLWR/MLWR, generated from the
+  selected `q -> p` compression modulus;
 - fast local screening plus optional user-provided Sage/lattice-estimator validation;
 - a small web UI for interactive parameter search.
+
+当前版本主要提供基础 RLWE 实例选择器：
+
+- 二次幂分圆环 `Z_q[x] / (x^n + 1)`；
+- 三元分圆环 `Z_q[x] / (x^n - x^(n/2) + 1)`，其中 `n` 为偶数且素因子只含
+  `2` 和 `3`；
+- 适合 NTT 的素数模数，并满足 `n | q - 1`；优先完全分裂的 `2n | q - 1`，
+  但剩余一层 NTT 未分解也会被视为接近可接受；
+- secret 分布支持中心二项分布和 iid 稀疏三元分布；
+- LWE/RLWE/MLWE 的 error 分布独立搜索中心二项分布或 iid 稀疏三元分布，
+  稀疏三元分布会用固定权重近似传给 estimator；
+- LWR/RLWR/MLWR 的 error 分布使用由所选 `q -> p` 压缩模数生成的压缩噪声；
+- 本地快速筛选，以及可选的用户自备 Sage/lattice-estimator 验证；
+- 一个用于交互式参数搜索的小型 Web UI。
 
 There is also an initial NTRU selector behind the same agent API. It currently
 supports:
@@ -44,7 +79,26 @@ supports:
   distributions are estimator moment approximations and are capped by the
   Gaussian proxy calibration to avoid overstating security;
 - HPS-like and HRSS-like comparison candidates;
-- local `lattice-estimator` NTRU rough validation when `useEstimator=true`.
+- local `lattice-estimator` NTRU validation when `useEstimator=true`, evaluating
+  the same parameters with MATZOV and ADPS16 classical and quantum cost models.
+  A quantum NTRU target therefore requires Sage estimation rather than the
+  classical-only fast reference screen.
+
+同一个 agent API 后面也有一个初始版 NTRU 选择器，目前支持：
+
+- `Z_q[x] / (x^n + 1)` 上的二次幂分圆 NTRU，对应 NEV/BAT/DAWN 风格 NTRU
+  变体常用的环族；
+- 与 RLWE 原型在二次幂环上相同的宽松 NTT 默认条件，即 `n/2 | q - 1`；
+- 两阶段分布选择：先用离散高斯代理校准最小标准差，再选择标准差不低于该
+  下界且最接近的快速采样分布。快速分布可以是单个块，也可以是稀疏三元、
+  对称均匀和中心二项块的短和；求和分布会作为 estimator 的矩近似，并由
+  高斯代理校准结果截断，避免高估安全性；
+- HPS-like 和 HRSS-like 对比候选；
+- 当 `useEstimator=true` 时进行本地 `lattice-estimator` NTRU 验证，对同一组参数
+  分别使用 MATZOV 和 ADPS16 的经典、量子规约代价模型。
+  因此量子 NTRU 目标必须启用 Sage 评估，不能使用只含经典参考值的快速筛选。
+
+## Search Model
 
 The selector treats the user's requested security as a lower bound. It first
 chooses the polynomial/ring family, then degree `n`, then the smallest modulus
@@ -52,17 +106,31 @@ satisfying the chosen NTT scale, and only then chooses the secret/error
 distribution for that modulus. Within a fixed modulus it still avoids
 unnecessary security margin.
 
+选择器把用户请求的安全比特视为下界。它先选择多项式/环族，再选择维度 `n`，
+然后选择满足所选 NTT 规模的最小模数，最后才为该模数选择 secret/error 分布。
+在固定模数内，它仍会避免不必要的安全余量。
+
 The JSON output separates `secret` and `error` distribution fields. For
-LWE/RLWE/MLWE the current prototype searches paired `Xs = Xe` distributions. For
-LWR/RLWR/MLWR, the distribution selector controls only the secret; the
-rounding-error distribution is always uniform, and each recommendation reports
-the corresponding LWR `p` as the size of the uniform error support.
+LWE/RLWE/MLWE the current prototype searches `Xs` and `Xe` independently. For
+LWR/RLWR/MLWR, the secret selector still controls `Xs`, while the error control
+is a compression modulus `p`. The error distribution is the centered
+compression-noise law induced by compressing `vi in {0, ..., q-1}` from `q` to
+`p` and lifting back to `q`.
+
+JSON 输出会分开给出 `secret` 和 `error` 分布字段。对 LWE/RLWE/MLWE，当前原型
+会独立搜索 `Xs` 和 `Xe`。对 LWR/RLWR/MLWR，secret 选择器仍控制 `Xs`，而 error
+控件是压缩模数 `p`。error 分布是把 `vi in {0, ..., q-1}` 从 `q` 压缩到 `p`、
+再 lift 回 `q` 所诱导的中心化压缩噪声分布。
 
 The basic monotonicity heuristic remembered by the selector is: smaller `q`
 usually increases LWE/RLWE hardness, larger dimension increases hardness, and
 larger error standard deviation increases hardness. Correctness and scheme
 encoding may push in the opposite direction, so those checks belong in
 scheme-specific modules.
+
+选择器使用的基本单调性启发式是：更小的 `q` 通常提高 LWE/RLWE 难度，更大的
+维度提高难度，更大的 error 标准差也提高难度。正确性和方案编码可能会产生
+相反约束，因此这些检查应放到具体方案模块中。
 
 For sparse ternary candidates, easyLattice includes distributions with
 `Pr[+1] = Pr[-1] = (2^l0 - 1) / 2^(2*l0 + l1)` and all remaining probability on
@@ -71,52 +139,158 @@ models sparse ternary vectors by fixed Hamming weight, easyLattice passes the
 expected `+1` and `-1` counts as a fixed-weight approximation and reports that
 approximation in the JSON output.
 
+对稀疏三元候选，easyLattice 包含满足
+`Pr[+1] = Pr[-1] = (2^l0 - 1) / 2^(2*l0 + l1)` 且剩余概率都在 `0` 上的分布。
+这些分布可以用 bit 操作低成本采样。由于 `lattice-estimator` 用固定汉明重量
+建模稀疏三元向量，easyLattice 会把期望的 `+1` 和 `-1` 个数作为固定权重近似
+传入，并在 JSON 输出中报告该近似。
+
 easyLattice is designed as a local tool, not a hosted service. Users bring their
-own estimator installation, optional model endpoint/API key, and later their
-own scheme-specific scripts such as decryption-error, rejection-sampling, or
-smoothing-parameter calculators.
+own estimator installation, optional model endpoint/API key, and their own
+scheme-specific scripts for error correction, rejection sampling, or smoothing
+parameters.
+
+easyLattice 被设计为本地工具，而不是托管服务。用户自备 estimator 安装、可选
+模型 endpoint/API key，以及用于具体方案的纠错、拒绝采样或 smoothing 参数脚本。
 
 No API key is required for the default RLWE workflow. The LLM layer is disabled
 unless `llm.enabled=true` is set locally. When enabled, the model only converts
 free-form user intent into deterministic search constraints; final parameters
 still come from the fixed local search logic and optional estimator validation.
 
-## Public Static Example
+默认 RLWE 工作流不需要 API key。除非本地设置 `llm.enabled=true`，否则 LLM 层
+默认关闭。启用后，模型只把自由文本意图转换为确定性搜索约束；最终参数仍由
+固定的本地搜索逻辑和可选 estimator 验证产生。
 
-The hosted GitHub Pages version is intentionally static. It demonstrates the UI
-and fixed example outputs for this prototype, but all values should be treated
-as examples rather than live parameter certification.
+## Public Web and Local Runner
+
+The hosted UI does not expose a shared compute service. Download the release
+`easyLattice-runner.pyz` and run it with Python 3.10 or later:
+
+```bash
+python3 easyLattice-runner.pyz
+```
+
+The runner detects Sage and `lattice-estimator` from `SAGE_BINARY`,
+`LATTICE_ESTIMATOR_PATH`, the command path, and common local directories. It
+opens the public web UI automatically. Only when detection is incomplete does
+the UI ask for the Sage executable and estimator root paths. The estimator root
+must contain `estimator/__init__.py`.
+
+The runner listens only on `127.0.0.1`, uses a process-local random token, and
+accepts requests only from the public page origin or local development origins.
+It never uploads local paths, Sage output, estimator source, or API keys to the
+public site.
+
+托管 UI 不提供共享计算服务。下载发布包中的 `easyLattice-runner.pyz`，用 Python
+3.10 或更高版本运行：
+
+```bash
+python3 easyLattice-runner.pyz
+```
+
+运行器会从 `SAGE_BINARY`、`LATTICE_ESTIMATOR_PATH`、命令路径及常见本地目录检测
+Sage 与 `lattice-estimator`，然后自动打开公开网页。只有自动检测不完整时，网页才会
+要求输入 Sage 可执行文件和 estimator 根目录；该根目录必须包含
+`estimator/__init__.py`。
+
+运行器只监听 `127.0.0.1`，使用进程生命周期内有效的随机令牌，并且只接受公开网页
+源或本地开发源的请求。它不会将本地路径、Sage 输出、estimator 源码或 API key 上传到
+公开站点。
+
+For development builds from this checkout:
+
+对于从本仓库构建开发版：
+
+```bash
+python3 scripts/build-runner.py
+python3 dist/easyLattice-runner.pyz
+```
+
+The table below records representative prototype settings. Use the local runner
+for live output; none of the displayed values is a parameter certification.
+
+下表记录原型中的代表性设置。实时结果请使用本地运行器；展示数值均不构成参数认证。
 
 The table below fixes the controls to:
 
-- target security: `128`;
-- security metric: `Classical`;
-- reduction cost model: `MATZOV`;
-- distribution: `Auto`;
-- ring family: `x^n + 1`;
-- NTT scale: `n/2 | q - 1`;
-- estimator validation: off.
+下表固定使用以下控件设置：
 
-| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Status |
+- target security / 目标安全比特: `128`;
+- security metric / 安全度量: `Classical`;
+- reduction cost model / 规约代价模型: `MATZOV`;
+- distribution / 分布: `Auto`;
+- ring family / 环族: `x^n + 1`;
+- NTT scale / NTT 规模: `n/2 | q - 1`;
+- estimator validation / estimator 验证: off.
+
+| Public UI option / 公开 UI 选项 | n | q | NTT condition / NTT 条件 | Secret distribution / Secret 分布 | Error distribution / Error 分布 | LWR p | Classical bits / 经典比特 | Status / 状态 |
 | --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- |
-| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
-| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
-| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
-| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
-| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | example |
-| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `Uniform(-1,1)` | 3 | 141.1 | example |
-| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | taxonomy placeholder |
-| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=2,l1=0)` | `ST(l0=2,l1=0)` | - | 129.7 | taxonomy placeholder |
+| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same / 相同 | - | 128.0 | example / 示例 |
+| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same / 相同 | - | 128.0 | example / 示例 |
+| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example / 示例 |
+| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example / 示例 |
+| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example / 示例 |
+| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example / 示例 |
+| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example / 示例 |
+| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example / 示例 |
+| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder / 分类占位 |
+| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder / 分类占位 |
 
 `SIS / SIS` and `SIS / MSIS` are shown in the current UI taxonomy, but a real
 SIS/MSIS selector is not implemented yet. Their rows reuse the current
 LWE/RLWE fast-screen scaffold and should not be read as SIS hardness estimates.
 
-## Run
+`SIS / SIS` 和 `SIS / MSIS` 目前只出现在 UI 分类中，真正的 SIS/MSIS 选择器尚未
+实现。表中这些行复用了当前 LWE/RLWE 快速筛选框架，不应解读为 SIS 难度估计。
+
+## Decryption Failure Rate
+
+The local UI also provides a standalone finite-distribution DFR calculator. It
+implements the following pre-error-correction coefficient models:
+
+- NTRU: `p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e`;
+- LWE: `((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2`.
+
+The success boundary is `|E| <= Delta`. DFR is reported as `log2(DFR)` for the
+single coefficient and vector union bound. Explicit raw probability fields
+remain in the API and copied JSON for external ECC calculations. The default
+working precision is 512 bits and discrete Gaussians use a configurable 128-bit
+tail bound.
+
+Inputs support the common `lattice-estimator` distribution families, LWR floor
+compression, Kyber nearest-integer compression, and a custom finite PMF JSON
+object. Estimator `NoiseDistribution` instances expose moments rather than a
+sampling law, so they must be supplied as a custom PMF for DFR calculation.
+Fixed-weight sparse ternary inputs use their coefficient marginal and report
+the resulting correlation approximation.
+
+The calculator deliberately does not model error correction. LAC, DAWN, and
+other coded schemes should pass its pre-correction outputs to a
+scheme-specific correction-probability script.
+
+本地 UI 还提供独立的有限分布 DFR 计算器，计算以下纠错前系数模型：
+
+- NTRU：`p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e`；
+- LWE：`((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2`。
+
+成功边界为 `|E| <= Delta`。计算器会以 `log2(DFR)` 给出单系数和向量 union bound
+DFR；原始概率通过 API 和复制 JSON 中的显式字段保留，供外部 ECC 计算使用。默认
+工作精度为 512 比特；离散高斯使用可配置的 128 比特尾界。
+
+输入支持常见的 `lattice-estimator` 分布族、LWR 向下取整压缩、Kyber 最近整数
+压缩和自定义有限 PMF JSON 对象。estimator 的 `NoiseDistribution` 只公开矩而不
+给出唯一的采样律，DFR 计算时必须提供自定义 PMF。固定权重稀疏三元分布会使用其
+单系数边缘分布，并报告由此产生的相关性近似。
+
+该计算器刻意不建模纠错码。LAC、DAWN 等带编码的方案应把纠错前输出交给具体方案
+的纠错概率脚本。
+
+## Local Checkout
 
 For a fresh local checkout, the simplest path is:
+
+对新的本地 checkout，最简单的启动方式是：
 
 ```bash
 ./scripts/setup-local.sh --start
@@ -126,17 +300,25 @@ The setup script creates `config.local.json`, keeps LLM disabled, detects
 optional Sage/lattice-estimator paths when available, runs a small smoke test,
 and then starts the web service at:
 
+该脚本会创建 `config.local.json`，保持 LLM 关闭，尽量检测可用的
+Sage/lattice-estimator 路径，运行一个小型 smoke test，然后在以下地址启动 Web
+服务：
+
 ```text
 http://127.0.0.1:8000
 ```
 
 If you only want to generate local config without starting the server:
 
+如果只想生成本地配置而不启动服务：
+
 ```bash
 ./scripts/setup-local.sh
 ```
 
 Optional estimator setup:
+
+可选的 estimator 设置：
 
 ```bash
 ./scripts/setup-local.sh --with-estimator
@@ -146,7 +328,13 @@ This clones `malb/lattice-estimator` into `.external/lattice-estimator` if no
 local estimator path is detected. Sage is still optional for fast-screen mode
 and required only when `useEstimator=true`.
 
+如果未检测到本地 estimator 路径，这会把 `malb/lattice-estimator` clone 到
+`.external/lattice-estimator`。快速筛选模式仍不强制需要 Sage；只有
+`useEstimator=true` 时才需要 Sage。
+
 Manual start still works:
+
+也可以手动启动：
 
 ```bash
 python3 -m app.server
@@ -154,11 +342,15 @@ python3 -m app.server
 
 Then open:
 
+然后打开：
+
 ```text
 http://127.0.0.1:8000
 ```
 
 Use another port if needed:
+
+如需换端口：
 
 ```bash
 PORT=8010 python3 -m app.server
@@ -169,30 +361,46 @@ PORT=8010 python3 -m app.server
 The setup script above is preferred. For manual configuration, copy the example
 file and edit local paths:
 
+推荐使用上面的 setup 脚本。手动配置时，复制示例文件并编辑本地路径：
+
 ```bash
 cp config.local.example.json config.local.json
 ```
 
 `config.local.json` is ignored by git. It can contain:
 
+`config.local.json` 已被 git 忽略，可以包含：
+
 - `estimator.sage_binary`: `sage` or an absolute path to Sage.
+  `sage` 或 Sage 的绝对路径。
 - `estimator.lattice_estimator_path`: absolute path to `malb/lattice-estimator`
   if Sage cannot already import `estimator`.
+  如果 Sage 不能直接 import `estimator`，这里填 `malb/lattice-estimator` 的绝对路径。
 - `estimator.default_timeout_seconds`: request-level timeout for optional
   estimator validation.
+  可选 estimator 验证的请求级超时。
 - `estimator.remote_url`: optional Hugging Face estimator worker URL. When set,
   `useEstimator=true` calls this remote worker instead of local Sage.
+  可选 Hugging Face estimator worker URL。设置后，`useEstimator=true` 会调用远程
+  worker，而不是本地 Sage。
 - `estimator.remote_timeout_seconds`: remote worker timeout, intended for
   180-300 second live estimator runs.
+  远程 worker 超时，面向 180-300 秒的在线 estimator 运行。
 - `estimator.remote_poll_interval_seconds`: polling interval for remote jobs.
+  远程任务轮询间隔。
 - `llm.enabled`: disabled by default. Set to `true` only when you want LLM
   intent parsing.
+  默认关闭。只有需要 LLM 意图解析时才设为 `true`。
 - `llm.base_url`, `llm.model`, `llm.api_key_env`, `llm.auth_header`,
   `llm.auth_prefix`: bring-your-own OpenAI-compatible model settings.
+  用户自备 OpenAI-compatible 模型设置。
 - `scripts.decrypt_error`, `scripts.signature_smoothing`: future local script
   hooks for scheme-specific checks.
+  未来用于具体方案检查的本地脚本 hook。
 
 Equivalent environment variables:
+
+等价环境变量：
 
 ```bash
 SAGE_BINARY=/path/to/sage \
@@ -202,6 +410,8 @@ python3 -m app.server
 
 Remote estimator worker:
 
+远程 estimator worker：
+
 ```bash
 EASYLATTICE_ESTIMATOR_REMOTE_URL=https://your-estimator-space.hf.space \
 EASYLATTICE_ESTIMATOR_REMOTE_TIMEOUT=240 \
@@ -209,6 +419,8 @@ python3 -m app.server
 ```
 
 Optional LLM enhancement:
+
+可选 LLM 增强：
 
 ```bash
 export EASYLATTICE_LLM_ENABLED=true
@@ -221,9 +433,17 @@ python3 -m app.server
 For local endpoints that do not require authentication, set
 `"auth_header": ""` in `config.local.json`.
 
+如果本地 endpoint 不需要认证，在 `config.local.json` 中设置 `"auth_header": ""`。
+
 The API exposes only non-secret public config at `/api/config/public`.
 
+API 只会在 `/api/config/public` 暴露不含密钥的公开配置。
+
+## API
+
 The main recommendation endpoint is:
+
+主要推荐接口是：
 
 ```text
 POST /api/agent/recommend
@@ -234,7 +454,13 @@ With `useLLM=false` or omitted, it runs only the deterministic core. With
 The legacy-compatible `/api/rlwe/recommend` route is still available and uses
 the same agent layer.
 
+当 `useLLM=false` 或省略时，只运行确定性核心。当 `useLLM=true` 时，需要本地
+LLM 配置和 `intent` 字符串。兼容旧版的 `/api/rlwe/recommend` 路由仍然可用，
+并使用同一个 agent 层。
+
 For long estimator runs, the live API also exposes async recommendation jobs:
+
+对较长的 estimator 运行，在线 API 也提供异步推荐任务：
 
 ```text
 POST /api/agent/jobs
@@ -244,7 +470,29 @@ GET /api/agent/jobs/{job_id}
 The browser UI uses these job endpoints when `useEstimator=true`, so 3-5 minute
 Sage/lattice-estimator runs do not depend on a single long HTTP request.
 
+浏览器 UI 在 `useEstimator=true` 时会使用这些任务接口，因此 3-5 分钟的
+Sage/lattice-estimator 运行不依赖单个长 HTTP 请求。
+
+The synchronous decryption-failure endpoint is:
+
+解密错误率同步接口是：
+
+```text
+POST /api/decryption-failure/calculate
+```
+
+It accepts `type: "ntru" | "lwe"`, dimensions, coefficients, distribution
+objects, and optional `precisionBits` / `tailBits`. It returns pre-correction
+`log2(DFR)` values, explicit raw-probability fields for ECC scripts, support
+summaries, tail bounds, and approximation warnings.
+
+它接受 `type: "ntru" | "lwe"`、维度、系数、分布对象，以及可选的
+`precisionBits` / `tailBits`，并返回纠错前的 `log2(DFR)`、供 ECC 脚本使用的
+显式原始概率字段、支持集摘要、尾界和近似警告。
+
 Use `"problem": "ntru"` to call the NTRU selector:
+
+使用 `"problem": "ntru"` 调用 NTRU 选择器：
 
 ```json
 {
@@ -263,17 +511,29 @@ self-host dynamic estimation later, the Docker template in
 selector and optional Sage/lattice-estimator validation behind the same API as
 the local server. Hugging Face may require a paid PRO account for Docker Spaces.
 
+公开的 GitHub Pages 站点不使用实时后端。如果之后想自托管动态估计，
+[`deploy/huggingface-live`](deploy/huggingface-live) 中的 Docker 模板会在与
+本地服务相同的 API 后面运行确定性选择器和可选 Sage/lattice-estimator 验证。
+Hugging Face 的 Docker Spaces 可能需要付费 PRO 账号。
+
 For a smaller estimator-only worker, the template in
 [`deploy/huggingface-estimator`](deploy/huggingface-estimator) exposes:
 
-- `POST /jobs` for async estimator jobs;
-- `GET /jobs/{job_id}` for polling;
-- `POST /estimate` for synchronous debugging only;
-- a default 240 second timeout, clamped to a 300 second maximum.
+如果只需要更小的 estimator-only worker，
+[`deploy/huggingface-estimator`](deploy/huggingface-estimator) 模板提供：
+
+- `POST /jobs` for async estimator jobs / 异步 estimator 任务；
+- `GET /jobs/{job_id}` for polling / 轮询；
+- `POST /estimate` for synchronous debugging only / 仅用于同步调试；
+- a default 240 second timeout, clamped to a 300 second maximum /
+  默认 240 秒超时，最大限制为 300 秒。
 
 The estimator-only worker accepts only validated estimator payloads and forwards
 them to `app/estimator_runner.py`; it does not run arbitrary user code or any
 LLM.
+
+estimator-only worker 只接受通过校验的 estimator payload，并转发到
+`app/estimator_runner.py`；它不会运行任意用户代码，也不会运行任何 LLM。
 
 ## Tests
 
@@ -283,26 +543,42 @@ python3 -m unittest discover -s tests
 
 ## Scope
 
-This prototype is not a production parameter certification tool. It does not yet
-bind the RLWE instance to a concrete encryption/signature scheme, so it does not
-compute decryption failure, rejection sampling times, smoothing-parameter
-conditions, or complete reduction-loss accounting.
+This prototype is not a production parameter certification tool. Its standalone
+DFR calculator is not bound to a concrete encryption/signature encoding or an
+error-correction code, and it does not compute rejection-sampling times,
+smoothing-parameter conditions, or complete reduction-loss accounting.
+
+该原型不是生产级参数认证工具。独立 DFR 计算器尚未绑定到具体的加密/签名编码或
+纠错码，也不会计算拒绝采样时间、smoothing 参数条件或完整的规约损失。
 
 The `matzov` red-cost option means the classical ADPS16 Matzov-style
 dual-hybrid estimate. The `adps16` option reports the ADPS16 CoreSVP/uSVP
 estimate. With Sage validation enabled, easyLattice calls `lattice-estimator` and
 rounds bit counts downward to avoid overstating a lower bound.
 
+`matzov` 规约代价选项表示经典 ADPS16 Matzov-style dual-hybrid 估计。
+`adps16` 选项报告 ADPS16 CoreSVP/uSVP 估计。启用 Sage 验证时，easyLattice 会
+调用 `lattice-estimator`，并向下取整比特数，避免高估下界。
+
 ## Planned Extension Points
 
 - `agent`: convert user intent into constraints and explain tradeoffs. The
   default implementation is deterministic; LLM assistance is opt-in.
+  将用户意图转换为约束并解释权衡。默认实现是确定性的，LLM 辅助为 opt-in。
 - `estimators`: queue/cache long-running lattice-estimator jobs.
+  排队/缓存长时间运行的 lattice-estimator 任务。
 - `schemes/encryption`: decryption-error scripts for concrete PKE/KEM schemes.
+  面向具体 PKE/KEM 方案的解密错误脚本。
 - `schemes/signature`: hash-and-sign smoothing and rejection checks.
+  hash-and-sign 的 smoothing 与拒绝采样检查。
 - `providers`: OpenAI-compatible, local Ollama/vLLM, or other user-owned model
   endpoints. Providers must never use maintainer-owned tokens.
+  OpenAI-compatible、本地 Ollama/vLLM 或其他用户自有模型 endpoint。Provider
+  绝不能使用维护者拥有的 token。
 
 See [docs/references.md](docs/references.md) for scheme-design references used
 to guide future extension work. See [docs/architecture.md](docs/architecture.md)
 for the deterministic-core and optional-LLM layering.
+
+方案设计参考见 [docs/references.md](docs/references.md)。确定性核心和可选 LLM
+分层说明见 [docs/architecture.md](docs/architecture.md)。

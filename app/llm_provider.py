@@ -32,6 +32,12 @@ ALLOWED_OVERRIDE_KEYS = {
     "maxN",
     "max_n",
     "distribution",
+    "secretDistribution",
+    "secret_distribution",
+    "errorDistribution",
+    "error_distribution",
+    "compressionP",
+    "p",
     "useEstimator",
     "use_estimator",
     "validationCount",
@@ -80,11 +86,13 @@ class OpenAICompatibleLLM:
                         "You convert lattice-crypto parameter-search intent into a small JSON object. "
                         "Return only JSON. Use only these keys when needed: targetSecurity, ringFamily, "
                         "securityModel, redCostModel, nttScalePower, minQBits, maxQBits, minN, maxN, "
-                        "distribution, useEstimator, validationCount, validationAttempts. "
+                        "distribution, secretDistribution, errorDistribution, compressionP, useEstimator, "
+                        "validationCount, validationAttempts. "
                         "Valid ringFamily values are power2 and ternary. Valid securityModel values are "
                         "classical and quantum. Valid redCostModel values are matzov and adps16. "
-                        "For LWR, RLWR, and MLWR variants, distribution controls the secret only; "
-                        "the rounding-error distribution is always uniform. "
+                        "Use secretDistribution and errorDistribution when the user distinguishes Xs and Xe. "
+                        "For LWR, RLWR, and MLWR variants, errorDistribution is a compression modulus p, "
+                        "not a uniform distribution. "
                         "Do not invent security claims."
                     ),
                 },

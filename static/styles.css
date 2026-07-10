@@ -52,6 +52,11 @@ textarea {
   margin-bottom: 30px;
 }
 
+.brand-row > div:not(.brand-mark) {
+  min-width: 0;
+  flex: 1;
+}
+
 .brand-mark {
   display: grid;
   width: 40px;
@@ -82,9 +87,20 @@ textarea {
   font-size: 13px;
 }
 
+.language-select {
+  width: auto;
+  min-width: 96px;
+  min-height: 34px;
+  padding: 0 8px;
+}
+
 .config-panel,
 .form-stack {
   display: grid;
+}
+
+.workspace-mode {
+  margin: 0 0 18px;
 }
 
 .config-panel {
@@ -107,8 +123,118 @@ textarea {
   font-size: 13px;
 }
 
+.runner-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 22px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.runner-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runner-heading span,
+.runner-heading strong {
+  font-size: 13px;
+}
+
+.runner-heading span {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.runner-heading strong {
+  color: var(--green-dark);
+  text-align: right;
+}
+
+.runner-heading strong.runner-error {
+  color: var(--red);
+}
+
+.runner-form,
+.runner-path-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.runner-path-fields label {
+  display: grid;
+  gap: 6px;
+}
+
+.runner-path-fields label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.runner-path-fields .secondary-button,
+.runner-form > .secondary-button {
+  justify-self: start;
+}
+
 .form-stack {
   gap: 18px;
+}
+
+.dfr-input-group,
+.dfr-distribution-section,
+.dfr-distribution-editors {
+  display: grid;
+  gap: 12px;
+}
+
+.dfr-field-grid,
+.dfr-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dfr-field-grid label,
+.dfr-parameter-grid label {
+  min-width: 0;
+}
+
+.dfr-distribution-section h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.dfr-distribution-editor {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.dfr-editor-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 1.2fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.dfr-editor-header strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.dfr-parameter-grid textarea {
+  min-height: 72px;
+}
+
+.dfr-parameter-grid .dfr-wide-field {
+  grid-column: 1 / -1;
 }
 
 .form-stack label,
@@ -155,7 +281,8 @@ textarea {
 
 .segmented {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
@@ -365,7 +492,6 @@ textarea {
 
 .metric-panel,
 .detail-column,
-.json-panel,
 .warning-band {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -514,6 +640,14 @@ dd {
   margin-bottom: 18px;
 }
 
+.dfr-results {
+  margin-bottom: 18px;
+}
+
+.dfr-copy-row {
+  margin-top: 4px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
@@ -545,20 +679,6 @@ dd {
 .candidate span {
   color: var(--muted);
   font-size: 13px;
-}
-
-.json-panel {
-  overflow: auto;
-  max-height: 460px;
-  padding: 0;
-}
-
-pre {
-  margin: 0;
-  padding: 16px;
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
 }
 
 .hidden {
@@ -600,7 +720,13 @@ pre {
 
   .result-grid,
   .details-layout,
-  .candidate-list {
+  .candidate-list,
+  .dfr-field-grid,
+  .dfr-parameter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dfr-editor-header {
     grid-template-columns: 1fr;
   }
 }

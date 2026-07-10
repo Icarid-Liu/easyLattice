@@ -8,10 +8,12 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from itertools import product
 from pathlib import Path
 from typing import Any
 
-from .config import load_config
+from .compression_noise import compression_noise_profile
+from .config import AppConfig, load_config
 from .remote_estimator import estimate_remotely
 
 
@@ -19,6 +21,7 @@ RING_DIMENSIONS = (512, 1024, 2048, 4096, 8192)
 TERNARY_RING_DIMENSIONS = (384, 512, 768, 1024, 1152, 1536, 2048, 2304, 3072, 4096, 4608, 6144, 8192)
 ETA_VALUES = (1, 2, 3, 4, 5, 6, 8)
 UNIFORM_RADII = (1, 2, 3, 4, 5, 6, 8)
+LWR_COMPRESSION_MODULI = (2, 3, 4, 5, 8, 16, 32, 64, 128, 256, 512, 1024)
 SPARSE_TERNARY_PARAMETERS = (
     (1, 0),
     (2, 0),
@@ -51,6 +54,7 @@ COMMON_NTT_PRIMES = (
 SUPPORTED_SECURITY_MODELS = {"classical", "quantum"}
 SUPPORTED_RED_COST_MODELS = {"matzov", "adps16"}
 SUPPORTED_RING_FAMILIES = {"power2", "ternary"}
+SUPPORTED_DISTRIBUTION_SELECTORS = {"auto", "centered_binomial", "sparse_ternary"}
 SUPPORTED_HARD_PROBLEMS = {
     "ntru": {"matrix", "ring"},
     "lwe": {"lwe", "rlwe", "lwr", "rlwr", "mlwe", "mlwr"},
@@ -75,6 +79,8 @@ class RequestOptions:
     min_n: int = 512
     max_n: int = 8192
     distribution: str = "auto"
+    secret_distribution: str = "auto"
+    error_distribution: str = "auto"
     use_estimator: bool = False
     estimator_timeout: int = 16
     validation_count: int = 1
@@ -95,9 +101,10 @@ class DistributionSpec:
     estimator: dict[str, Any]
 
 
-def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
     """Return an RLWE recommendation and a small list of alternatives."""
-    request = parse_request(raw or {})
+    config = config or load_config()
+    request = parse_request(raw or {}, config=config)
     started = time.perf_counter()
 
     raw_candidates = build_candidates(request)
@@ -127,7 +134,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
             if attempts >= max_validation_attempts:
                 break
             attempts += 1
-            result = run_sage_estimator(candidate, request.estimator_timeout)
+            result = run_sage_estimator(candidate, request.estimator_timeout, config=config)
             estimator_result["validated"].append(result)
             if result.get("ok"):
                 apply_estimator_result(candidate, result, request)
@@ -178,7 +185,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def parse_request(raw: dict[str, Any]) -> RequestOptions:
+def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> RequestOptions:
     target = int(raw.get("target_security", raw.get("targetSecurity", 128)))
     if target < 40 or target > 512:
         raise ValueError("target_security must be between 40 and 512 bits.")
@@ -214,18 +221,27 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
     if min_n < 256 or max_n < min_n:
         raise ValueError("Require 256 <= min_n <= max_n.")
 
-    distribution = str(raw.get("distribution", "auto"))
-    if distribution == "uniform":
-        raise ValueError(
-            "uniform is reserved for the LWR rounding-error distribution; "
-            "secret distribution must be one of auto, centered_binomial, sparse_ternary."
+    distribution = parse_distribution_selector(raw.get("distribution", "auto"), "distribution")
+    secret_distribution = parse_distribution_selector(
+        raw.get("secret_distribution", raw.get("secretDistribution", distribution)),
+        "secret_distribution",
+    )
+    if is_lwr_variant(hard_problem_variant):
+        error_distribution = parse_lwr_error_selector(
+            raw.get(
+                "error_distribution",
+                raw.get("errorDistribution", raw.get("compressionP", raw.get("p", "3"))),
+            )
         )
-    if distribution not in {"auto", "centered_binomial", "sparse_ternary"}:
-        raise ValueError("distribution must be one of auto, centered_binomial, sparse_ternary.")
+    else:
+        error_distribution = parse_distribution_selector(
+            raw.get("error_distribution", raw.get("errorDistribution", distribution)),
+            "error_distribution",
+        )
 
     estimator_timeout = raw.get(
         "estimator_timeout",
-        raw.get("estimatorTimeout", load_config().estimator.default_timeout_seconds),
+        raw.get("estimatorTimeout", (config or load_config()).estimator.default_timeout_seconds),
     )
     validation_count = max(1, min(12, int(raw.get("validation_count", raw.get("validationCount", 1)))))
     validation_attempts = raw.get(
@@ -246,6 +262,8 @@ def parse_request(raw: dict[str, Any]) -> RequestOptions:
         min_n=min_n,
         max_n=max_n,
         distribution=distribution,
+        secret_distribution=secret_distribution,
+        error_distribution=error_distribution,
         use_estimator=bool(raw.get("use_estimator", raw.get("useEstimator", False))),
         estimator_timeout=max(4, min(300, int(estimator_timeout))),
         validation_count=validation_count,
@@ -277,12 +295,45 @@ def parse_hard_problem(
     return category, variant
 
 
+def parse_distribution_selector(value: Any, field: str) -> str:
+    selector = str(value or "auto").lower()
+    if selector == "uniform":
+        raise ValueError(
+            f"{field} must be one of auto, centered_binomial, sparse_ternary. "
+            "Uniform is not a secret/error selector for LWE-style searches."
+        )
+    if selector not in SUPPORTED_DISTRIBUTION_SELECTORS:
+        raise ValueError(f"{field} must be one of auto, centered_binomial, sparse_ternary.")
+    return selector
+
+
+def parse_lwr_error_selector(value: Any) -> str:
+    selector = str(value or "3").strip().lower()
+    if selector in {"auto", "uniform"}:
+        return "3"
+    if selector.startswith("p="):
+        selector = selector[2:].strip()
+    if selector.startswith("p"):
+        selector = selector[1:].strip()
+    try:
+        p = int(selector)
+    except ValueError as exc:
+        raise ValueError("LWR-style error_distribution must be a compression modulus p.") from exc
+    if p < 2:
+        raise ValueError("LWR-style compression modulus p must be at least 2.")
+    if p > max(LWR_COMPRESSION_MODULI):
+        raise ValueError(f"LWR-style compression modulus p must be at most {max(LWR_COMPRESSION_MODULI)}.")
+    return str(p)
+
+
 def is_lwr_variant(variant: str) -> bool:
     return variant in LWR_VARIANTS
 
 
 def build_candidates(request: RequestOptions) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    profile_cache: dict[tuple[int, int, str, int], dict[str, Any]] = {}
+    security_cache: dict[tuple[int, int, float, float], dict[str, Any]] = {}
     for n in ring_dimensions(request.ring_family):
         if n < request.min_n or n > request.max_n:
             continue
@@ -294,13 +345,15 @@ def build_candidates(request: RequestOptions) -> list[dict[str, Any]]:
             ring_family=request.ring_family,
         )
         for q in primes:
-            for secret_distribution, error_distribution in distribution_pairs(n, request):
+            for secret_distribution, error_distribution in distribution_pairs(n, q, request):
                 candidate = make_candidate(
                     n=n,
                     q=q,
                     secret_distribution=secret_distribution,
                     error_distribution=error_distribution,
                     request=request,
+                    profile_cache=profile_cache,
+                    security_cache=security_cache,
                 )
                 candidates.append(candidate)
     return candidates
@@ -331,20 +384,39 @@ def make_candidate(
     secret_distribution: DistributionSpec,
     error_distribution: DistributionSpec,
     request: RequestOptions,
+    profile_cache: dict[tuple[int, int, str, int], dict[str, Any]] | None = None,
+    security_cache: dict[tuple[int, int, float, float], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    factors = factor_integer(q - 1)
-    security = fast_security_estimate(
-        n=n,
-        q=q,
-        sigma=error_distribution.stddev,
-        sparse_penalty_bits=float(secret_distribution.estimator.get("fast_screen_penalty_bits", 0.0)),
-    )
-    ring = ring_profile(n=n, q=q, family=request.ring_family)
-    ntt = (
-        ntt_unfriendly_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
-        if ntt_scale_is_unrestricted(request.ntt_scale_power)
-        else ntt_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
-    )
+    profile_key = (n, q, request.ring_family, request.ntt_scale_power)
+    if profile_cache is not None and profile_key in profile_cache:
+        profile = profile_cache[profile_key]
+    else:
+        factors = factor_integer(q - 1)
+        ring = ring_profile(n=n, q=q, family=request.ring_family)
+        ntt = (
+            ntt_unfriendly_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
+            if ntt_scale_is_unrestricted(request.ntt_scale_power)
+            else ntt_profile(n=n, q=q, factors=factors, ring_family=request.ring_family)
+        )
+        profile = {"factors": factors, "ring": ring, "ntt": ntt}
+        if profile_cache is not None:
+            profile_cache[profile_key] = profile
+    factors = profile["factors"]
+    ring = profile["ring"]
+    ntt = profile["ntt"]
+    sparse_penalty_bits = float(secret_distribution.estimator.get("fast_screen_penalty_bits", 0.0))
+    security_key = (n, q, round(error_distribution.stddev, 12), sparse_penalty_bits)
+    if security_cache is not None and security_key in security_cache:
+        security = security_cache[security_key]
+    else:
+        security = fast_security_estimate(
+            n=n,
+            q=q,
+            sigma=error_distribution.stddev,
+            sparse_penalty_bits=sparse_penalty_bits,
+        )
+        if security_cache is not None:
+            security_cache[security_key] = security
     warnings = [
         "This is an RLWE/LWE fast screen. It is not bound to a concrete scheme, so decryption error "
         "or rejection sampling times are not computed.",
@@ -391,6 +463,7 @@ def make_candidate(
             "selected_security_bits": selected_security_bits(security, request),
             "margin_bits": security_margin_bits(security, request),
             "meets_target": meets_target(security, request),
+            "security_level": security_level_for_bits(selected_security_bits(security, request)),
             "rank_score": None,
         },
         "warnings": warnings,
@@ -401,22 +474,20 @@ def make_candidate(
     return candidate
 
 
-def distribution_pairs(n: int, request: RequestOptions) -> list[tuple[DistributionSpec, DistributionSpec]]:
-    secret_candidates = distribution_candidates(n, request)
+def distribution_pairs(n: int, q: int, request: RequestOptions) -> list[tuple[DistributionSpec, DistributionSpec]]:
+    secret_candidates = distribution_candidates(n, request.secret_distribution)
     if not is_lwr_variant(request.hard_problem_variant):
-        return [(distribution, distribution) for distribution in secret_candidates]
-    return [
-        (secret_distribution, error_distribution)
-        for secret_distribution in secret_candidates
-        for error_distribution in lwr_error_distribution_candidates()
-    ]
+        error_candidates = distribution_candidates(n, request.error_distribution)
+        return list(product(secret_candidates, error_candidates))
+    error_candidates = lwr_error_distribution_candidates(q, request)
+    return list(product(secret_candidates, error_candidates))
 
 
-def distribution_candidates(n: int, request: RequestOptions) -> list[DistributionSpec]:
+def distribution_candidates(n: int, selector: str) -> list[DistributionSpec]:
     candidates: list[DistributionSpec] = []
-    if request.distribution in {"auto", "centered_binomial"}:
+    if selector in {"auto", "centered_binomial"}:
         candidates.extend(centered_binomial_spec(eta) for eta in ETA_VALUES)
-    if request.distribution in {"auto", "sparse_ternary"}:
+    if selector in {"auto", "sparse_ternary"}:
         for l0, l1 in SPARSE_TERNARY_PARAMETERS:
             spec = sparse_ternary_spec(n=n, l0=l0, l1=l1)
             if spec.estimator["plus_weight"] >= 1 and spec.estimator["minus_weight"] >= 1:
@@ -424,8 +495,9 @@ def distribution_candidates(n: int, request: RequestOptions) -> list[Distributio
     return candidates
 
 
-def lwr_error_distribution_candidates() -> list[DistributionSpec]:
-    return [uniform_spec(radius) for radius in UNIFORM_RADII]
+def lwr_error_distribution_candidates(q: int, request: RequestOptions) -> list[DistributionSpec]:
+    p_values = [int(request.error_distribution)]
+    return [compression_noise_spec(q, p) for p in p_values if p < q]
 
 
 def centered_binomial_spec(eta: int) -> DistributionSpec:
@@ -457,6 +529,31 @@ def uniform_spec(radius: int) -> DistributionSpec:
         symmetric=True,
         sampling=f"uniform integer coefficients in [-{radius}, {radius}]",
         estimator={"type": "uniform", "lower_bound": -radius, "upper_bound": radius},
+    )
+
+
+def compression_noise_spec(q: int, p: int) -> DistributionSpec:
+    profile = compression_noise_profile(q=q, p=p)
+    return DistributionSpec(
+        family="compression_noise",
+        name=f"CompressNoise(p={p})",
+        parameters={"q": q, "p": p, "mean_shift": profile.mean_shift},
+        mean=profile.mean,
+        variance=profile.variance,
+        stddev=profile.stddev,
+        support=profile.support,
+        symmetric=False,
+        sampling="deterministic LWR-style compression noise induced by q -> p",
+        estimator={
+            "type": "compression_noise",
+            "q": q,
+            "p": p,
+            "mean": profile.mean,
+            "stddev": profile.stddev,
+            "bounds": profile.support,
+            "density": profile.density,
+            "mean_shift": profile.mean_shift,
+        },
     )
 
 
@@ -529,15 +626,26 @@ def distribution_pair_name(secret_distribution: DistributionSpec, error_distribu
 
 
 def lwr_rounding_profile(error_distribution: DistributionSpec) -> dict[str, Any]:
-    lower_bound = int(error_distribution.estimator["lower_bound"])
-    upper_bound = int(error_distribution.estimator["upper_bound"])
+    estimator = error_distribution.estimator
+    if estimator.get("type") == "compression_noise":
+        return {
+            "p": int(estimator["p"]),
+            "rounding_modulus": int(estimator["p"]),
+            "error_distribution": error_distribution.name,
+            "error_support": error_distribution.support,
+            "mean": round(error_distribution.mean, 9),
+            "stddev": round(error_distribution.stddev, 9),
+            "note": "p is the compression modulus; error is the q -> p compression-noise law.",
+        }
+    lower_bound = int(estimator["lower_bound"])
+    upper_bound = int(estimator["upper_bound"])
     p = upper_bound - lower_bound + 1
     return {
         "p": p,
         "rounding_modulus": p,
         "error_distribution": error_distribution.name,
         "error_support": [lower_bound, upper_bound],
-        "note": "p is derived from the uniform rounding-error support size.",
+        "note": "legacy profile: p is derived from the uniform error support size.",
     }
 
 
@@ -607,8 +715,11 @@ def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: 
     quantum = float(security["quantum_bits"])
     if red_cost_model == "adps16":
         adps16 = security.get("adps16_core_svp_bits")
+        adps16_quantum = security.get("adps16_quantum_bits")
         if adps16 is not None:
             classical = float(adps16)
+        if adps16_quantum is not None:
+            quantum = float(adps16_quantum)
     if red_cost_model == "matzov":
         matzov = security.get("matzov_bits")
         matzov_quantum = security.get("matzov_quantum_bits")
@@ -626,6 +737,19 @@ def security_margin_bits(security: dict[str, Any], request: RequestOptions) -> f
     return round(selected - request.target_security, 3)
 
 
+def security_level_for_bits(bits: float | int | None) -> str:
+    if bits is None:
+        return "unclassified"
+    value = float(bits)
+    if value < 128:
+        return "below NIST-I"
+    if value < 192:
+        return "NIST-I"
+    if value < 256:
+        return "NIST-III"
+    return "NIST-V"
+
+
 def candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[float, ...]:
     margin = security_margin_bits(candidate["security"], request)
     ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
@@ -640,6 +764,7 @@ def candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[
     rank = (shortage, ring_rank, n, q, q_bits, ntt_layers_remaining, overkill, stddev, -ntt_score)
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = margin
+    candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
     candidate["selection"]["rank_score"] = rank
     return rank
 
@@ -925,8 +1050,8 @@ def ntt_search_strategy_text(request: RequestOptions) -> str:
 
 def distribution_strategy_text(request: RequestOptions) -> str:
     if is_lwr_variant(request.hard_problem_variant):
-        return "choose secret distribution after q; LWR rounding error is searched as a uniform distribution"
-    return "choose paired Xs = Xe distribution after q"
+        return f"choose secret distribution after q; LWR error uses q->p compression noise with p={request.error_distribution}"
+    return "choose secret and error distributions independently after q"
 
 
 def ntt_profile(n: int, q: int, factors: dict[int, int] | None = None, ring_family: str = "power2") -> dict[str, Any]:
@@ -1119,8 +1244,12 @@ def format_factorization(factors: dict[int, int]) -> str:
     return " * ".join(pieces)
 
 
-def run_sage_estimator(candidate: dict[str, Any], timeout: int) -> dict[str, Any]:
-    config = load_config()
+def run_sage_estimator(
+    candidate: dict[str, Any],
+    timeout: int,
+    config: AppConfig | None = None,
+) -> dict[str, Any]:
+    config = config or load_config()
     payload = {
         "problem": "lwe",
         "n": candidate["ring"]["n"],
@@ -1206,44 +1335,40 @@ def apply_estimator_result(
     estimator_result: dict[str, Any],
     request: RequestOptions,
 ) -> None:
-    classical = estimator_result["modes"].get("classical", {})
-    quantum = estimator_result["modes"].get("quantum", {})
-    classical_bits = classical.get("min_bits", candidate["security"]["classical_bits"])
-    quantum_bits = quantum.get("min_bits", candidate["security"]["quantum_bits"])
+    adps16_classical = estimator_model_bits(estimator_result, "adps16", "classical")
+    adps16_quantum = estimator_model_bits(estimator_result, "adps16", "quantum")
+    matzov_classical = estimator_model_bits(estimator_result, "matzov", "classical")
+    matzov_quantum = estimator_model_bits(estimator_result, "matzov", "quantum")
+    classical_bits = adps16_classical or candidate["security"]["classical_bits"]
+    quantum_bits = adps16_quantum or candidate["security"]["quantum_bits"]
     candidate["security"] = {
         "source": "sage-lattice-estimator",
         "classical_bits": floor_bits(float(classical_bits)),
         "quantum_bits": floor_bits(float(quantum_bits)),
-        "matzov_bits": floor_optional_bits(matzov_bits(estimator_result)),
-        "matzov_quantum_bits": floor_optional_bits(matzov_bits(estimator_result, mode="quantum")),
-        "adps16_core_svp_bits": floor_optional_bits(adps16_core_svp_bits(estimator_result)),
-        "attacks": estimator_result["modes"],
+        "matzov_bits": floor_optional_bits(matzov_classical),
+        "matzov_quantum_bits": floor_optional_bits(matzov_quantum),
+        "adps16_core_svp_bits": floor_optional_bits(adps16_classical),
+        "adps16_quantum_bits": floor_optional_bits(adps16_quantum),
+        "attacks": estimator_result.get("models", estimator_result["modes"]),
         "estimator_commit": estimator_result.get("estimator_commit"),
         "notes": [
             "Estimated as an LWE instance with n RLWE samples; use full scheme analysis for production.",
-            "Classical and quantum modes use the estimator ADPS16 cost model variants.",
+            "MATZOV and ADPS16 are each evaluated with their classical and quantum cost models.",
         ],
     }
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
     candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+    candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
     update_visual_security(candidate)
     candidate["warnings"].append("Sage/lattice-estimator rough validation was applied to this recommendation.")
 
 
-def matzov_bits(estimator_result: dict[str, Any], mode: str = "classical") -> float | None:
-    mode_result = estimator_result.get("modes", {}).get(mode, {})
-    attack = mode_result.get("attacks", {}).get("dual_hybrid", {})
-    if attack.get("ok") and attack.get("rop_bits") is not None:
-        return float(attack["rop_bits"])
-    return None
-
-
-def adps16_core_svp_bits(estimator_result: dict[str, Any], mode: str = "classical") -> float | None:
-    mode_result = estimator_result.get("modes", {}).get(mode, {})
-    attack = mode_result.get("attacks", {}).get("usvp", {})
-    if attack.get("ok") and attack.get("rop_bits") is not None:
-        return float(attack["rop_bits"])
+def estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str) -> float | None:
+    model_modes = estimator_result.get("models", {}).get(model)
+    mode_result = model_modes.get(mode, {}) if isinstance(model_modes, dict) else estimator_result.get("modes", {}).get(mode, {})
+    if mode_result.get("ok") and mode_result.get("min_bits") is not None:
+        return float(mode_result["min_bits"])
     return None
 
 

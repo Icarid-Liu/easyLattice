@@ -3,12 +3,14 @@ from unittest.mock import patch
 
 from app.config import AppConfig, EstimatorConfig
 from app.parameter_search import (
+    compression_noise_spec,
     factor_integer,
     is_prime,
     ntt_prime_candidates,
     recommend_rlwe,
     run_sage_estimator,
     security_margin_bits,
+    security_level_for_bits,
     parse_request,
     sparse_ternary_spec,
     uniform_spec,
@@ -16,6 +18,7 @@ from app.parameter_search import (
     ring_dimensions,
 )
 from app.estimator_runner import estimator_distribution
+from app.compression_noise import compression_noise_pdf, compression_noise_profile
 
 
 class ParameterSearchTests(unittest.TestCase):
@@ -46,7 +49,9 @@ class ParameterSearchTests(unittest.TestCase):
         q = candidate["modulus"]["q"]
         self.assertGreaterEqual(candidate["selection"]["selected_security_bits"], 128)
         self.assertEqual((q - 1) % n, 0)
-        self.assertIn(candidate["distribution"]["family"], {"centered_binomial", "sparse_ternary"})
+        self.assertIn(candidate["distribution"]["secret"]["family"], {"centered_binomial", "sparse_ternary"})
+        self.assertIn(candidate["distribution"]["error"]["family"], {"centered_binomial", "sparse_ternary"})
+        self.assertEqual(candidate["selection"]["security_level"], "NIST-I")
         self.assertIn("visual_scores", candidate)
         self.assertEqual(candidate["visual_scores"]["security"]["max_bits"], 512)
         self.assertGreater(candidate["visual_scores"]["compactness"]["score"], 0)
@@ -81,7 +86,7 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(spec.estimator["plus_weight"], 48)
         self.assertEqual(spec.estimator["minus_weight"], 48)
 
-    def test_classical_auto_candidate_uses_sparse_ternary(self):
+    def test_classical_auto_candidate_searches_secret_and_error_separately(self):
         spec = sparse_ternary_spec(n=512, l0=1, l1=0)
         self.assertAlmostEqual(spec.parameters["probability_plus"], 1 / 4)
         self.assertAlmostEqual(spec.parameters["probability_minus"], 1 / 4)
@@ -103,16 +108,20 @@ class ParameterSearchTests(unittest.TestCase):
         candidate = result["recommendation"]
         self.assertEqual(candidate["ring"]["n"], 512)
         self.assertEqual(candidate["modulus"]["q"], 257)
-        self.assertEqual(candidate["distribution"]["name"], "ST(l0=2, l1=0)")
+        self.assertEqual(candidate["distribution"]["secret"]["family"], "sparse_ternary")
+        self.assertEqual(candidate["distribution"]["error"]["family"], "sparse_ternary")
+        self.assertNotEqual(candidate["distribution"]["secret"]["name"], candidate["distribution"]["error"]["name"])
 
-    def test_lwr_variants_use_uniform_error_with_configurable_secret(self):
+    def test_lwr_variants_use_compression_noise_error_with_configurable_secret(self):
         request = parse_request({
             "hardProblemCategory": "LWE",
             "hardProblemVariant": "LWR",
-            "distribution": "centered_binomial",
+            "secretDistribution": "centered_binomial",
+            "errorDistribution": "5",
         })
 
-        self.assertEqual(request.distribution, "centered_binomial")
+        self.assertEqual(request.secret_distribution, "centered_binomial")
+        self.assertEqual(request.error_distribution, "5")
 
         result = recommend_rlwe({
             "hardProblemCategory": "LWE",
@@ -122,17 +131,20 @@ class ParameterSearchTests(unittest.TestCase):
             "redCostModel": "matzov",
             "nttScalePower": 1,
             "maxQBits": 24,
-            "distribution": "sparse_ternary",
+            "secretDistribution": "sparse_ternary",
+            "errorDistribution": "3",
         })
 
         candidate = result["recommendation"]
-        self.assertEqual(result["request"]["distribution"], "sparse_ternary")
+        self.assertEqual(result["request"]["secret_distribution"], "sparse_ternary")
+        self.assertEqual(result["request"]["error_distribution"], "3")
         self.assertEqual(candidate["distribution"]["secret"]["family"], "sparse_ternary")
-        self.assertEqual(candidate["distribution"]["error"]["family"], "uniform")
-        self.assertEqual(candidate["distribution"]["error"]["estimator"]["type"], "uniform")
+        self.assertEqual(candidate["distribution"]["error"]["family"], "compression_noise")
+        self.assertEqual(candidate["distribution"]["error"]["estimator"]["type"], "compression_noise")
         lower_bound, upper_bound = candidate["lwr"]["error_support"]
-        self.assertEqual(candidate["lwr"]["p"], upper_bound - lower_bound + 1)
-        self.assertEqual(candidate["lwr"]["p"] % 2, 1)
+        self.assertEqual(candidate["lwr"]["p"], 3)
+        self.assertLess(lower_bound, 0)
+        self.assertGreater(upper_bound, 0)
 
         with self.assertRaises(ValueError):
             parse_request({
@@ -141,7 +153,7 @@ class ParameterSearchTests(unittest.TestCase):
                 "distribution": "uniform",
             })
 
-    def test_lwr_auto_prefers_smallest_uniform_error_support(self):
+    def test_lwr_default_error_uses_p3_compression_noise(self):
         result = recommend_rlwe({
             "hardProblemCategory": "LWE",
             "hardProblemVariant": "RLWR",
@@ -150,15 +162,28 @@ class ParameterSearchTests(unittest.TestCase):
             "redCostModel": "matzov",
             "nttScalePower": 1,
             "maxQBits": 24,
-            "distribution": "auto",
+            "secretDistribution": "auto",
         })
 
         candidate = result["recommendation"]
         self.assertEqual(candidate["ring"]["n"], 512)
         self.assertEqual(candidate["modulus"]["q"], 257)
-        self.assertEqual(candidate["distribution"]["error"]["name"], "Uniform(-1,1)")
+        self.assertEqual(candidate["distribution"]["error"]["name"], "CompressNoise(p=3)")
         self.assertEqual(candidate["lwr"]["p"], 3)
         self.assertTrue(candidate["selection"]["meets_target"])
+
+    def test_compression_noise_moments_match_pointwise_pdf(self):
+        q = 17
+        p = 3
+        profile = compression_noise_profile(q, p)
+        pdf = compression_noise_pdf(q, p)
+        mean = sum(value * probability for value, probability in pdf.items())
+        variance = sum(value * value * probability for value, probability in pdf.items()) - mean * mean
+
+        self.assertEqual(profile.support, [min(pdf), max(pdf)])
+        self.assertAlmostEqual(profile.mean, float(mean))
+        self.assertAlmostEqual(profile.variance, float(variance))
+        self.assertEqual(sum(pdf.values()), 1)
 
     def test_uniform_distribution_uses_nd_uniform_estimator(self):
         spec = uniform_spec(2)
@@ -176,11 +201,32 @@ class ParameterSearchTests(unittest.TestCase):
             ("uniform", -2, 2),
         )
 
-    def test_lwr_p_comes_from_uniform_error_support_size(self):
-        profile = lwr_rounding_profile(uniform_spec(1))
+    def test_compression_noise_uses_nd_noise_distribution_estimator(self):
+        spec = compression_noise_spec(257, 3)
 
-        self.assertEqual(profile["error_support"], [-1, 1])
+        class FakeND:
+            @staticmethod
+            def NoiseDistribution(n, mean, stddev, bounds, _density):
+                return ("noise", n, mean, stddev, bounds, _density)
+
+        result = estimator_distribution(FakeND, {"estimator": spec.estimator}, 512)
+
+        self.assertEqual(result[0], "noise")
+        self.assertEqual(result[1], 512)
+        self.assertEqual(result[4], tuple(spec.support))
+
+    def test_lwr_rounding_profile_reports_compression_p(self):
+        profile = lwr_rounding_profile(compression_noise_spec(257, 3))
+
         self.assertEqual(profile["p"], 3)
+        self.assertEqual(profile["rounding_modulus"], 3)
+        self.assertIn("compression", profile["note"])
+
+    def test_security_level_for_bits(self):
+        self.assertEqual(security_level_for_bits(127.9), "below NIST-I")
+        self.assertEqual(security_level_for_bits(128), "NIST-I")
+        self.assertEqual(security_level_for_bits(192), "NIST-III")
+        self.assertEqual(security_level_for_bits(256), "NIST-V")
 
     def test_estimator_timeout_allows_five_minute_live_runs(self):
         request = parse_request({"estimatorTimeout": 999})
