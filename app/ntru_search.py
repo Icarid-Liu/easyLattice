@@ -23,6 +23,7 @@ from .parameter_search import (
     parse_hard_problem,
     performance_profile,
     update_visual_security,
+    security_level_for_bits,
 )
 from .remote_estimator import estimate_remotely
 
@@ -336,6 +337,7 @@ def make_ntru_candidate(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[s
             "selected_security_bits": floor_bits(spec.screen_bits),
             "margin_bits": floor_bits(spec.screen_bits - request.target_security),
             "meets_target": spec.screen_bits >= request.target_security,
+            "security_level": security_level_for_bits(floor_bits(spec.screen_bits)),
             "rank_score": None,
         },
         "warnings": [
@@ -524,6 +526,7 @@ def apply_ntru_estimator_result(
     candidate["selection"]["selected_security_bits"] = bits
     candidate["selection"]["margin_bits"] = floor_bits(bits - request.target_security)
     candidate["selection"]["meets_target"] = bits >= request.target_security
+    candidate["selection"]["security_level"] = security_level_for_bits(bits)
     update_visual_security(candidate)
     candidate["warnings"].append("Sage/lattice-estimator NTRU rough validation was applied.")
     if bits < raw_bits:

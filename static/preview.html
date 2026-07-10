@@ -377,7 +377,6 @@
 
       .metric-panel,
       .detail-column,
-      .json-panel,
       .warning-band {
         background: var(--panel);
         border: 1px solid var(--line);
@@ -557,20 +556,6 @@
       .candidate span {
         color: var(--muted);
         font-size: 13px;
-      }
-
-      .json-panel {
-        overflow: auto;
-        max-height: 460px;
-        padding: 0;
-      }
-
-      pre {
-        margin: 0;
-        padding: 16px;
-        font-size: 13px;
-        line-height: 1.5;
-        white-space: pre-wrap;
       }
 
       .hidden {
@@ -822,9 +807,6 @@
           <div id="candidate-list" class="candidate-list"></div>
         </section>
 
-        <section id="json-panel" class="json-panel hidden">
-          <pre id="json-output"></pre>
-        </section>
       </main>
     </div>
 
@@ -837,8 +819,6 @@
       const details = document.querySelector("#details");
       const warnings = document.querySelector("#warnings");
       const alternatives = document.querySelector("#alternatives");
-      const jsonPanel = document.querySelector("#json-panel");
-      const jsonOutput = document.querySelector("#json-output");
       const copyJson = document.querySelector("#copy-json");
       const nttScale = document.querySelector("#ntt-scale");
       const nttScaleLabel = document.querySelector("#ntt-scale-label");
@@ -949,7 +929,7 @@
         title.textContent = `Recommended lattice instance (${candidate.ring.n}, ${candidate.modulus.q})`;
         subtitle.textContent = `${source} · ${result.search.generated_candidates} candidates · ${result.search.elapsed_ms} ms · preview`;
 
-        show(resultGrid, details, warnings, alternatives, jsonPanel);
+        show(resultGrid, details, warnings, alternatives);
         setText("#classic-bits", `${candidate.security.classical_bits} bits`);
         setText("#quantum-bits", `${candidate.security.quantum_bits} bits`);
         setText("#ring-n", String(candidate.ring.n));
@@ -1000,7 +980,6 @@
         });
 
         renderAlternatives(result.alternatives);
-        jsonOutput.textContent = JSON.stringify(candidate, null, 2);
       }
 
       function renderParameterProfile(candidate) {

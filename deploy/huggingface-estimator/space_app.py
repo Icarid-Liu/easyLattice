@@ -211,6 +211,7 @@ def require_distribution(payload: dict[str, Any], key: str) -> None:
         "discrete_gaussian",
         "uniform",
         "uniform_mod",
+        "compression_noise",
         "composite_moment",
     }
     if estimator_type not in allowed:

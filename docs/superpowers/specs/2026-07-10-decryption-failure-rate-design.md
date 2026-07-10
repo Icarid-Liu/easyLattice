@@ -23,16 +23,16 @@ For NTRU, the coefficient error distribution is:
 `E = p0 * (g*s)_n + p1 * (f*e)_n + p2 * (f*m)_n + p3 * e`.
 
 `(a*b)_n` means the product distribution of one coefficient of `a` and `b`,
-summed by `n`-fold convolution. The overall pre-correction DFR is
-`1 - (1 - P(|E| > Delta))^n`.
+summed by `n`-fold convolution. The overall pre-correction DFR uses the union
+bound `min(1, n * P(|E| > Delta))`.
 
 For LWE, the coefficient error distribution is:
 
 `E = ((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2`.
 
 The two product terms use `m`-fold convolution. The output has `n`
-coefficients, so the overall pre-correction DFR is
-`1 - (1 - P(|E| > Delta))^n`.
+coefficients, so the overall pre-correction DFR uses the union bound
+`min(1, n * P(|E| > Delta))`.
 
 The NTRU coefficients `p0`, `p1`, `p2`, `p3`, and `Delta`, and the LWE value
 `Delta`, must be non-negative. Numeric values and the restricted expression

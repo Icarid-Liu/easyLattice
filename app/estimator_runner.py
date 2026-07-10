@@ -6,6 +6,12 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.compression_noise import compression_noise_estimator_distribution
+
 
 class AttackTimeout(Exception):
     pass
@@ -240,6 +246,8 @@ def estimator_distribution(ND, distribution: dict, n: int):
         return ND.Uniform(int(estimator["lower_bound"]), int(estimator["upper_bound"]))
     if estimator_type == "uniform_mod":
         return ND.UniformMod(int(estimator["modulus"]))
+    if estimator_type == "compression_noise":
+        return compression_noise_estimator_distribution(ND, estimator, n)
     if estimator_type == "composite_moment":
         bounds = estimator.get("bounds", [-10, 10])
         return ND.NoiseDistribution(

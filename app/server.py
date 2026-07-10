@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .agent import recommend_with_agent
 from .config import public_config
+from .decryption_failure import calculate_decryption_failure
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,23 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/decryption-failure/calculate":
+            try:
+                payload = self.read_json()
+                result = calculate_decryption_failure(payload)
+            except ValueError as exc:
+                self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except json.JSONDecodeError:
+                self.write_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            except Exception as exc:
+                self.write_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                return
+
+            self.write_json(result)
+            return
+
         if parsed.path == "/api/agent/jobs":
             try:
                 payload = self.read_json()

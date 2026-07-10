@@ -15,8 +15,12 @@ not part of the security calculation.
    shape and records whether an LLM was used.
 4. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
    is loaded only when `useLLM=true` and `llm.enabled=true`.
-5. `app.server`: HTTP routing and static UI serving.
-6. `static`: browser UI. The LLM checkbox is disabled unless public config says
+5. `app.decryption_failure`: independent finite-PMF DFR engine for NTRU and
+   LWE correctness expressions. It converts estimator-style distribution
+   descriptors into finite `value -> probability` maps without modifying the
+   third-party estimator.
+6. `app.server`: HTTP routing and static UI serving.
+7. `static`: browser UI. The LLM checkbox is disabled unless public config says
    the local LLM provider is enabled and authenticated.
 
 ## Default Path
@@ -41,6 +45,32 @@ When `useEstimator=true`, the browser submits the same request to
 3-5 minute Sage/lattice-estimator runs off a single long browser request while
 leaving the deterministic fast path synchronous.
 
+## Decryption Failure Path
+
+`POST /api/decryption-failure/calculate` bypasses the agent and estimator. It
+runs locally and synchronously:
+
+```text
+DFR request JSON -> app.decryption_failure -> finite PMF result JSON
+```
+
+The calculator accepts NTRU and LWE forms. It uses `|E| <= Delta` as the
+success boundary and returns single-coefficient and pre-error-correction vector
+DFR as `log2(DFR)`, using a union bound that does not assume independent output
+coefficients. Explicit raw probability fields are retained only for external
+ECC calculations.
+
+Bounded estimator-style distributions, custom finite PMFs, LWR floor
+compression, and Kyber nearest-integer compression are converted into the same
+PMF representation. A generic `ND.NoiseDistribution` has only moments and is
+therefore rejected unless the caller supplies a custom PMF. Fixed-weight sparse
+ternary is converted to its coefficient marginal with an explicit correlation
+warning. The default arithmetic precision is 512 bits; discrete-Gaussian tails
+are bounded and reported rather than silently discarded.
+
+Error correction is outside this boundary. Concrete schemes such as LAC and
+DAWN must consume the reported pre-correction values in their own ECC model.
+
 ## LLM-Assisted Path
 
 `POST /api/agent/recommend` with `useLLM=true` runs:
@@ -54,13 +84,16 @@ intent + current controls
 ```
 
 The provider may only return a small whitelist of constraint keys such as
-`targetSecurity`, `ringFamily`, `redCostModel`, `nttScalePower`, and
-`distribution`. Unsupported keys are dropped before search.
+`targetSecurity`, `ringFamily`, `redCostModel`, `nttScalePower`,
+`secretDistribution`, `errorDistribution`, and `compressionP`. Unsupported keys
+are dropped before search.
 
 For LWR, RLWR, and MLWR requests, `distribution` is interpreted as the secret
-distribution selector. The rounding-error distribution is generated
-deterministically as a symmetric uniform distribution, and the selected instance
-reports the corresponding LWR `p` derived from that support size.
+distribution selector for legacy requests. New requests use
+`secretDistribution` for `Xs`; `errorDistribution` is a compression modulus
+`p`. The rounding-error distribution is generated deterministically as the
+centered `q -> p` compression-noise law and is passed to the estimator through a
+project-local mediator that creates an `ND.NoiseDistribution` moment profile.
 
 ## Secret Handling
 
