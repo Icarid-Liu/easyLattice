@@ -1,17 +1,22 @@
 import json
+import os
+import stat
 import sys
 import threading
 import unittest
 from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from app.server import EasyLatticeHandler
 from app.local_runner import (
     RUNNER_TOKEN_HEADER,
     LocalRunnerState,
     RunnerJob,
     create_runner_server,
+    normalize_user_path,
     runner_page_url,
     validate_estimator_root,
     validate_sage_binary,
@@ -58,6 +63,41 @@ class LocalRunnerTests(unittest.TestCase):
                 self.assertEqual(job.status, "succeeded")
             finally:
                 state.close()
+
+    def test_wsl_unc_paths_are_normalized_for_the_current_distribution(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sage = root / "sage"
+            sage.write_text("#!/bin/sh\n", encoding="utf-8")
+            sage.chmod(sage.stat().st_mode | stat.S_IXUSR)
+            estimator = root / "estimator"
+            estimator.mkdir()
+            (estimator / "__init__.py").write_text("", encoding="utf-8")
+            unc_root = r"\\wsl.localhost\Ubuntu-22.04" + str(root).replace("/", "\\")
+
+            with patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu-22.04"}, clear=False):
+                self.assertEqual(normalize_user_path(f'"{unc_root}\\sage"'), str(sage))
+                self.assertEqual(validate_sage_binary(f'"{unc_root}\\sage"'), str(sage))
+                self.assertEqual(validate_estimator_root(f"{unc_root}"), str(root))
+                with self.assertRaises(ValueError):
+                    normalize_user_path(r"\\wsl$\Debian\usr\local\bin\sage")
+
+    def test_standard_server_serves_relative_browser_assets(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            for path, expected_type in (("/", "text/html"), ("/styles.css", "text/css"), ("/app.js", "javascript")):
+                connection.request("GET", path)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200, path)
+                self.assertIn(expected_type, response.getheader("Content-Type", ""), path)
+                response.read()
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
 
     def test_token_protected_status_and_cors(self):
         with TemporaryDirectory() as tmpdir:

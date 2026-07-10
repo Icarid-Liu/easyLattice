@@ -5,6 +5,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -295,7 +296,7 @@ def local_runner_handler(state: LocalRunnerState):
 
 
 def validate_sage_binary(raw: Any) -> str | None:
-    value = str(raw or "").strip()
+    value = normalize_user_path(raw)
     if not value:
         return None
     direct = Path(value).expanduser()
@@ -308,7 +309,7 @@ def validate_sage_binary(raw: Any) -> str | None:
 
 
 def validate_estimator_root(raw: Any) -> str | None:
-    value = str(raw or "").strip()
+    value = normalize_user_path(raw)
     if not value:
         return None
     path = Path(value).expanduser().resolve()
@@ -316,6 +317,29 @@ def validate_estimator_root(raw: Any) -> str | None:
     if not (root / "estimator" / "__init__.py").is_file():
         raise ValueError("Estimator path must contain estimator/__init__.py.")
     return str(root)
+
+
+def normalize_user_path(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    if not value.startswith("\\\\"):
+        return value
+
+    match = re.fullmatch(
+        r"\\\\(?:wsl(?:\.localhost)?|wsl\$)\\([^\\]+)(?:\\(.*))?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return value
+    current_distro = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    requested_distro, suffix = match.groups()
+    if not current_distro:
+        raise ValueError("WSL UNC paths can only be used by a runner inside WSL.")
+    if requested_distro.casefold() != current_distro.casefold():
+        raise ValueError(f"WSL UNC path must target the current distribution: {current_distro}.")
+    return "/" + (suffix or "").replace("\\", "/").lstrip("/")
 
 
 def discover_sage_binary() -> str | None:
