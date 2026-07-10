@@ -24,27 +24,12 @@ const errorDistributionLabel = document.querySelector("#error-distribution-label
 const languageSelect = document.querySelector("#language-select");
 const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
-const runnerPanel = document.querySelector("#runner-panel");
-const runnerStatus = document.querySelector("#runner-status");
-const runnerConfigForm = document.querySelector("#runner-config-form");
-const runnerPathFields = document.querySelector("#runner-path-fields");
-const runnerSagePath = document.querySelector("#runner-sage-path");
-const runnerEstimatorPath = document.querySelector("#runner-estimator-path");
-const runnerChange = document.querySelector("#runner-change");
-const runnerDownload = document.querySelector("#runner-download");
-const runnerRetry = document.querySelector("#runner-retry");
 
 let lastResult = null;
 let lastDfrResult = null;
 let publicConfig = null;
 let currentLanguage = supportedLanguage(localStorage.getItem("easyLatticeLanguage") || navigator.language || "en");
 let activeWorkspace = "search";
-let apiBaseUrl = normalizeApiBaseUrl(apiBaseSetting());
-let runnerToken = runnerTokenSetting();
-let localRunnerStatus = null;
-let runnerPathsVisible = false;
-let runnerUnavailable = false;
-const DEFAULT_RUNNER_API_BASE = "http://127.0.0.1:8127";
 const DEFAULT_DISTRIBUTION_OPTIONS = [
   ["auto", "distributionAuto"],
   ["centered_binomial", "centeredBinomial"],
@@ -203,17 +188,6 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm: auth missing · {provider} / {model}",
     configLlmDisabled: "llm: disabled",
     configEstimator: "estimator: {parts}",
-    localRunner: "Local runner",
-    runnerReady: "Ready",
-    runnerPathsRequired: "Paths required",
-    runnerUnavailable: "Not connected",
-    runnerConnecting: "Connecting",
-    sagePath: "Sage executable path",
-    estimatorPath: "lattice-estimator path",
-    saveRunnerPaths: "Save paths",
-    changeRunnerPaths: "Change paths",
-    downloadRunner: "Download local runner",
-    retryRunner: "Retry",
     workspace: "Workspace",
     parameterSearch: "Parameter search",
     decryptionFailure: "Decryption failure",
@@ -363,17 +337,6 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm：缺少认证 · {provider} / {model}",
     configLlmDisabled: "llm：已禁用",
     configEstimator: "estimator：{parts}",
-    localRunner: "本地运行器",
-    runnerReady: "已就绪",
-    runnerPathsRequired: "需要设置路径",
-    runnerUnavailable: "未连接",
-    runnerConnecting: "正在连接",
-    sagePath: "Sage 可执行文件路径",
-    estimatorPath: "lattice-estimator 路径",
-    saveRunnerPaths: "保存路径",
-    changeRunnerPaths: "修改路径",
-    downloadRunner: "下载本地运行器",
-    retryRunner: "重试",
     workspace: "工作区",
     parameterSearch: "参数搜索",
     decryptionFailure: "解密错误率",
@@ -446,44 +409,14 @@ syncWorkspace();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!hasLiveApi()) return;
   await requestRecommendation();
 });
 
 dfrForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!hasLiveApi()) return;
   await requestDfr();
-});
-
-runnerConfigForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    localRunnerStatus = await postJson("/api/runner/configure", {
-      sageBinary: runnerSagePath.value.trim(),
-      latticeEstimatorPath: runnerEstimatorPath.value.trim(),
-    });
-    runnerPathsVisible = !localRunnerStatus.configured;
-    renderRunnerStatus();
-  } catch (error) {
-    runnerStatus.textContent = error.message;
-    runnerStatus.classList.add("runner-error");
-  }
-});
-
-runnerChange.addEventListener("click", () => {
-  runnerPathsVisible = true;
-  renderRunnerStatus();
-});
-
-runnerRetry.addEventListener("click", async () => {
-  runnerStatus.textContent = t("runnerConnecting");
-  runnerStatus.classList.remove("runner-error");
-  if (await connectLocalRunner()) {
-    await loadPublicConfig();
-    await loadRunnerStatus();
-    await requestRecommendation();
-  } else {
-    renderRunnerUnavailable();
-  }
 });
 
 copyJson.addEventListener("click", async () => {
@@ -518,8 +451,6 @@ languageSelect.addEventListener("change", () => {
   if (activeWorkspace === "search" && lastResult) renderResult(lastResult);
   if (activeWorkspace === "dfr" && lastDfrResult) renderDfrResult(lastDfrResult);
   if (activeWorkspace === "dfr" && !lastDfrResult) setDfrIdleHeading();
-  if (localRunnerStatus) renderRunnerStatus();
-  if (runnerUnavailable) renderRunnerUnavailable();
 });
 document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
   input.addEventListener("change", syncDistributionOptions);
@@ -1193,36 +1124,16 @@ function setStatus(kind, text) {
   statusPill.textContent = text;
 }
 
-function apiBaseSetting() {
-  const queryValue = new URLSearchParams(window.location.search).get("apiBase");
-  return queryValue || window.EASYLATTICE_API_BASE_URL || "";
-}
-
-function runnerTokenSetting() {
-  const queryValue = new URLSearchParams(window.location.search).get("runnerToken");
-  return queryValue || window.EASYLATTICE_RUNNER_TOKEN || "";
-}
-
-function normalizeApiBaseUrl(value) {
-  return String(value || "").trim().replace(/\/+$/, "");
-}
-
 function apiUrl(path) {
-  return apiBaseUrl ? `${apiBaseUrl}${path}` : path;
+  return path;
 }
 
 function apiHeaders(headers = {}) {
-  if (!runnerToken) return headers;
-  return { ...headers, "X-EasyLattice-Runner-Token": runnerToken };
+  return headers;
 }
 
-function canRequestApi() {
-  if (apiBaseUrl) return true;
-  return ["127.0.0.1", "localhost"].includes(window.location.hostname);
-}
-
-function isLocalPage() {
-  return ["127.0.0.1", "localhost"].includes(window.location.hostname);
+function hasLiveApi() {
+  return window.location.protocol !== "file:" && window.location.hostname !== "icarid-liu.github.io";
 }
 
 function sleep(ms) {
@@ -1252,14 +1163,11 @@ function updateNttScaleLabel() {
 void initializeApp();
 
 async function initializeApp() {
-  if (apiBaseUrl && runnerToken) removeLegacyRunnerQuery();
-  if (!canRequestApi() && !(await connectLocalRunner())) {
-    renderRunnerUnavailable();
+  if (!hasLiveApi()) {
     setStatus("idle", t("statusIdle"));
     return;
   }
   await loadPublicConfig();
-  await loadRunnerStatus();
   await requestRecommendation();
 }
 
@@ -1275,68 +1183,6 @@ async function loadPublicConfig() {
   } catch (_error) {
     return;
   }
-}
-
-async function loadRunnerStatus() {
-  if (!apiBaseUrl || !runnerToken) return;
-  try {
-    localRunnerStatus = await getJson("/api/runner/status");
-    runnerPathsVisible = !localRunnerStatus.configured;
-    renderRunnerStatus();
-  } catch (_error) {
-    return;
-  }
-}
-
-async function connectLocalRunner() {
-  if (isLocalPage() || apiBaseUrl) return Boolean(apiBaseUrl);
-  try {
-    const response = await fetch(`${DEFAULT_RUNNER_API_BASE}/api/runner/connect`);
-    const connection = await response.json();
-    if (!response.ok || !connection.api_base || !connection.runner_token) return false;
-    apiBaseUrl = normalizeApiBaseUrl(connection.api_base);
-    runnerToken = String(connection.runner_token);
-    localRunnerStatus = connection.status || null;
-    runnerUnavailable = false;
-    removeLegacyRunnerQuery();
-    return true;
-  } catch (_error) {
-    return false;
-  }
-}
-
-function removeLegacyRunnerQuery() {
-  const url = new URL(window.location.href);
-  if (!url.searchParams.has("apiBase") && !url.searchParams.has("runnerToken")) return;
-  url.searchParams.delete("apiBase");
-  url.searchParams.delete("runnerToken");
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-}
-
-function renderRunnerStatus() {
-  if (!localRunnerStatus) return;
-  runnerUnavailable = false;
-  runnerPanel.classList.remove("hidden");
-  const configured = Boolean(localRunnerStatus.configured);
-  runnerStatus.textContent = t(configured ? "runnerReady" : "runnerPathsRequired");
-  runnerStatus.classList.toggle("runner-error", !configured);
-  runnerSagePath.value = localRunnerStatus.sage?.path || "";
-  runnerEstimatorPath.value = localRunnerStatus.estimator?.path || "";
-  runnerPathFields.classList.toggle("hidden", configured && !runnerPathsVisible);
-  runnerChange.classList.toggle("hidden", !configured || runnerPathsVisible);
-  runnerDownload.classList.add("hidden");
-  runnerRetry.classList.add("hidden");
-}
-
-function renderRunnerUnavailable() {
-  runnerUnavailable = true;
-  runnerPanel.classList.remove("hidden");
-  runnerStatus.textContent = t("runnerUnavailable");
-  runnerStatus.classList.add("runner-error");
-  runnerPathFields.classList.add("hidden");
-  runnerChange.classList.add("hidden");
-  runnerDownload.classList.remove("hidden");
-  runnerRetry.classList.remove("hidden");
 }
 
 function renderPublicConfig(config) {

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "easylattice-local-runner"
+name = "easylattice"
 version = "0.1.0"
-description = "easyLattice localhost companion runner"
+description = "Local lattice-cryptography parameter selection tool"
 requires-python = ">=3.10"
 
 [tool.setuptools]

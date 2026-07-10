@@ -4,10 +4,9 @@
 
 面向格密码参数选择的本地优先、开源原型工具。
 
-公开的 GitHub Pages 页面只是浏览器 UI，本身不提供共享后端，也不会调用 LLM、Sage
-或 `lattice-estimator`。运行下文的本地运行器后，同一页面只会连接本机回环地址，
-实时 Sage 和 estimator 计算均在用户本机完成，无需 clone 本仓库或编辑
-`config.local.json`。
+公开的 GitHub Pages 页面是静态界面预览，不提供共享后端，也不会调用 LLM、Sage 或
+`lattice-estimator`。如需实时计算，请 clone 本仓库并启动本地服务；Sage、estimator
+和可选模型配置均保留在用户本机。
 
 ## 概览
 
@@ -68,34 +67,24 @@ endpoint/API key，以及具体方案所需的纠错、拒绝采样或 smoothing
 设置 `llm.enabled=true`，否则 LLM 层保持关闭；启用后它也只会把自由文本意图转换为
 确定性搜索约束。
 
-## 公开网页与本地运行器
+## 公开预览与本地运行
 
-托管 UI 不提供共享计算服务。下载
-[`easyLattice-runner.pyz`](https://github.com/Icarid-Liu/easyLattice/releases/latest/download/easyLattice-runner.pyz)，
-并使用 Python 3.10 或更高版本运行：
+[GitHub Pages](https://icarid-liu.github.io/easyLattice/) 只用于静态展示界面，不提供
+共享后端。
 
-```bash
-python3 easyLattice-runner.pyz
-```
-
-运行器固定监听 `127.0.0.1:8127`，并会从 `SAGE_BINARY`、
-`LATTICE_ESTIMATOR_PATH`、命令路径和常见本地目录检测 Sage 与
-`lattice-estimator`。之后直接打开普通 GitHub Pages 地址即可自动发现正在运行的
-运行器。只有自动检测不完整时，网页才要求填写 Sage 可执行文件和 estimator 根目录；
-根目录必须包含 `estimator/__init__.py`，无需填写 API Base 或复制 token。
-
-运行器只监听 `127.0.0.1`，并使用进程生命周期内有效的随机 token。只有已配置的公开
-页面来源能取得这个 token，后续所有 API 请求仍必须携带它。本地路径、Sage 输出、
-estimator 源码和 API key 不会上传到公开站点。
-
-从本仓库构建开发版：
+如需实时参数搜索和 DFR 计算，请 clone 本仓库并启动本地服务：
 
 ```bash
-python3 scripts/build-runner.py
-python3 dist/easyLattice-runner.pyz
+git clone https://github.com/Icarid-Liu/easyLattice.git
+cd easyLattice
+./scripts/setup-local.sh --start
 ```
 
-下表中的原型设置仅作示例。实时输出请使用本地运行器，展示数值不构成参数认证。
+然后打开 `http://127.0.0.1:8000`。该脚本会创建 `config.local.json`，尽量检测本地
+Sage/lattice-estimator 路径，并将可选 LLM 设置保留在本机。也可以使用
+`python3 -m app.server` 手动启动。
+
+下表中的原型设置仅作示例。实时输出请使用本地服务，展示数值不构成参数认证。
 
 表格固定使用以下控件：
 

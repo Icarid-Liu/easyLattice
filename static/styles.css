@@ -123,63 +123,6 @@ textarea {
   font-size: 13px;
 }
 
-.runner-panel {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 22px;
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-}
-
-.runner-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.runner-heading span,
-.runner-heading strong {
-  font-size: 13px;
-}
-
-.runner-heading span {
-  color: var(--muted);
-  font-weight: 650;
-}
-
-.runner-heading strong {
-  color: var(--green-dark);
-  text-align: right;
-}
-
-.runner-heading strong.runner-error {
-  color: var(--red);
-}
-
-.runner-form,
-.runner-path-fields {
-  display: grid;
-  gap: 10px;
-}
-
-.runner-path-fields label {
-  display: grid;
-  gap: 6px;
-}
-
-.runner-path-fields label span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.runner-path-fields .secondary-button,
-.runner-form > .secondary-button {
-  justify-self: start;
-}
-
 .form-stack {
   gap: 18px;
 }
@@ -407,6 +350,10 @@ textarea {
 
 .primary-button {
   background: var(--green);
+  color: #fff;
+}
+
+.primary-button span {
   color: #fff;
 }
 

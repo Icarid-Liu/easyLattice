@@ -4,11 +4,10 @@
 
 Local-first, open-source prototype for lattice-cryptography parameter selection.
 
-The public GitHub Pages site is a browser UI. By itself it has no shared
-backend and does not call an LLM, Sage, or `lattice-estimator`. Run the local
-companion below and the same UI uses only your loopback machine for live Sage
-and estimator calculations. This does not require cloning the repository or
-editing `config.local.json`.
+The public GitHub Pages site is a static interface preview. It has no shared
+backend and does not call an LLM, Sage, or `lattice-estimator`. For live
+calculation, clone the repository and start the local server; Sage, estimator,
+and optional model configuration remain on your own machine.
 
 ## Overview
 
@@ -81,38 +80,27 @@ smoothing parameters. The LLM layer is disabled unless `llm.enabled=true` is
 set locally; when enabled, it only turns free-form intent into deterministic
 search constraints.
 
-## Public Web and Local Runner
+## Public Preview and Local Running
 
-The hosted UI does not expose a shared compute service. Download
-[`easyLattice-runner.pyz`](https://github.com/Icarid-Liu/easyLattice/releases/latest/download/easyLattice-runner.pyz)
-and run it with Python 3.10 or later:
+[GitHub Pages](https://icarid-liu.github.io/easyLattice/) is a static preview
+of the interface. It is intended for inspection only and does not run a shared
+backend.
 
-```bash
-python3 easyLattice-runner.pyz
-```
-
-The runner listens on `127.0.0.1:8127`, detects Sage and
-`lattice-estimator` from `SAGE_BINARY`, `LATTICE_ESTIMATOR_PATH`, the command
-path, and common local directories. Open the normal GitHub Pages URL at any
-time; it discovers a running runner automatically. When detection is
-incomplete, the UI asks only for the Sage executable and estimator-root paths.
-The estimator root must contain `estimator/__init__.py`; no API base URL or
-token needs to be copied.
-
-The runner listens only on `127.0.0.1` and uses a process-local random token.
-Only the configured public-page origin can bootstrap that token, and all later
-API requests require it. Local paths, Sage output, estimator source, and API
-keys are never uploaded to the public site.
-
-For development builds from this checkout:
+For live parameter search and DFR calculation, clone the repository and start
+the local service:
 
 ```bash
-python3 scripts/build-runner.py
-python3 dist/easyLattice-runner.pyz
+git clone https://github.com/Icarid-Liu/easyLattice.git
+cd easyLattice
+./scripts/setup-local.sh --start
 ```
+
+Open `http://127.0.0.1:8000`. The setup script creates `config.local.json`,
+detects local Sage/lattice-estimator paths where possible, and keeps optional
+LLM settings local. Manual startup is also supported with `python3 -m app.server`.
 
 The following representative prototype settings are examples only; use the
-local runner for live output. They are not parameter certifications.
+local server for live output. They are not parameter certifications.
 
 Controls used for the table:
 
