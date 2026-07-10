@@ -81,6 +81,46 @@ def cost_to_json(cost) -> dict:
     return fields
 
 
+def reduction_model_variants() -> dict[str, dict[str, object]]:
+    from estimator.reduction import ADPS16, MATZOV
+
+    return {
+        "matzov": {
+            "classical": MATZOV(),
+            "quantum": MATZOV(nn="quantum"),
+        },
+        "adps16": {
+            "classical": ADPS16(),
+            "quantum": ADPS16(mode="quantum"),
+        },
+    }
+
+
+def summarize_attacks(attacks: dict[str, dict]) -> dict:
+    successful = {
+        name: result
+        for name, result in attacks.items()
+        if result.get("ok") and result.get("rop_bits") is not None
+    }
+    if not successful:
+        return {
+            "ok": False,
+            "message": "no attack estimate completed",
+            "attacks": attacks,
+        }
+    best_attack, best_result = min(successful.items(), key=lambda item: item[1]["rop_bits"])
+    return {
+        "ok": True,
+        "min_bits": best_result["rop_bits"],
+        "best_attack": best_attack,
+        "attacks": attacks,
+    }
+
+
+def failure_mode(message: str) -> dict:
+    return {"ok": False, "message": message, "attacks": {}}
+
+
 def run(payload: dict) -> dict:
     if payload.get("problem") == "ntru":
         return run_ntru(payload)
@@ -89,7 +129,6 @@ def run(payload: dict) -> dict:
 
 def run_lwe(payload: dict) -> dict:
     from estimator import LWE, ND
-    from estimator.reduction import ADPS16
 
     n = int(payload["n"])
     q = int(payload["q"])
@@ -108,48 +147,32 @@ def run_lwe(payload: dict) -> dict:
         tag=f"RLWE screen n={n}, q={q}, {distribution.get('name', distribution.get('family'))}",
     ).normalize()
 
-    modes = {}
-    for mode in ("classical", "quantum"):
-        model = ADPS16(mode=mode)
-        attacks = {}
-        for name in ("usvp", "dual_hybrid"):
-            try:
-                with time_limit(per_attack_timeout):
-                    if name == "usvp":
-                        cost = LWE.primal_usvp(params, red_cost_model=model, red_shape_model="gsa")
-                    else:
-                        cost = LWE.dual_hybrid(params, red_cost_model=model)
-                attacks[name] = {"ok": True, **cost_to_json(cost)}
-            except AttackTimeout as exc:
-                attacks[name] = {"ok": False, "message": str(exc)}
-            except Exception as exc:
-                attacks[name] = {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+    models = {}
+    for model_name, modes in reduction_model_variants().items():
+        models[model_name] = {}
+        for mode, model in modes.items():
+            attacks = {}
+            for name in ("usvp", "dual_hybrid"):
+                try:
+                    with time_limit(per_attack_timeout):
+                        if name == "usvp":
+                            cost = LWE.primal_usvp(params, red_cost_model=model, red_shape_model="gsa")
+                        else:
+                            cost = LWE.dual_hybrid(params, red_cost_model=model)
+                    attacks[name] = {"ok": True, **cost_to_json(cost)}
+                except AttackTimeout as exc:
+                    attacks[name] = {"ok": False, "message": str(exc)}
+                except Exception as exc:
+                    attacks[name] = {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+            models[model_name][mode] = summarize_attacks(attacks)
 
-        successful = {
-            name: result
-            for name, result in attacks.items()
-            if result.get("ok") and result.get("rop_bits") is not None
-        }
-        if successful:
-            best_attack, best_result = min(successful.items(), key=lambda item: item[1]["rop_bits"])
-            modes[mode] = {
-                "ok": True,
-                "min_bits": best_result["rop_bits"],
-                "best_attack": best_attack,
-                "attacks": attacks,
-            }
-        else:
-            modes[mode] = {
-                "ok": False,
-                "message": "no attack estimate completed",
-                "attacks": attacks,
-            }
-
-    ok = any(mode.get("ok") for mode in modes.values())
+    default_modes = models["adps16"]
+    ok = all(mode.get("ok") for family in models.values() for mode in family.values())
     return {
         "ok": ok,
         "estimator_commit": estimator_commit(),
-        "modes": modes,
+        "modes": default_modes,
+        "models": models,
         "parameters": {
             "n": n,
             "q": q,
@@ -163,7 +186,6 @@ def run_lwe(payload: dict) -> dict:
 
 def run_ntru(payload: dict) -> dict:
     from estimator import NTRU, ND
-    from sage.all import oo
 
     n = int(payload["n"])
     q = int(payload["q"])
@@ -178,48 +200,40 @@ def run_ntru(payload: dict) -> dict:
         m=n,
         ntru_type=str(payload.get("ntru_type", "circulant")),
         tag=f"NTRU screen n={n}, q={q}",
-    )
+    ).normalize()
 
-    try:
-        with time_limit(per_attack_timeout):
-            rough = NTRU.estimate.rough(params, quiet=True, catch_exceptions=True)
-    except AttackTimeout as exc:
-        return {
-            "ok": False,
-            "message": str(exc),
-            "estimator_commit": estimator_commit(),
-            "parameters": {"n": n, "q": q, "m": n},
-        }
+    models = {}
+    for model_name, modes in reduction_model_variants().items():
+        models[model_name] = {}
+        for mode, model in modes.items():
+            try:
+                with time_limit(per_attack_timeout):
+                    estimates = NTRU.estimate(
+                        params,
+                        red_cost_model=model,
+                        red_shape_model="zgsa",
+                        quiet=True,
+                        catch_exceptions=True,
+                    )
+                attacks = {}
+                for name, cost in estimates.items():
+                    if cost.get("rop") is None:
+                        attacks[name] = {"ok": False, "message": "missing cost"}
+                    else:
+                        attacks[name] = {"ok": True, **cost_to_json(cost)}
+                models[model_name][mode] = summarize_attacks(attacks)
+            except AttackTimeout as exc:
+                models[model_name][mode] = failure_mode(str(exc))
+            except Exception as exc:
+                models[model_name][mode] = failure_mode(f"{type(exc).__name__}: {exc}")
 
-    attacks = {}
-    successful = {}
-    for name, cost in rough.items():
-        if cost.get("rop") == oo:
-            attacks[name] = {"ok": False, "message": "infinite cost"}
-            continue
-        attacks[name] = {"ok": True, **cost_to_json(cost)}
-        if attacks[name].get("rop_bits") is not None:
-            successful[name] = attacks[name]
-
-    if successful:
-        best_attack, best_result = min(successful.items(), key=lambda item: item[1]["rop_bits"])
-        mode = {
-            "ok": True,
-            "min_bits": best_result["rop_bits"],
-            "best_attack": best_attack,
-            "attacks": attacks,
-        }
-    else:
-        mode = {
-            "ok": False,
-            "message": "no attack estimate completed",
-            "attacks": attacks,
-        }
-
+    default_modes = models["adps16"]
+    ok = all(mode.get("ok") for family in models.values() for mode in family.values())
     return {
-        "ok": mode["ok"],
+        "ok": ok,
         "estimator_commit": estimator_commit(),
-        "modes": {"classical": mode},
+        "modes": default_modes,
+        "models": models,
         "parameters": {
             "n": n,
             "q": q,

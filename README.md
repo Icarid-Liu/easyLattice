@@ -79,7 +79,10 @@ supports:
   distributions are estimator moment approximations and are capped by the
   Gaussian proxy calibration to avoid overstating security;
 - HPS-like and HRSS-like comparison candidates;
-- local `lattice-estimator` NTRU rough validation when `useEstimator=true`.
+- local `lattice-estimator` NTRU validation when `useEstimator=true`, evaluating
+  the same parameters with MATZOV and ADPS16 classical and quantum cost models.
+  A quantum NTRU target therefore requires Sage estimation rather than the
+  classical-only fast reference screen.
 
 同一个 agent API 后面也有一个初始版 NTRU 选择器，目前支持：
 
@@ -91,7 +94,9 @@ supports:
   对称均匀和中心二项块的短和；求和分布会作为 estimator 的矩近似，并由
   高斯代理校准结果截断，避免高估安全性；
 - HPS-like 和 HRSS-like 对比候选；
-- 当 `useEstimator=true` 时进行本地 `lattice-estimator` NTRU rough 验证。
+- 当 `useEstimator=true` 时进行本地 `lattice-estimator` NTRU 验证，对同一组参数
+  分别使用 MATZOV 和 ADPS16 的经典、量子规约代价模型。
+  因此量子 NTRU 目标必须启用 Sage 评估，不能使用只含经典参考值的快速筛选。
 
 ## Search Model
 

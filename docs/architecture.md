@@ -10,7 +10,8 @@ not part of the security calculation.
    fast screening, and optional Sage/lattice-estimator validation.
 2. `app.ntru_search`: deterministic NTRU candidate generation for power-of-two
    cyclotomic, HPS-like, and HRSS-like instances, with optional
-   lattice-estimator NTRU rough validation.
+   lattice-estimator NTRU validation with MATZOV/ADPS16 classical and quantum
+   reduction-cost models.
 3. `app.agent`: orchestration boundary. It always returns the same response
    shape and records whether an LLM was used.
 4. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It

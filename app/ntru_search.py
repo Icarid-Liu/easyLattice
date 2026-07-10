@@ -14,6 +14,8 @@ from typing import Any
 from .config import AppConfig, load_config
 from .parameter_search import (
     NTT_UNFRIENDLY_SCALE_POWER,
+    SUPPORTED_RED_COST_MODELS,
+    SUPPORTED_SECURITY_MODELS,
     compactness_profile,
     factor_integer,
     floor_bits,
@@ -22,6 +24,9 @@ from .parameter_search import (
     ntt_scale_is_unrestricted,
     parse_hard_problem,
     performance_profile,
+    meets_target,
+    security_margin_bits,
+    selected_security_bits,
     update_visual_security,
     security_level_for_bits,
 )
@@ -37,6 +42,8 @@ class NTRURequest:
     hard_problem_category: str = "ntru"
     hard_problem_variant: str = "ring"
     ring_family: str = "power2"
+    security_model: str = "classical"
+    red_cost_model: str = "matzov"
     ntt_scale_power: int = 1
     min_n: int = 256
     max_n: int = 2048
@@ -91,6 +98,8 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
                 candidate["warnings"].append(result.get("message", "NTRU estimator failed for this candidate."))
         if validated:
             candidates = validated
+        elif request.security_model == "quantum":
+            raise ValueError("NTRU quantum Sage evaluation did not complete for any candidate.")
 
     viable = [candidate for candidate in candidates if candidate["selection"]["meets_target"]]
     ranked = sorted(viable or candidates, key=lambda c: candidate_rank(c, request))
@@ -137,6 +146,12 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
     family = str(raw.get("ring_family", raw.get("ringFamily", "power2"))).lower()
     if family not in SUPPORTED_NTRU_RING_FAMILIES:
         raise ValueError("NTRU ring_family must be one of auto, power2, hps, hrss.")
+    security_model = str(raw.get("security_model", raw.get("securityModel", "classical"))).lower()
+    if security_model not in SUPPORTED_SECURITY_MODELS:
+        raise ValueError("security_model must be one of classical, quantum.")
+    red_cost_model = str(raw.get("red_cost_model", raw.get("redCostModel", "matzov"))).lower()
+    if red_cost_model not in SUPPORTED_RED_COST_MODELS:
+        raise ValueError("red_cost_model must be one of matzov, adps16.")
 
     min_q_bits = int(raw.get("min_q_bits", raw.get("minQBits", 2)))
     max_q_bits = int(raw.get("max_q_bits", raw.get("maxQBits", 24)))
@@ -155,18 +170,24 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
     validation_count = max(1, min(12, int(raw.get("validation_count", raw.get("validationCount", 3)))))
     validation_attempts = int(raw.get("validation_attempts", raw.get("validationAttempts", validation_count + 2)))
 
+    use_estimator = bool(raw.get("use_estimator", raw.get("useEstimator", False)))
+    if security_model == "quantum" and not use_estimator:
+        raise ValueError("NTRU quantum targets require useEstimator=true for Sage evaluation.")
+
     return NTRURequest(
         target_security=target,
         hard_problem_category=hard_problem_category,
         hard_problem_variant=hard_problem_variant,
         ring_family=family,
+        security_model=security_model,
+        red_cost_model=red_cost_model,
         ntt_scale_power=ntt_scale_power,
         min_n=min_n,
         max_n=max_n,
         min_q_bits=min_q_bits,
         max_q_bits=max_q_bits,
         distribution=str(raw.get("distribution", "auto")),
-        use_estimator=bool(raw.get("use_estimator", raw.get("useEstimator", False))),
+        use_estimator=use_estimator,
         estimator_timeout=max(4, min(300, estimator_timeout)),
         validation_count=validation_count,
         validation_attempts=max(validation_count, min(24, validation_attempts)),
@@ -334,7 +355,7 @@ def make_ntru_candidate(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[s
         "visual_scores": ntru_visual_scores(spec, request),
         "selection": {
             "target_security": request.target_security,
-            "security_model": "ntru-classical-rough",
+            "security_model": request.security_model,
             "selected_security_bits": floor_bits(spec.screen_bits),
             "margin_bits": floor_bits(spec.screen_bits - request.target_security),
             "meets_target": spec.screen_bits >= request.target_security,
@@ -505,40 +526,75 @@ def apply_ntru_estimator_result(
     estimator_result: dict[str, Any],
     request: NTRURequest,
 ) -> None:
-    classical = estimator_result["modes"].get("classical", {})
-    raw_bits = floor_bits(float(classical.get("min_bits", candidate["security"]["classical_bits"])))
-    bits = cap_composite_estimate(candidate, raw_bits)
+    model_bits = {
+        model: {
+            mode: ntru_estimator_model_bits(estimator_result, model, mode)
+            for mode in ("classical", "quantum")
+        }
+        for model in ("matzov", "adps16")
+    }
+    if any(value is None for modes in model_bits.values() for value in modes.values()):
+        raise ValueError("NTRU estimator did not produce all MATZOV/ADPS16 classical and quantum estimates.")
+    capped = {
+        model: {
+            mode: cap_composite_estimate(candidate, floor_bits(float(value)))
+            for mode, value in modes.items()
+        }
+        for model, modes in model_bits.items()
+    }
+    adps16 = capped["adps16"]
+    matzov = capped["matzov"]
     notes = [
-        "Estimated with lattice-estimator NTRU rough attacks.",
-        "Only classical rough NTRU bits are reported in this prototype.",
+        "Estimated with lattice-estimator NTRU attacks under MATZOV and ADPS16 cost models.",
+        "Classical and quantum values use the same NTRU parameters and attack set.",
     ]
-    if bits < raw_bits:
+    if any(capped[model][mode] < model_bits[model][mode] for model in capped for mode in capped[model]):
         notes.append(
             "Composite fast distributions are estimator moment approximations; the reported bit count is capped "
             "by the discrete-Gaussian proxy calibration to avoid overstating security."
         )
     candidate["security"] = {
-        "source": "sage-lattice-estimator-ntru-rough",
-        "classical_bits": bits,
-        "quantum_bits": None,
-        "ntru_bits": bits,
-        "raw_estimator_bits": raw_bits,
-        "best_attack": classical.get("best_attack"),
-        "attacks": estimator_result["modes"],
+        "source": "sage-lattice-estimator-ntru",
+        "classical_bits": adps16["classical"],
+        "quantum_bits": adps16["quantum"],
+        "matzov_bits": matzov["classical"],
+        "matzov_quantum_bits": matzov["quantum"],
+        "adps16_core_svp_bits": adps16["classical"],
+        "adps16_quantum_bits": adps16["quantum"],
+        "ntru_bits": selected_security_bits(
+            {
+                "classical_bits": adps16["classical"],
+                "quantum_bits": adps16["quantum"],
+                "matzov_bits": matzov["classical"],
+                "matzov_quantum_bits": matzov["quantum"],
+                "adps16_core_svp_bits": adps16["classical"],
+                "adps16_quantum_bits": adps16["quantum"],
+            },
+            request,
+        ),
+        "attacks": estimator_result.get("models", estimator_result["modes"]),
         "estimator_commit": estimator_result.get("estimator_commit"),
         "notes": notes,
     }
-    candidate["selection"]["selected_security_bits"] = bits
-    candidate["selection"]["margin_bits"] = floor_bits(bits - request.target_security)
-    candidate["selection"]["meets_target"] = bits >= request.target_security
-    candidate["selection"]["security_level"] = security_level_for_bits(bits)
+    candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
+    candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
+    candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+    candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
     update_visual_security(candidate)
-    candidate["warnings"].append("Sage/lattice-estimator NTRU rough validation was applied.")
-    if bits < raw_bits:
+    candidate["warnings"].append("Sage/lattice-estimator NTRU validation was applied with four cost models.")
+    if any(capped[model][mode] < model_bits[model][mode] for model in capped for mode in capped[model]):
         candidate["warnings"].append(
             "Composite fast distributions are currently passed to the estimator through a same-variance "
             "moment approximation; the reported bit count is capped by the Gaussian proxy calibration."
         )
+
+
+def ntru_estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str) -> float | None:
+    model_modes = estimator_result.get("models", {}).get(model)
+    mode_result = model_modes.get(mode, {}) if isinstance(model_modes, dict) else estimator_result.get("modes", {}).get(mode, {})
+    if mode_result.get("ok") and mode_result.get("min_bits") is not None:
+        return float(mode_result["min_bits"])
+    return None
 
 
 def cap_composite_estimate(candidate: dict[str, Any], raw_bits: float) -> float:

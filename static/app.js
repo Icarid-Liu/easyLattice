@@ -187,6 +187,7 @@ const TRANSLATIONS = {
     notUsed: "not used",
     notApplied: "not applied",
     notAvailable: "n/a",
+    requiresSageEstimate: "requires Sage estimate",
     distributionAuto: "Auto",
     centeredBinomial: "Centered Binomial",
     sparseTernary: "Sparse Ternary",
@@ -342,6 +343,7 @@ const TRANSLATIONS = {
     notUsed: "未使用",
     notApplied: "未应用",
     notAvailable: "无",
+    requiresSageEstimate: "需 Sage 评估",
     distributionAuto: "自动",
     centeredBinomial: "中心二项分布",
     sparseTernary: "稀疏三元分布",
@@ -708,7 +710,11 @@ async function getJson(path) {
 function renderResult(result) {
   const candidate = result.recommendation;
   const target = result.request.target_security;
-  const source = candidate.security.source === "sage-lattice-estimator" ? t("sageEstimator") : t("fastScreen");
+  const redCostModel = result.request.red_cost_model || result.request.redCostModel || "matzov";
+  const displayedSecurity = securityBitsForReductionModel(candidate.security, redCostModel);
+  const source = String(candidate.security.source || "").startsWith("sage-lattice-estimator")
+    ? t("sageEstimator")
+    : t("fastScreen");
 
   title.textContent = t("recommendedInstance", { n: candidate.ring.n, q: candidate.modulus.q });
   subtitle.textContent = t("summaryStats", {
@@ -718,8 +724,8 @@ function renderResult(result) {
   });
 
   show(resultGrid, details, warnings, alternatives);
-  setText("#classic-bits", formatBits(candidate.security.classical_bits));
-  setText("#quantum-bits", formatBits(candidate.security.quantum_bits));
+  setText("#classic-bits", formatBits(displayedSecurity.classical));
+  setText("#quantum-bits", formatBits(displayedSecurity.quantum));
   setText("#ring-n", String(candidate.ring.n));
   setText("#ring-poly", candidate.ring.polynomial);
   setText("#modulus-q", String(candidate.modulus.q));
@@ -727,8 +733,8 @@ function renderResult(result) {
   setText("#selected-bits", formatBits(candidate.selection.selected_security_bits));
   setText("#security-level", candidate.selection.security_level || t("notAvailable"));
   setText("#security-margin", t("margin", { value: candidate.selection.margin_bits }));
-  setMeter("#classic-meter", candidate.security.classical_bits, target);
-  setMeter("#quantum-meter", candidate.security.quantum_bits, target);
+  setMeter("#classic-meter", displayedSecurity.classical, target);
+  setMeter("#quantum-meter", displayedSecurity.quantum, target);
   renderParameterProfile(candidate);
 
   const instanceRows = [
@@ -752,12 +758,14 @@ function renderResult(result) {
     [t("agent"), result.agent ? result.agent.name : "deterministic"],
     [t("llm"), result.agent?.llm_used ? `${result.agent.provider} / ${result.agent.model}` : t("notUsed")],
     [t("source"), candidate.security.source],
-    ["MATZOV", formatBits(candidate.security.matzov_bits)],
-    ["ADPS16", formatBits(candidate.security.adps16_core_svp_bits)],
-    [t("classical"), formatBits(candidate.security.classical_bits)],
-    [t("quantum"), formatBits(candidate.security.quantum_bits)],
+    ["MATZOV (classical)", formatBits(candidate.security.matzov_bits)],
+    ["MATZOV (quantum)", formatBits(candidate.security.matzov_quantum_bits)],
+    ["ADPS16 (classical)", formatBits(candidate.security.adps16_core_svp_bits)],
+    ["ADPS16 (quantum)", formatBits(candidate.security.adps16_quantum_bits)],
+    [t("classical"), formatBits(displayedSecurity.classical)],
+    [t("quantum"), formatBits(displayedSecurity.quantum)],
     [t("target"), `${result.request.target_security} bits (${result.request.security_model})`],
-    [t("reductionModel"), result.request.red_cost_model],
+    [t("reductionModel"), redCostModel],
     [t("securityLevel"), candidate.selection.security_level || t("notAvailable")],
     [t("marginLabel"), formatBits(candidate.selection.margin_bits)],
     [t("estimator"), candidate.security.estimator_commit || t("notApplied")],
@@ -836,9 +844,25 @@ function distributionText(distribution) {
 
 function formatBits(value) {
   if (value === null || value === undefined || value === "") {
-    return t("notAvailable");
+    return t("requiresSageEstimate");
   }
   return t("bits", { value });
+}
+
+function securityBitsForReductionModel(security, redCostModel) {
+  if (redCostModel === "matzov") {
+    return {
+      classical: security.matzov_bits ?? security.classical_bits,
+      quantum: security.matzov_quantum_bits ?? security.quantum_bits,
+    };
+  }
+  if (redCostModel === "adps16") {
+    return {
+      classical: security.adps16_core_svp_bits ?? security.classical_bits,
+      quantum: security.adps16_quantum_bits ?? security.quantum_bits,
+    };
+  }
+  return { classical: security.classical_bits, quantum: security.quantum_bits };
 }
 
 function selectedHardProblem(data = new FormData(form)) {

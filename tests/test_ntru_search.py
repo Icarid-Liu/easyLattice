@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from app.config import AppConfig, EstimatorConfig
-from app.ntru_search import parse_ntru_request, recommend_ntru, run_ntru_estimator
+from app.ntru_search import (
+    apply_ntru_estimator_result,
+    parse_ntru_request,
+    recommend_ntru,
+    run_ntru_estimator,
+)
 
 
 class NTRUSearchTests(unittest.TestCase):
@@ -60,6 +65,48 @@ class NTRUSearchTests(unittest.TestCase):
         request = parse_ntru_request({"estimatorTimeout": 999})
 
         self.assertEqual(request.estimator_timeout, 300)
+
+    def test_ntru_quantum_target_requires_sage_estimation(self):
+        with self.assertRaisesRegex(ValueError, "quantum targets require useEstimator=true"):
+            parse_ntru_request({"securityModel": "quantum", "useEstimator": False})
+
+    def test_ntru_estimator_uses_selected_model_for_classical_and_quantum_bits(self):
+        candidate = recommend_ntru(
+            {
+                "targetSecurity": 128,
+                "ringFamily": "hps",
+                "useEstimator": False,
+            }
+        )["recommendation"]
+        request = parse_ntru_request(
+            {
+                "targetSecurity": 128,
+                "ringFamily": "hps",
+                "securityModel": "classical",
+                "redCostModel": "matzov",
+                "useEstimator": True,
+            }
+        )
+
+        def mode(bits):
+            return {"ok": True, "min_bits": bits, "best_attack": "usvp", "attacks": {}}
+
+        estimator_result = {
+            "ok": True,
+            "models": {
+                "matzov": {"classical": mode(141.2), "quantum": mode(125.5)},
+                "adps16": {"classical": mode(139.4), "quantum": mode(121.0)},
+            },
+            "modes": {"classical": mode(139.4), "quantum": mode(121.0)},
+        }
+        apply_ntru_estimator_result(candidate, estimator_result, request)
+
+        self.assertEqual(candidate["security"]["matzov_bits"], 141.2)
+        self.assertEqual(candidate["security"]["matzov_quantum_bits"], 125.5)
+        self.assertEqual(candidate["security"]["adps16_core_svp_bits"], 139.4)
+        self.assertEqual(candidate["security"]["adps16_quantum_bits"], 121.0)
+        self.assertEqual(candidate["selection"]["selected_security_bits"], 141.2)
+        self.assertEqual(candidate["selection"]["security_level"], "NIST-I")
 
     def test_ntru_performance_is_max_for_n_or_2n_ntt_scale(self):
         n_scale_result = recommend_ntru(

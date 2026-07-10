@@ -715,8 +715,11 @@ def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: 
     quantum = float(security["quantum_bits"])
     if red_cost_model == "adps16":
         adps16 = security.get("adps16_core_svp_bits")
+        adps16_quantum = security.get("adps16_quantum_bits")
         if adps16 is not None:
             classical = float(adps16)
+        if adps16_quantum is not None:
+            quantum = float(adps16_quantum)
     if red_cost_model == "matzov":
         matzov = security.get("matzov_bits")
         matzov_quantum = security.get("matzov_quantum_bits")
@@ -1332,22 +1335,25 @@ def apply_estimator_result(
     estimator_result: dict[str, Any],
     request: RequestOptions,
 ) -> None:
-    classical = estimator_result["modes"].get("classical", {})
-    quantum = estimator_result["modes"].get("quantum", {})
-    classical_bits = classical.get("min_bits", candidate["security"]["classical_bits"])
-    quantum_bits = quantum.get("min_bits", candidate["security"]["quantum_bits"])
+    adps16_classical = estimator_model_bits(estimator_result, "adps16", "classical")
+    adps16_quantum = estimator_model_bits(estimator_result, "adps16", "quantum")
+    matzov_classical = estimator_model_bits(estimator_result, "matzov", "classical")
+    matzov_quantum = estimator_model_bits(estimator_result, "matzov", "quantum")
+    classical_bits = adps16_classical or candidate["security"]["classical_bits"]
+    quantum_bits = adps16_quantum or candidate["security"]["quantum_bits"]
     candidate["security"] = {
         "source": "sage-lattice-estimator",
         "classical_bits": floor_bits(float(classical_bits)),
         "quantum_bits": floor_bits(float(quantum_bits)),
-        "matzov_bits": floor_optional_bits(matzov_bits(estimator_result)),
-        "matzov_quantum_bits": floor_optional_bits(matzov_bits(estimator_result, mode="quantum")),
-        "adps16_core_svp_bits": floor_optional_bits(adps16_core_svp_bits(estimator_result)),
-        "attacks": estimator_result["modes"],
+        "matzov_bits": floor_optional_bits(matzov_classical),
+        "matzov_quantum_bits": floor_optional_bits(matzov_quantum),
+        "adps16_core_svp_bits": floor_optional_bits(adps16_classical),
+        "adps16_quantum_bits": floor_optional_bits(adps16_quantum),
+        "attacks": estimator_result.get("models", estimator_result["modes"]),
         "estimator_commit": estimator_result.get("estimator_commit"),
         "notes": [
             "Estimated as an LWE instance with n RLWE samples; use full scheme analysis for production.",
-            "Classical and quantum modes use the estimator ADPS16 cost model variants.",
+            "MATZOV and ADPS16 are each evaluated with their classical and quantum cost models.",
         ],
     }
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
@@ -1358,19 +1364,11 @@ def apply_estimator_result(
     candidate["warnings"].append("Sage/lattice-estimator rough validation was applied to this recommendation.")
 
 
-def matzov_bits(estimator_result: dict[str, Any], mode: str = "classical") -> float | None:
-    mode_result = estimator_result.get("modes", {}).get(mode, {})
-    attack = mode_result.get("attacks", {}).get("dual_hybrid", {})
-    if attack.get("ok") and attack.get("rop_bits") is not None:
-        return float(attack["rop_bits"])
-    return None
-
-
-def adps16_core_svp_bits(estimator_result: dict[str, Any], mode: str = "classical") -> float | None:
-    mode_result = estimator_result.get("modes", {}).get(mode, {})
-    attack = mode_result.get("attacks", {}).get("usvp", {})
-    if attack.get("ok") and attack.get("rop_bits") is not None:
-        return float(attack["rop_bits"])
+def estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str) -> float | None:
+    model_modes = estimator_result.get("models", {}).get(model)
+    mode_result = model_modes.get(mode, {}) if isinstance(model_modes, dict) else estimator_result.get("modes", {}).get(mode, {})
+    if mode_result.get("ok") and mode_result.get("min_bits") is not None:
+        return float(mode_result["min_bits"])
     return None
 
 
