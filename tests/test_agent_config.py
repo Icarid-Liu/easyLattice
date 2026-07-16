@@ -77,6 +77,25 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(data["estimator"]["version"], "1.2.3")
 
+    def test_nested_non_git_estimator_uses_static_version(self):
+        repository = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory(dir=repository, prefix=".nested-estimator-") as tmpdir:
+            estimator_dir = Path(tmpdir) / "estimator"
+            estimator_dir.mkdir()
+            (estimator_dir / "__init__.py").write_text(
+                '__version__ = "nested-static"\n',
+                encoding="utf-8",
+            )
+            data = public_config(
+                AppConfig(estimator=EstimatorConfig(lattice_estimator_path=tmpdir))
+            )
+
+        self.assertEqual(data["estimator"]["version"], "nested-static")
+        self.assertEqual(
+            data["estimator"]["profiles"]["standard"]["revision"],
+            "nested-static",
+        )
+
     def test_estimator_profiles_follow_problem_structure(self):
         for variant in ("lwe", "lwr"):
             self.assertEqual(estimator_profile_for("lwe", variant), "standard")
@@ -182,16 +201,26 @@ class AgentConfigTests(unittest.TestCase):
             {"problem": "lwe", "n": 512, "estimator_profile": "enhanced"},
         )
 
-    def test_run_estimator_uses_only_selected_local_profile_root(self):
+    def test_run_estimator_isolates_and_normalizes_selected_profile_root(self):
         payload = {"problem": "lwe", "n": 512}
         successful = {"ok": True, "result": {"bits": 128}}
-        with TemporaryDirectory() as standard, TemporaryDirectory() as enhanced:
+        with TemporaryDirectory() as standard, TemporaryDirectory() as enhanced, TemporaryDirectory() as competing:
+            for root in (standard, enhanced, competing):
+                package = Path(root) / "estimator"
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
             config = AppConfig(
                 estimator=EstimatorConfig(
                     sage_binary="sage-test",
                     lattice_estimator_path=standard,
-                    enhanced_lattice_estimator_path=enhanced,
+                    enhanced_lattice_estimator_path=str(Path(enhanced) / "estimator"),
                 )
+            )
+            preflight = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"ok": true}\n',
+                stderr="",
             )
             completed = subprocess.CompletedProcess(
                 args=[],
@@ -199,28 +228,86 @@ class AgentConfigTests(unittest.TestCase):
                 stdout='{"ok": true, "result": {"bits": 128}}\n',
                 stderr="",
             )
-            with patch.dict(os.environ, {"PYTHONPATH": "shared"}, clear=True), patch(
+            inherited_path = os.pathsep.join((competing, "shared"))
+            with patch.dict(os.environ, {"PYTHONPATH": inherited_path}, clear=True), patch(
                 "app.estimator_process.shutil.which",
                 return_value="/test/sage",
             ), patch(
                 "app.estimator_process.subprocess.run",
-                return_value=completed,
+                side_effect=(preflight, completed),
             ) as process:
                 result = run_estimator(payload, 17, config, "enhanced")
 
         self.assertEqual(result, successful)
         self.assertEqual(payload, {"problem": "lwe", "n": 512})
+        self.assertEqual(estimator_root(config.estimator, "enhanced"), enhanced)
+        self.assertEqual(process.call_count, 2)
+        preflight_call, runner_call = process.call_args_list
         self.assertEqual(
-            process.call_args.args[0][0:2],
+            preflight_call.args[0][0:3],
+            ["/test/sage", "-python", "-c"],
+        )
+        self.assertEqual(
+            runner_call.args[0][0:2],
             ["/test/sage", "-python"],
         )
-        python_path = process.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)
-        self.assertEqual(python_path, [enhanced, "shared"])
-        self.assertNotIn(standard, python_path)
+        self.assertTrue(runner_call.args[0][2].endswith("app/estimator_runner.py"))
+        for call in (preflight_call, runner_call):
+            self.assertEqual(call.kwargs["env"]["PYTHONPATH"], enhanced)
+            self.assertEqual(call.kwargs["env"]["PYTHONNOUSERSITE"], "1")
+            self.assertNotIn(competing, call.kwargs["env"]["PYTHONPATH"])
         self.assertEqual(
-            process.call_args.kwargs["input"],
+            runner_call.kwargs["input"],
             '{"problem": "lwe", "n": 512, "estimator_profile": "enhanced"}',
         )
+
+    def test_run_estimator_rejects_invalid_or_mismatched_roots(self):
+        with TemporaryDirectory() as invalid, TemporaryDirectory() as selected:
+            selected_package = Path(selected) / "estimator"
+            selected_package.mkdir()
+            (selected_package / "__init__.py").write_text("", encoding="utf-8")
+
+            with patch(
+                "app.estimator_process.shutil.which",
+                return_value="/test/sage",
+            ), patch("app.estimator_process.subprocess.run") as process:
+                result = run_estimator(
+                    {},
+                    5,
+                    AppConfig(
+                        estimator=EstimatorConfig(lattice_estimator_path=invalid)
+                    ),
+                    "standard",
+                )
+            self.assertEqual(result["code"], "estimator_path_invalid")
+            process.assert_not_called()
+
+            mismatch = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    '{"ok": false, "code": "estimator_origin_mismatch", '
+                    '"message": "wrong estimator"}\n'
+                ),
+                stderr="",
+            )
+            with patch(
+                "app.estimator_process.shutil.which",
+                return_value="/test/sage",
+            ), patch(
+                "app.estimator_process.subprocess.run",
+                return_value=mismatch,
+            ) as process:
+                result = run_estimator(
+                    {},
+                    5,
+                    AppConfig(
+                        estimator=EstimatorConfig(lattice_estimator_path=selected)
+                    ),
+                    "standard",
+                )
+            self.assertEqual(result["code"], "estimator_origin_mismatch")
+            self.assertEqual(process.call_count, 1)
 
     def test_run_estimator_returns_stable_local_failure_codes(self):
         missing_sage = AppConfig(estimator=EstimatorConfig(sage_binary="missing-sage"))
@@ -237,37 +324,63 @@ class AgentConfigTests(unittest.TestCase):
                         f"{profile}_estimator_not_configured",
                     )
 
-        config = AppConfig(
-            estimator=EstimatorConfig(
-                sage_binary="sage-test",
-                lattice_estimator_path="/test/estimator",
+        with TemporaryDirectory() as root:
+            package = Path(root) / "estimator"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            config = AppConfig(
+                estimator=EstimatorConfig(
+                    sage_binary="sage-test",
+                    lattice_estimator_path=root,
+                )
             )
-        )
-        cases = (
-            (
-                subprocess.TimeoutExpired(cmd=["sage"], timeout=5),
-                "estimator_timeout",
-            ),
-            (
-                subprocess.CompletedProcess([], 2, stdout="", stderr="failed\n"),
-                "estimator_process_failed",
-            ),
-            (
-                subprocess.CompletedProcess([], 0, stdout="not-json\n", stderr=""),
-                "estimator_non_json",
-            ),
-        )
-        for process_result, code in cases:
-            with self.subTest(code=code), patch(
-                "app.estimator_process.shutil.which",
-                return_value="/test/sage",
-            ), patch("app.estimator_process.subprocess.run") as process:
-                if isinstance(process_result, Exception):
-                    process.side_effect = process_result
-                else:
-                    process.return_value = process_result
-                result = run_estimator({}, 5, config, "standard")
-            self.assertEqual(result["code"], code)
+            preflight = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout='{"ok": true}\n',
+                stderr="",
+            )
+            cases = (
+                (
+                    (preflight, subprocess.TimeoutExpired(cmd=["sage"], timeout=5)),
+                    "estimator_timeout",
+                ),
+                (
+                    (
+                        preflight,
+                        subprocess.CompletedProcess([], 2, stdout="", stderr="failed\n"),
+                    ),
+                    "estimator_process_failed",
+                ),
+                (
+                    (preflight, OSError("permission denied")),
+                    "estimator_process_failed",
+                ),
+                (
+                    (
+                        preflight,
+                        subprocess.CompletedProcess([], 0, stdout="not-json\n", stderr=""),
+                    ),
+                    "estimator_non_json",
+                ),
+                (
+                    (
+                        preflight,
+                        subprocess.CompletedProcess([], 0, stdout="[]\n", stderr=""),
+                    ),
+                    "estimator_non_json",
+                ),
+            )
+            for process_results, code in cases:
+                with self.subTest(code=code), patch(
+                    "app.estimator_process.shutil.which",
+                    return_value="/test/sage",
+                ), patch(
+                    "app.estimator_process.subprocess.run",
+                    side_effect=process_results,
+                ):
+                    result = run_estimator({}, 5, config, "standard")
+                self.assertEqual(result["code"], code)
 
     def test_public_config_exposes_remote_estimator_status(self):
         data = public_config(

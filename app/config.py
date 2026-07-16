@@ -212,8 +212,10 @@ def public_config(config: AppConfig | None = None) -> dict[str, Any]:
 
 def estimator_version(estimator: EstimatorConfig) -> str | None:
     root = estimator_source_root(estimator)
-    if root:
+    if root and (root / "estimator" / "__init__.py").is_file():
         return read_git_version(root) or read_static_estimator_version(root)
+    if root:
+        return None
     return read_installed_estimator_version()
 
 
@@ -225,7 +227,7 @@ def estimator_profile_data(estimator: EstimatorConfig, profile: str) -> dict[str
     else:
         raise ValueError("estimator profile must be standard or enhanced.")
 
-    available = bool(root and (root / "estimator").is_dir())
+    available = bool(root and (root / "estimator" / "__init__.py").is_file())
     revision = (read_git_version(root) or read_static_estimator_version(root)) if available else None
     return {
         "available": available,
@@ -260,12 +262,35 @@ def configured_estimator_source_root(path: str | None) -> Path | None:
 
 def normalize_estimator_root(path: Path) -> Path:
     if path.name == "estimator":
-        return path.parent
-    return path
+        path = path.parent
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
 
 
 def read_git_version(root: Path) -> str | None:
+    root = normalize_estimator_root(root)
     if not root.exists():
+        return None
+
+    try:
+        top_level = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    if top_level.returncode != 0:
+        return None
+    try:
+        git_root = Path(top_level.stdout.strip()).resolve()
+    except OSError:
+        return None
+    if git_root != root:
         return None
 
     for command in (
