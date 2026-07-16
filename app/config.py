@@ -261,12 +261,15 @@ def configured_estimator_source_root(path: str | None) -> Path | None:
 
 
 def normalize_estimator_root(path: Path) -> Path:
-    if path.name == "estimator":
-        path = path.parent
     try:
-        return path.resolve()
+        path = path.resolve()
     except OSError:
-        return path.absolute()
+        path = path.absolute()
+    if (path / "estimator" / "__init__.py").is_file():
+        return path
+    if path.name == "estimator" and (path / "__init__.py").is_file():
+        return path.parent
+    return path
 
 
 def read_git_version(root: Path) -> str | None:

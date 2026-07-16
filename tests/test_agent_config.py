@@ -1,5 +1,7 @@
+import json
 import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +9,12 @@ from unittest.mock import patch
 
 from app.agent import recommend_with_agent
 from app.config import AppConfig, EstimatorConfig, LLMConfig, load_config, public_config
-from app.estimator_process import estimator_profile_for, estimator_root, run_estimator
+from app.estimator_process import (
+    ESTIMATOR_ORIGIN_PREFLIGHT,
+    estimator_profile_for,
+    estimator_root,
+    run_estimator,
+)
 from app.llm_provider import sanitize_overrides
 from app.server import cors_origin_for
 
@@ -141,6 +148,41 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(data["estimator"]["profiles"]["standard"]["available"])
         self.assertTrue(data["estimator"]["profiles"]["enhanced"]["available"])
 
+    def test_estimator_root_distinguishes_named_repo_from_package_path(self):
+        with TemporaryDirectory() as tmpdir:
+            named_root = Path(tmpdir) / "estimator"
+            named_package = named_root / "estimator"
+            named_package.mkdir(parents=True)
+            (named_package / "__init__.py").write_text("", encoding="utf-8")
+
+            direct_root = Path(tmpdir) / "direct"
+            direct_package = direct_root / "estimator"
+            direct_package.mkdir(parents=True)
+            (direct_package / "__init__.py").write_text("", encoding="utf-8")
+
+            config = AppConfig(
+                estimator=EstimatorConfig(
+                    lattice_estimator_path=str(named_root),
+                    enhanced_lattice_estimator_path=str(direct_package),
+                )
+            )
+            normalized_standard = estimator_root(config.estimator, "standard")
+            normalized_enhanced = estimator_root(config.estimator, "enhanced")
+            data = public_config(config)
+
+        self.assertEqual(normalized_standard, str(named_root))
+        self.assertEqual(normalized_enhanced, str(direct_root))
+        self.assertEqual(
+            data["estimator"]["profiles"]["standard"]["path"],
+            str(named_root),
+        )
+        self.assertEqual(
+            data["estimator"]["profiles"]["enhanced"]["path"],
+            str(direct_root),
+        )
+        self.assertTrue(data["estimator"]["profiles"]["standard"]["available"])
+        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["available"])
+
     def test_enhanced_path_preserves_legacy_estimator_config_positions(self):
         config = EstimatorConfig(
             "sage-test",
@@ -237,10 +279,11 @@ class AgentConfigTests(unittest.TestCase):
                 side_effect=(preflight, completed),
             ) as process:
                 result = run_estimator(payload, 17, config, "enhanced")
+            normalized_enhanced = estimator_root(config.estimator, "enhanced")
 
         self.assertEqual(result, successful)
         self.assertEqual(payload, {"problem": "lwe", "n": 512})
-        self.assertEqual(estimator_root(config.estimator, "enhanced"), enhanced)
+        self.assertEqual(normalized_enhanced, enhanced)
         self.assertEqual(process.call_count, 2)
         preflight_call, runner_call = process.call_args_list
         self.assertEqual(
@@ -308,6 +351,43 @@ class AgentConfigTests(unittest.TestCase):
                 )
             self.assertEqual(result["code"], "estimator_origin_mismatch")
             self.assertEqual(process.call_count, 1)
+
+    def test_estimator_origin_preflight_detects_competing_package(self):
+        application_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory() as selected, TemporaryDirectory() as competing:
+            for root in (selected, competing):
+                package = Path(root) / "estimator"
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
+
+            def execute_preflight(python_path: str) -> dict:
+                env = os.environ.copy()
+                env["PYTHONPATH"] = python_path
+                env["PYTHONNOUSERSITE"] = "1"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        ESTIMATOR_ORIGIN_PREFLIGHT,
+                        selected,
+                        str(application_root),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                    env=env,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return json.loads(completed.stdout.strip().splitlines()[-1])
+
+            mismatch = execute_preflight(competing)
+            isolated = execute_preflight(selected)
+
+        self.assertFalse(mismatch["ok"])
+        self.assertEqual(mismatch["code"], "estimator_origin_mismatch")
+        self.assertIn(str(Path(competing).resolve()), mismatch["message"])
+        self.assertEqual(isolated, {"ok": True})
 
     def test_run_estimator_returns_stable_local_failure_codes(self):
         missing_sage = AppConfig(estimator=EstimatorConfig(sage_binary="missing-sage"))
