@@ -40,7 +40,16 @@ LATTICE_ESTIMATOR_PATH=/opt/lattice-estimator
 ENHANCED_LATTICE_ESTIMATOR_PATH=/opt/enhanced-lattice-estimator
 ```
 
-Use `EASYLATTICE_ALLOWED_ORIGINS=*` only for early testing.
+Use `EASYLATTICE_ALLOWED_ORIGINS=*` only for early testing. CORS is not access
+control: it only limits which browser origins may read responses, and it does
+not authenticate callers or stop scripts and other non-browser clients from
+calling the API directly. The standalone `/jobs`, `/jobs/{job_id}`, and
+`/estimate` endpoints are unauthenticated and have no per-client rate limit;
+the worker/job caps below are only global resource bounds. Do not expose this
+compute-intensive worker as an unrestricted public service. Production
+deployments require either a private Space or an authenticated, rate-limited
+gateway in front of the worker. Treat `EASYLATTICE_ALLOWED_ORIGINS` only as an
+additional browser-origin restriction.
 
 ## API
 
