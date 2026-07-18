@@ -13,6 +13,9 @@ if str(ROOT) not in sys.path:
 from app.compression_noise import compression_noise_estimator_distribution
 
 
+NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
+
+
 class AttackTimeout(Exception):
     pass
 
@@ -259,6 +262,15 @@ def run_ntru(payload: dict) -> dict:
                         attacks[name] = {"ok": False, "message": "missing cost"}
                     else:
                         attacks[name] = {"ok": True, **cost_to_json(cost)}
+                for name in NTRU_ATTACKS:
+                    attacks.setdefault(
+                        name,
+                        {
+                            "ok": False,
+                            "code": "attack_not_returned",
+                            "message": "estimator omitted attack result",
+                        },
+                    )
                 models[model_name][mode] = summarize_attacks(attacks)
             except AttackTimeout as exc:
                 models[model_name][mode] = failure_mode(str(exc))

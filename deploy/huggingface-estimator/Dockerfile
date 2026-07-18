@@ -10,7 +10,10 @@ RUN apt-get update \
 COPY . /app
 
 RUN git clone --depth=1 https://github.com/malb/lattice-estimator.git /opt/lattice-estimator
-RUN git clone --depth=1 https://github.com/identitymapping/enhanced_lattice-estimator.git /opt/enhanced-lattice-estimator
+RUN git init /opt/enhanced-lattice-estimator \
+    && git -C /opt/enhanced-lattice-estimator remote add origin https://github.com/identitymapping/enhanced_lattice-estimator.git \
+    && git -C /opt/enhanced-lattice-estimator fetch --depth=1 origin 876b66173f4354a96ddafc0ce3a79767ec43c6d4 \
+    && git -C /opt/enhanced-lattice-estimator checkout --detach FETCH_HEAD
 
 ENV PORT=7860
 ENV SAGE_BINARY=sage

@@ -39,6 +39,40 @@ ALLOWED_ORIGINS = [
 ]
 ESTIMATOR_PROFILES = {"standard", "enhanced"}
 INVALID_PROFILE_MESSAGE = "estimator_profile must be standard or enhanced."
+ESTIMATOR_ORIGIN_PREFLIGHT = r"""
+import json
+import sys
+from pathlib import Path
+
+expected_root = Path(sys.argv[1]).resolve()
+application_root = Path(sys.argv[2]).resolve()
+if str(application_root) not in sys.path:
+    sys.path.insert(0, str(application_root))
+
+try:
+    import estimator
+
+    origin = Path(estimator.__file__).resolve()
+    actual_root = origin.parent.parent if origin.parent.name == "estimator" else origin.parent
+    actual_root = actual_root.resolve()
+except Exception as exc:
+    result = {
+        "ok": False,
+        "code": "estimator_origin_mismatch",
+        "message": f"Could not import the selected estimator: {type(exc).__name__}: {exc}",
+    }
+else:
+    if actual_root == expected_root:
+        result = {"ok": True}
+    else:
+        result = {
+            "ok": False,
+            "code": "estimator_origin_mismatch",
+            "message": f"Estimator imported from {actual_root}, expected {expected_root}.",
+        }
+
+print(json.dumps(result))
+"""
 
 
 @dataclass
@@ -268,6 +302,19 @@ def run_job(job: Job) -> None:
             job.finished_at = time.time()
 
 
+def estimator_source_root(path: str) -> Path | None:
+    candidate = Path(path).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        candidate = candidate.absolute()
+    if (candidate / "estimator" / "__init__.py").is_file():
+        return candidate
+    if candidate.name == "estimator" and (candidate / "__init__.py").is_file():
+        return candidate.parent
+    return None
+
+
 def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     sage_binary = os.environ.get("SAGE_BINARY", "sage")
     profile = str(payload.get("estimator_profile", "standard"))
@@ -283,17 +330,60 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
         if profile == "enhanced"
         else "LATTICE_ESTIMATOR_PATH"
     )
-    estimator_path = os.environ.get(path_name)
-    if not estimator_path:
+    configured_path = os.environ.get(path_name)
+    if not configured_path:
         return {
             "ok": False,
             "code": f"{profile}_estimator_not_configured",
             "message": f"{profile} estimator path is not configured.",
         }
+    estimator_path = estimator_source_root(configured_path)
+    if estimator_path is None:
+        return {
+            "ok": False,
+            "code": "estimator_path_invalid",
+            "message": f"{profile} estimator path does not contain estimator/__init__.py.",
+        }
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = estimator_path
+    env["PYTHONPATH"] = str(estimator_path)
     env["PYTHONNOUSERSITE"] = "1"
+
+    preflight = subprocess.run(
+        [
+            sage_binary,
+            "-python",
+            "-c",
+            ESTIMATOR_ORIGIN_PREFLIGHT,
+            str(estimator_path),
+            str(ROOT),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    if preflight.returncode != 0:
+        detail = (preflight.stderr or preflight.stdout).strip().splitlines()[-1:]
+        message = detail[0] if detail else f"estimator preflight exited with code {preflight.returncode}"
+        return {"ok": False, "code": "estimator_process_failed", "message": message}
+    try:
+        preflight_result = json.loads(preflight.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {
+            "ok": False,
+            "code": "estimator_process_failed",
+            "message": "Estimator origin preflight returned invalid output.",
+        }
+    if not isinstance(preflight_result, dict):
+        return {
+            "ok": False,
+            "code": "estimator_process_failed",
+            "message": "Estimator origin preflight returned invalid output.",
+        }
+    if not preflight_result.get("ok"):
+        return preflight_result
 
     completed = subprocess.run(
         [sage_binary, "-python", str(RUNNER)],
