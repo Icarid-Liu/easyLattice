@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import AppConfig, load_config
 from .estimator_process import run_estimator
+from .json_safety import sanitize_json_value as sanitize_json_metadata
 from .parameter_search import (
     NTT_UNFRIENDLY_SCALE_POWER,
     SUPPORTED_RED_COST_MODELS,
@@ -728,70 +729,6 @@ def ntru_validation_candidate_key(candidate: dict[str, Any]) -> str:
     )
 
 
-def sanitize_json_metadata(
-    value: Any,
-    seen: set[int] | None = None,
-    depth: int = 0,
-) -> Any:
-    if depth > 32:
-        return "<maximum-depth-exceeded>"
-    if value is None or isinstance(value, (str, bool)):
-        return value
-    if isinstance(value, int):
-        return value if value.bit_length() <= 4096 else "<integer-too-large>"
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-
-    seen = seen if seen is not None else set()
-    if isinstance(value, dict):
-        identity = id(value)
-        if identity in seen:
-            return "<recursive-reference>"
-        seen.add(identity)
-        try:
-            return {
-                sanitize_json_key(key): sanitize_json_metadata(item, seen, depth + 1)
-                for key, item in value.items()
-            }
-        finally:
-            seen.remove(identity)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        identity = id(value)
-        if identity in seen:
-            return "<recursive-reference>"
-        seen.add(identity)
-        try:
-            items = list(value)
-            if isinstance(value, (set, frozenset)):
-                items.sort(key=lambda item: safe_diagnostic_string(item))
-            return [
-                sanitize_json_metadata(item, seen, depth + 1)
-                for item in items
-            ]
-        finally:
-            seen.remove(identity)
-    return safe_diagnostic_string(value)
-
-
-def sanitize_json_key(key: Any) -> str:
-    if isinstance(key, str):
-        return key
-    if isinstance(key, bool):
-        return "true" if key else "false"
-    if isinstance(key, int):
-        return str(key) if key.bit_length() <= 4096 else "<integer-key-too-large>"
-    if isinstance(key, float) and not math.isfinite(key):
-        return "<nonfinite-key>"
-    return safe_diagnostic_string(key)
-
-
-def safe_diagnostic_string(value: Any) -> str:
-    try:
-        return str(value)
-    except Exception:
-        return f"<{type(value).__name__}>"
-
-
 def effective_ntru_security_variant(
     candidate: dict[str, Any],
     request: NTRURequest | None,
@@ -822,12 +759,13 @@ def normalize_ntru_estimator_response(
     request: NTRURequest,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     safe_response = sanitize_json_metadata(response)
+    provenance = ntru_estimator_provenance(candidate, request)
     normalized, validation_entry = normalize_estimator_response(
         safe_response,
         request=request,
         expected_profile=NTRU_ESTIMATOR_PROFILE,
+        expected_variant=provenance["hard_problem_variant"],
     )
-    provenance = ntru_estimator_provenance(candidate, request)
     validation_entry = with_ntru_estimator_provenance(validation_entry, provenance)
     if normalized is None:
         return None, validation_entry

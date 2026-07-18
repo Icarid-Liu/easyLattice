@@ -14,9 +14,11 @@ if str(ROOT) not in sys.path:
 
 from app.compression_noise import compression_noise_estimator_distribution
 from app.estimator_contract import (
+    EstimatorRouteError,
     LWE_ATTACKS,
     structure_correction_metadata,
     structure_correction_satisfied,
+    validate_estimator_route,
 )
 
 
@@ -234,19 +236,33 @@ def run_lwe_attack(LWE, params, name: str, model, mode: str, profile: str, ring_
 
 
 def run(payload: dict) -> dict:
+    problem, _, _ = validate_estimator_route(
+        payload.get("problem"),
+        payload.get("estimator_profile"),
+        payload.get("hard_problem_variant"),
+    )
     verify_estimator_origin()
-    if payload.get("problem") == "ntru":
+    if problem == "ntru":
         return run_ntru(payload)
     return run_lwe(payload)
 
 
 def run_lwe(payload: dict) -> dict:
+    problem, estimator_profile, hard_problem_variant = validate_estimator_route(
+        payload.get("problem"),
+        payload.get("estimator_profile"),
+        payload.get("hard_problem_variant"),
+    )
+    if problem != "lwe":
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            "run_lwe requires problem=lwe.",
+        )
+
     from estimator import LWE, ND
 
     n = int(payload["n"])
     q = int(payload["q"])
-    estimator_profile = str(payload.get("estimator_profile", "standard"))
-    hard_problem_variant = str(payload.get("hard_problem_variant", "lwe"))
     ring_degree = int(payload.get("ring_degree", n))
     distribution = payload["distribution"]
     per_attack_timeout = int(payload.get("per_attack_timeout", 8))
@@ -322,12 +338,21 @@ def run_lwe(payload: dict) -> dict:
 
 
 def run_ntru(payload: dict) -> dict:
+    problem, estimator_profile, hard_problem_variant = validate_estimator_route(
+        payload.get("problem"),
+        payload.get("estimator_profile"),
+        payload.get("hard_problem_variant"),
+    )
+    if problem != "ntru":
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            "run_ntru requires problem=ntru.",
+        )
+
     from estimator import NTRU, ND
 
     n = int(payload["n"])
     q = int(payload["q"])
-    estimator_profile = str(payload.get("estimator_profile", "standard"))
-    hard_problem_variant = str(payload.get("hard_problem_variant", "ring"))
     ring_degree = int(payload.get("ring_degree", n))
     per_attack_timeout = int(payload.get("per_attack_timeout", 20))
     Xs = estimator_distribution(ND, payload["secret_distribution"], n)
@@ -433,8 +458,11 @@ def estimator_distribution(ND, distribution: dict, n: int):
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
-        print(json.dumps(run(payload), ensure_ascii=False))
+        print(json.dumps(run(payload), ensure_ascii=False, allow_nan=False))
         return 0
+    except EstimatorRouteError as exc:
+        print(json.dumps(exc.as_result(), ensure_ascii=False, allow_nan=False))
+        return 1
     except EstimatorOriginMismatch as exc:
         print(
             json.dumps(
@@ -444,11 +472,18 @@ def main() -> int:
                     "message": str(exc),
                 },
                 ensure_ascii=False,
+                allow_nan=False,
             )
         )
         return 1
     except Exception as exc:
-        print(json.dumps({"ok": False, "message": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"ok": False, "message": f"{type(exc).__name__}: {exc}"},
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        )
         return 1
 
 

@@ -54,6 +54,12 @@ cannot be selected safely by importing both into the application process.
 `app.estimator_process` resolves one configured source root per request,
 launches a fresh Sage subprocess, and passes `estimator_profile` in the payload.
 The remote worker implements the same profile field and source-origin check.
+`app.estimator_contract` validates the problem/profile/variant tuple at local
+dispatch, runner, worker request, and response-normalization boundaries. It
+does not infer a missing variant. Invalid tuples return stable route errors
+before estimator attacks execute. `app.json_safety` recursively bounds remote
+metadata by depth and item count, removes non-finite JSON values, and feeds only
+sanitized copies into validation and API responses.
 
 Routing is fixed: LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use
 `enhanced`. LWE-family runs evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid`

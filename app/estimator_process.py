@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig, EstimatorConfig, configured_estimator_source_root
+from .estimator_contract import EstimatorRouteError, validate_estimator_route
+from .json_safety import reject_json_constant, sanitize_json_value
 from .remote_estimator import estimate_remotely
 
 
@@ -80,6 +82,14 @@ def run_estimator(
 ) -> dict[str, Any]:
     normalized = dict(payload)
     normalized["estimator_profile"] = profile
+    try:
+        validate_estimator_route(
+            normalized.get("problem"),
+            normalized.get("estimator_profile"),
+            normalized.get("hard_problem_variant"),
+        )
+    except EstimatorRouteError as exc:
+        return exc.as_result()
     if config.estimator.remote_url:
         return estimate_remotely(
             base_url=config.estimator.remote_url,
@@ -158,7 +168,7 @@ def run_local_estimator(
 
         completed = subprocess.run(
             [sage, "-python", str(runner)],
-            input=json.dumps(payload),
+            input=json.dumps(payload, allow_nan=False),
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -196,10 +206,14 @@ def run_local_estimator(
 
 def decode_json_object(output: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(output.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
+        data = json.loads(
+            output.strip().splitlines()[-1],
+            parse_constant=reject_json_constant,
+        )
+    except (json.JSONDecodeError, IndexError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    safe = sanitize_json_value(data)
+    return safe if isinstance(safe, dict) else None
 
 
 def process_failed(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:

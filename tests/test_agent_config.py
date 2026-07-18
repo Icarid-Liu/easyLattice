@@ -20,6 +20,13 @@ from app.llm_provider import sanitize_overrides
 from app.server import cors_origin_for
 
 
+def estimator_route_payload(profile="standard"):
+    return {
+        "problem": "lwe",
+        "hard_problem_variant": "rlwe" if profile == "enhanced" else "lwe",
+    }
+
+
 class AgentConfigTests(unittest.TestCase):
     def test_default_agent_is_deterministic(self):
         result = recommend_with_agent({"targetSecurity": 128, "maxQBits": 24})
@@ -225,7 +232,7 @@ class AgentConfigTests(unittest.TestCase):
         )
 
     def test_run_estimator_copies_payload_for_remote_profile(self):
-        payload = {"problem": "lwe", "n": 512}
+        payload = estimator_route_payload("enhanced") | {"n": 512}
         expected = {"ok": True, "raw": "unchanged"}
         config = AppConfig(
             estimator=EstimatorConfig(remote_url="https://estimator.invalid")
@@ -238,14 +245,39 @@ class AgentConfigTests(unittest.TestCase):
             result = run_estimator(payload, 17, config, "enhanced")
 
         self.assertIs(result, expected)
-        self.assertEqual(payload, {"problem": "lwe", "n": 512})
+        self.assertEqual(
+            payload,
+            {"problem": "lwe", "hard_problem_variant": "rlwe", "n": 512},
+        )
         self.assertEqual(
             remote.call_args.kwargs["payload"],
-            {"problem": "lwe", "n": 512, "estimator_profile": "enhanced"},
+            {
+                "problem": "lwe",
+                "hard_problem_variant": "rlwe",
+                "n": 512,
+                "estimator_profile": "enhanced",
+            },
         )
 
+    def test_run_estimator_rejects_profile_variant_mismatch_before_dispatch(self):
+        config = AppConfig(
+            estimator=EstimatorConfig(remote_url="https://estimator.invalid")
+        )
+
+        with patch("app.estimator_process.estimate_remotely") as remote:
+            result = run_estimator(
+                {"problem": "lwe", "hard_problem_variant": "lwe"},
+                17,
+                config,
+                "enhanced",
+            )
+
+        self.assertEqual(result["code"], "invalid_estimator_route")
+        self.assertIn("lwe/enhanced", result["message"])
+        remote.assert_not_called()
+
     def test_run_estimator_isolates_and_normalizes_selected_profile_root(self):
-        payload = {"problem": "lwe", "n": 512}
+        payload = estimator_route_payload("enhanced") | {"n": 512}
         successful = {"ok": True, "result": {"bits": 128}}
         with TemporaryDirectory() as standard, TemporaryDirectory() as enhanced, TemporaryDirectory() as competing:
             for root in (standard, enhanced, competing):
@@ -290,7 +322,10 @@ class AgentConfigTests(unittest.TestCase):
             normalized_enhanced = estimator_root(config.estimator, "enhanced")
 
         self.assertEqual(result, successful)
-        self.assertEqual(payload, {"problem": "lwe", "n": 512})
+        self.assertEqual(
+            payload,
+            {"problem": "lwe", "hard_problem_variant": "rlwe", "n": 512},
+        )
         self.assertEqual(normalized_enhanced, enhanced)
         self.assertEqual(process.call_count, 2)
         preflight_call, runner_call = process.call_args_list
@@ -313,7 +348,8 @@ class AgentConfigTests(unittest.TestCase):
             self.assertNotIn(competing, call.kwargs["env"]["PYTHONPATH"])
         self.assertEqual(
             runner_call.kwargs["input"],
-            '{"problem": "lwe", "n": 512, "estimator_profile": "enhanced"}',
+            '{"problem": "lwe", "hard_problem_variant": "rlwe", "n": 512, '
+            '"estimator_profile": "enhanced"}',
         )
 
     def test_run_estimator_rejects_invalid_or_mismatched_roots(self):
@@ -327,7 +363,7 @@ class AgentConfigTests(unittest.TestCase):
                 return_value="/test/sage",
             ), patch("app.estimator_process.subprocess.run") as process:
                 result = run_estimator(
-                    {},
+                    estimator_route_payload(),
                     5,
                     AppConfig(
                         estimator=EstimatorConfig(lattice_estimator_path=invalid)
@@ -354,7 +390,7 @@ class AgentConfigTests(unittest.TestCase):
                 return_value=mismatch,
             ) as process:
                 result = run_estimator(
-                    {},
+                    estimator_route_payload(),
                     5,
                     AppConfig(
                         estimator=EstimatorConfig(lattice_estimator_path=selected)
@@ -438,7 +474,7 @@ class AgentConfigTests(unittest.TestCase):
             }
 
             with patch.dict(os.environ, inherited, clear=True):
-                result = run_estimator({}, 5, config, "standard")
+                result = run_estimator(estimator_route_payload(), 5, config, "standard")
             reached_runner = runner_executed.exists()
 
         self.assertFalse(result["ok"])
@@ -450,13 +486,23 @@ class AgentConfigTests(unittest.TestCase):
     def test_run_estimator_returns_stable_local_failure_codes(self):
         missing_sage = AppConfig(estimator=EstimatorConfig(sage_binary="missing-sage"))
         with patch("app.estimator_process.shutil.which", return_value=None):
-            result = run_estimator({}, 5, missing_sage, "standard")
+            result = run_estimator(
+                estimator_route_payload(),
+                5,
+                missing_sage,
+                "standard",
+            )
         self.assertEqual(result["code"], "sage_not_found")
 
         with patch("app.estimator_process.shutil.which", return_value="/test/sage"):
             for profile in ("standard", "enhanced"):
                 with self.subTest(profile=profile):
-                    result = run_estimator({}, 5, AppConfig(), profile)
+                    result = run_estimator(
+                        estimator_route_payload(profile),
+                        5,
+                        AppConfig(),
+                        profile,
+                    )
                     self.assertEqual(
                         result["code"],
                         f"{profile}_estimator_not_configured",
@@ -517,7 +563,12 @@ class AgentConfigTests(unittest.TestCase):
                     "app.estimator_process.subprocess.run",
                     side_effect=process_results,
                 ):
-                    result = run_estimator({}, 5, config, "standard")
+                    result = run_estimator(
+                        estimator_route_payload(),
+                        5,
+                        config,
+                        "standard",
+                    )
                 self.assertEqual(result["code"], code)
 
     def test_public_config_exposes_remote_estimator_status(self):

@@ -4,7 +4,61 @@ from typing import Any
 
 
 LWE_ATTACKS = ("usvp", "dual_hybrid", "bdd_hybrid")
+STANDARD_LWE_VARIANTS = frozenset({"lwe", "lwr"})
 STRUCTURED_LWE_VARIANTS = frozenset({"rlwe", "mlwe", "rlwr", "mlwr"})
+NTRU_VARIANTS = frozenset({"matrix", "ring"})
+ESTIMATOR_PROFILES = frozenset({"standard", "enhanced"})
+
+
+class EstimatorRouteError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+    def as_result(self) -> dict[str, Any]:
+        return {"ok": False, "code": self.code, "message": self.message}
+
+
+def validate_estimator_route(
+    problem: Any,
+    estimator_profile: Any,
+    hard_problem_variant: Any,
+) -> tuple[str, str, str]:
+    if not isinstance(problem, str) or problem not in {"lwe", "ntru"}:
+        raise EstimatorRouteError(
+            "invalid_estimator_problem",
+            "problem must be lwe or ntru.",
+        )
+    if (
+        not isinstance(estimator_profile, str)
+        or estimator_profile not in ESTIMATOR_PROFILES
+    ):
+        raise EstimatorRouteError(
+            "invalid_estimator_profile",
+            "estimator_profile must be standard or enhanced.",
+        )
+    if not isinstance(hard_problem_variant, str):
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            "hard_problem_variant is required and must match the selected estimator profile.",
+        )
+
+    if problem == "lwe" and estimator_profile == "standard":
+        allowed = STANDARD_LWE_VARIANTS
+    elif problem == "lwe" and estimator_profile == "enhanced":
+        allowed = STRUCTURED_LWE_VARIANTS
+    elif problem == "ntru" and estimator_profile == "standard":
+        allowed = NTRU_VARIANTS
+    else:
+        allowed = frozenset()
+    if hard_problem_variant not in allowed:
+        allowed_text = ", ".join(sorted(allowed)) if allowed else "none"
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            f"{problem}/{estimator_profile} requires hard_problem_variant in {allowed_text}.",
+        )
+    return problem, estimator_profile, hard_problem_variant
 
 STRUCTURE_NOT_APPLICABLE = {
     "requested": False,

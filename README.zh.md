@@ -98,6 +98,12 @@ easyLattice 使用两个 estimator profile：
 实际导入的包路径。不能把两个仓库同时放进一个 Python import path 后仍期望可靠选择
 profile。
 
+Estimator 请求和响应必须携带精确路由。允许的组合只有：`standard` 对应 LWE/LWR，
+`enhanced` 对应 RLWE/MLWE/RLWR/MLWR，以及 `standard` 对应 NTRU 的
+`matrix`/`ring`。缺失、未知或不匹配的 variant 会在攻击运行前以
+`invalid_estimator_route` fail closed。远端响应元数据会经过有界递归清洗并转换为严格
+JSON-safe 形式；非有限诊断值会变为 `null`，而非有限安全字段仍会导致验证失败。
+
 推荐响应会区分参数选择状态与 estimator 验证状态：
 
 | 状态 | 含义 |

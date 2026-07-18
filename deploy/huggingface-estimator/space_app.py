@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -13,8 +14,17 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.estimator_contract import (
+    ESTIMATOR_PROFILES as CONTRACT_ESTIMATOR_PROFILES,
+    EstimatorRouteError,
+    validate_estimator_route,
+)
+from app.json_safety import reject_json_constant, sanitize_json_value
+
 RUNNER = ROOT / "app" / "estimator_runner.py"
 
 
@@ -37,7 +47,7 @@ ALLOWED_ORIGINS = [
     for origin in env_value("EASYLATTICE_ALLOWED_ORIGINS", default="*").split(",")
     if origin.strip()
 ]
-ESTIMATOR_PROFILES = {"standard", "enhanced"}
+ESTIMATOR_PROFILES = set(CONTRACT_ESTIMATOR_PROFILES)
 INVALID_PROFILE_MESSAGE = "estimator_profile must be standard or enhanced."
 ESTIMATOR_ORIGIN_PREFLIGHT = r"""
 import json
@@ -134,6 +144,13 @@ class EstimatorHandler(BaseHTTPRequestHandler):
         try:
             request = self.read_json()
             payload, timeout_seconds = parse_estimate_request(request)
+        except EstimatorRouteError as exc:
+            self.write_error(
+                HTTPStatus.BAD_REQUEST,
+                exc.message,
+                code=exc.code,
+            )
+            return
         except ValueError as exc:
             self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -158,13 +175,21 @@ class EstimatorHandler(BaseHTTPRequestHandler):
         if length > MAX_REQUEST_BYTES:
             raise ValueError(f"request body is too large; max {MAX_REQUEST_BYTES} bytes")
         body = self.rfile.read(length).decode("utf-8") if length else "{}"
-        data = json.loads(body or "{}")
+        data = json.loads(
+            body or "{}",
+            parse_constant=reject_json_constant,
+        )
         if not isinstance(data, dict):
             raise ValueError("request body must be a JSON object")
         return data
 
     def write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        safe_payload = sanitize_json_value(payload)
+        data = json.dumps(
+            safe_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
         self.send_response(status)
         self.write_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -172,8 +197,17 @@ class EstimatorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def write_error(self, status: HTTPStatus, message: str) -> None:
-        self.write_json({"ok": False, "error": message}, status)
+    def write_error(
+        self,
+        status: HTTPStatus,
+        message: str,
+        *,
+        code: str | None = None,
+    ) -> None:
+        payload = {"ok": False, "error": message}
+        if code is not None:
+            payload["code"] = code
+        self.write_json(payload, status)
 
     def write_cors_headers(self) -> None:
         origin = self.headers.get("Origin", "")
@@ -209,13 +243,11 @@ def parse_estimate_request(request: dict[str, Any]) -> tuple[dict[str, Any], int
 
 
 def validate_payload(payload: dict[str, Any]) -> None:
-    problem = str(payload.get("problem", "lwe")).lower()
-    if problem not in {"lwe", "ntru"}:
-        raise ValueError("problem must be lwe or ntru")
-
-    profile = str(payload.get("estimator_profile", "standard"))
-    if profile not in ESTIMATOR_PROFILES:
-        raise ValueError(INVALID_PROFILE_MESSAGE)
+    problem, _, _ = validate_estimator_route(
+        payload.get("problem"),
+        payload.get("estimator_profile"),
+        payload.get("hard_problem_variant"),
+    )
 
     n = int(payload.get("n", 0))
     q = int(payload.get("q", 0))
@@ -317,21 +349,26 @@ def estimator_source_root(path: str) -> Path | None:
 
 def decode_json_object(output: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(output.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
+        data = json.loads(
+            output.strip().splitlines()[-1],
+            parse_constant=reject_json_constant,
+        )
+    except (json.JSONDecodeError, IndexError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    safe = sanitize_json_value(data)
+    return safe if isinstance(safe, dict) else None
 
 
 def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     sage_binary = os.environ.get("SAGE_BINARY", "sage")
-    profile = str(payload.get("estimator_profile", "standard"))
-    if profile not in ESTIMATOR_PROFILES:
-        return {
-            "ok": False,
-            "code": "invalid_estimator_profile",
-            "message": INVALID_PROFILE_MESSAGE,
-        }
+    try:
+        _, profile, _ = validate_estimator_route(
+            payload.get("problem"),
+            payload.get("estimator_profile"),
+            payload.get("hard_problem_variant"),
+        )
+    except EstimatorRouteError as exc:
+        return exc.as_result()
 
     path_name = (
         "ENHANCED_LATTICE_ESTIMATOR_PATH"
@@ -396,7 +433,7 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
 
     completed = subprocess.run(
         [sage_binary, "-python", str(RUNNER)],
-        input=json.dumps(payload),
+        input=json.dumps(payload, allow_nan=False),
         text=True,
         capture_output=True,
         timeout=timeout_seconds,
@@ -412,8 +449,15 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
         return {"ok": False, "message": message}
 
     try:
-        return json.loads(completed.stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError) as exc:
+        result = json.loads(
+            completed.stdout.strip().splitlines()[-1],
+            parse_constant=reject_json_constant,
+        )
+        safe_result = sanitize_json_value(result)
+        if not isinstance(safe_result, dict):
+            raise ValueError("estimator result must be a JSON object")
+        return safe_result
+    except (json.JSONDecodeError, IndexError, ValueError) as exc:
         return {
             "ok": False,
             "message": f"estimator returned non-JSON output: {type(exc).__name__}",

@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from .agent import recommend_with_agent
 from .config import public_config
 from .decryption_failure import calculate_decryption_failure
+from .json_safety import sanitize_json_value
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,7 +249,11 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(
+            sanitize_json_value(payload),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
         self.send_response(status)
         self.write_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")

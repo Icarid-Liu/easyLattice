@@ -92,6 +92,13 @@ result remains visible, but it makes structured validation partial and cannot
 certify the target alone. MATZOV and ADPS16 are run in classical and quantum
 modes.
 
+The local dispatcher, remote worker, estimator runner, and response validator
+all enforce the same problem/profile/variant tuple. Missing, unknown, or
+mismatched variants fail with `invalid_estimator_route` before attacks run.
+Remote diagnostics are depth/item bounded and serialized as strict JSON;
+non-finite diagnostic values are replaced with `null` and cannot leak into an
+API response.
+
 Both repositories expose the same top-level Python import name, `estimator`.
 The server therefore launches the selected profile in a separate Sage process
 with an isolated `PYTHONPATH` and verifies the imported package origin. Setting

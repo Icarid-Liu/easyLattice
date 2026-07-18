@@ -113,7 +113,13 @@ requests to `/estimate`; a proxy or browser may time out before Sage does.
 
 ## Estimator Profiles
 
-Each payload may set `estimator_profile` to `standard` or `enhanced`.
+Each payload must set `problem`, `estimator_profile`, and
+`hard_problem_variant`. The worker accepts only `lwe/standard` with `lwe` or
+`lwr`, `lwe/enhanced` with `rlwe`, `mlwe`, `rlwr`, or `mlwr`, and
+`ntru/standard` with `matrix` or `ring`. Missing or mismatched routes return
+`invalid_estimator_route` before Sage starts; the worker never defaults an
+enhanced request to LWE. Responses are emitted as strict JSON after bounded
+recursive metadata sanitization.
 LWE/LWR and NTRU jobs use `standard`; RLWE/MLWE/RLWR/MLWR jobs use `enhanced`.
 The full application adds this field automatically. Direct worker callers must
 send the correct profile themselves. For example, a plain LWE payload uses:

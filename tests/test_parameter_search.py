@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -68,12 +69,19 @@ def estimator_mode(bits, *, profile="enhanced", variant="rlwr"):
     }
 
 
-def estimator_success(bits=140.0, complete=False, profile="enhanced", commit="abc1234"):
+def estimator_success(
+    bits=140.0,
+    complete=False,
+    profile="enhanced",
+    commit="abc1234",
+    variant="rlwr",
+):
     models = {
         model: {
             mode: estimator_mode(
                 bits - (1.0 if mode == "quantum" else 0.0),
                 profile=profile,
+                variant=variant,
             )
             for mode in ("classical", "quantum")
         }
@@ -87,6 +95,7 @@ def estimator_success(bits=140.0, complete=False, profile="enhanced", commit="ab
         "ok": True,
         "complete": complete,
         "estimator_profile": profile,
+        "hard_problem_variant": variant,
         "estimator_commit": commit,
         "modes": models["adps16"],
         "models": models,
@@ -116,6 +125,7 @@ def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
         "ok": False,
         "complete": False,
         "estimator_profile": "enhanced",
+        "hard_problem_variant": "rlwr",
         "estimator_commit": "partial123",
         "modes": models["adps16"],
         "models": models,
@@ -504,6 +514,7 @@ class ParameterSearchTests(unittest.TestCase):
         response = estimator_success(
             complete=True,
             profile="standard",
+            variant="lwe",
         )
 
         normalized, _ = normalize_estimator_response(
@@ -589,6 +600,61 @@ class ParameterSearchTests(unittest.TestCase):
                 )
                 self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
 
+    def test_estimator_metadata_is_deep_sanitized_without_losing_finite_fields(self):
+        response = estimator_success(bits=151.0)
+        response["diagnostics"] = {
+            "finite": 7.25,
+            "nan": float("nan"),
+            "nested": [float("inf"), {"value": float("-inf"), "keep": 3}],
+        }
+        response["models"]["matzov"]["classical"]["attacks"]["usvp"][
+            "diagnostics"
+        ] = {
+            "finite": 11.5,
+            "nan": float("nan"),
+        }
+
+        with patch("app.parameter_search.run_estimator", return_value=response):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        entry = result["estimator"]["validated"][0]
+        attack = result["recommendation"]["security"]["attacks"]["matzov"][
+            "classical"
+        ]["attacks"]["usvp"]
+        self.assertEqual(entry["diagnostics"]["finite"], 7.25)
+        self.assertIsNone(entry["diagnostics"]["nan"])
+        self.assertEqual(
+            entry["diagnostics"]["nested"],
+            [None, {"value": None, "keep": 3}],
+        )
+        self.assertEqual(attack["diagnostics"]["finite"], 11.5)
+        self.assertIsNone(attack["diagnostics"]["nan"])
+        json.dumps(result, allow_nan=False)
+
+    def test_deep_and_oversized_estimator_diagnostics_are_bounded(self):
+        response = estimator_success()
+        deep: dict[str, object] = {"leaf": 1}
+        for _ in range(40):
+            deep = {"next": deep}
+        response["diagnostics"] = {
+            "deep": deep,
+            "many": list(range(5000)),
+        }
+
+        with patch("app.parameter_search.run_estimator", return_value=response):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        serialized = json.dumps(result, allow_nan=False)
+        self.assertIn("<maximum-depth-exceeded>", serialized)
+        self.assertIn("<maximum-items-exceeded>", serialized)
+        self.assertLess(len(serialized), 100_000)
+
     def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
         empty_models = {
             "ok": True,
@@ -638,6 +704,15 @@ class ParameterSearchTests(unittest.TestCase):
         forged_structure_complete = estimator_success()
         forged_structure_complete["complete"] = True
         forged_structure_complete["models"]["matzov"]["classical"]["complete"] = True
+        missing_variant = estimator_success()
+        del missing_variant["hard_problem_variant"]
+        mismatched_variant = estimator_success()
+        mismatched_variant["hard_problem_variant"] = "lwe"
+        mismatched_parameter_variant = estimator_success()
+        mismatched_parameter_variant["parameters"] = {
+            "estimator_profile": "enhanced",
+            "hard_problem_variant": "lwe",
+        }
         cases = {
             "non_object": "not an estimator response",
             "list_code": {
@@ -665,6 +740,9 @@ class ParameterSearchTests(unittest.TestCase):
             "missing_bdd_correction": missing_bdd_correction,
             "dual_selected_as_best": dual_selected_as_best,
             "forged_structure_complete": forged_structure_complete,
+            "missing_variant": missing_variant,
+            "mismatched_variant": mismatched_variant,
+            "mismatched_parameter_variant": mismatched_parameter_variant,
         }
 
         for name, response in cases.items():

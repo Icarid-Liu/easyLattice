@@ -18,7 +18,7 @@ from app.estimator_runner import (
     run_ntru,
     summarize_attacks,
 )
-from app.estimator_contract import structure_correction_metadata
+from app.estimator_contract import EstimatorRouteError, structure_correction_metadata
 
 
 FAKE_OO = object()
@@ -174,6 +174,20 @@ class EstimatorRunnerTests(unittest.TestCase):
     def test_unsupported_attack_raises_value_error(self):
         with self.assertRaisesRegex(ValueError, "Unsupported LWE attack: unknown"):
             run_lwe_attack(FakeLWE, object(), "unknown", object(), "classical", "standard", 512)
+
+    def test_runner_rejects_enhanced_unstructured_route_before_attack_execution(self):
+        payload = self.fake_lwe_payload(profile="enhanced", variant="lwe")
+        estimator_module = types.ModuleType("estimator")
+        estimator_module.LWE = FakeLWE
+        estimator_module.ND = FakeND
+
+        with patch.dict(sys.modules, {"estimator": estimator_module}):
+            with self.assertRaises(EstimatorRouteError) as raised:
+                run_lwe(payload)
+
+        self.assertEqual(raised.exception.code, "invalid_estimator_route")
+        self.assertIn("lwe/enhanced", raised.exception.message)
+        self.assertEqual(FakeLWE.calls, [])
 
     def test_summaries_distinguish_partial_and_complete_results(self):
         partial = summarize_attacks(
@@ -459,7 +473,11 @@ class EstimatorRunnerTests(unittest.TestCase):
             )
             completed = subprocess.run(
                 [sys.executable, str(runner)],
-                input="{}",
+                input=json.dumps({
+                    "problem": "lwe",
+                    "estimator_profile": "standard",
+                    "hard_problem_variant": "lwe",
+                }),
                 text=True,
                 capture_output=True,
                 timeout=5,
@@ -473,6 +491,41 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertEqual(result["code"], "estimator_origin_mismatch")
         self.assertIn(str(Path(competing).resolve()), result["message"])
         self.assertIn(str(Path(selected).resolve()), result["message"])
+
+    def test_runner_process_returns_stable_code_for_invalid_route(self):
+        runner = Path(__file__).resolve().parents[1] / "app" / "estimator_runner.py"
+        completed = subprocess.run(
+            [sys.executable, str(runner)],
+            input=json.dumps({
+                "problem": "lwe",
+                "estimator_profile": "enhanced",
+                "hard_problem_variant": "lwe",
+            }),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(result["code"], "invalid_estimator_route")
+
+    @staticmethod
+    def fake_lwe_payload(profile="enhanced", variant="rlwe"):
+        return {
+            "problem": "lwe",
+            "n": 512,
+            "q": 12289,
+            "distribution": {
+                "name": "CBD(2)",
+                "estimator": {"type": "centered_binomial", "eta": 2},
+            },
+            "estimator_profile": profile,
+            "hard_problem_variant": variant,
+            "ring_degree": 512,
+            "per_attack_timeout": 1,
+        }
 
     def run_fake_lwe(self, profile="enhanced", variant="rlwe"):
         estimator_module = types.ModuleType("estimator")
@@ -488,19 +541,7 @@ class EstimatorRunnerTests(unittest.TestCase):
                 "quantum": "adps16-quantum",
             },
         }
-        payload = {
-            "problem": "lwe",
-            "n": 512,
-            "q": 12289,
-            "distribution": {
-                "name": "CBD(2)",
-                "estimator": {"type": "centered_binomial", "eta": 2},
-            },
-            "estimator_profile": profile,
-            "hard_problem_variant": variant,
-            "ring_degree": 512,
-            "per_attack_timeout": 1,
-        }
+        payload = self.fake_lwe_payload(profile=profile, variant=variant)
         with (
             patch.dict(sys.modules, {"estimator": estimator_module}),
             patch("app.estimator_runner.reduction_model_variants", return_value=models),
@@ -554,6 +595,7 @@ class EstimatorSpaceAppTests(unittest.TestCase):
 
     @staticmethod
     def payload(profile="standard"):
+        variant = "rlwe" if profile == "enhanced" else "lwe"
         return {
             "problem": "lwe",
             "n": 512,
@@ -562,7 +604,35 @@ class EstimatorSpaceAppTests(unittest.TestCase):
                 "estimator": {"type": "centered_binomial", "eta": 2},
             },
             "estimator_profile": profile,
+            "hard_problem_variant": variant,
         }
+
+    def test_worker_rejects_profile_variant_mismatch_before_subprocess(self):
+        payload = self.payload("enhanced")
+        payload["hard_problem_variant"] = "lwe"
+
+        with self.assertRaises(EstimatorRouteError) as raised:
+            self.space_app.validate_payload(payload)
+        self.assertEqual(raised.exception.code, "invalid_estimator_route")
+
+        with patch.object(self.space_app.subprocess, "run") as run:
+            result = self.space_app.run_estimator_subprocess(payload, 5)
+        self.assertEqual(result["code"], "invalid_estimator_route")
+        self.assertIn("lwe/enhanced", result["message"])
+        run.assert_not_called()
+
+    def test_worker_rejects_missing_variant_without_defaulting_to_lwe(self):
+        payload = self.payload("enhanced")
+        del payload["hard_problem_variant"]
+
+        with self.assertRaises(EstimatorRouteError) as raised:
+            self.space_app.validate_payload(payload)
+        self.assertEqual(raised.exception.code, "invalid_estimator_route")
+
+        with patch.object(self.space_app.subprocess, "run") as run:
+            result = self.space_app.run_estimator_subprocess(payload, 5)
+        self.assertEqual(result["code"], "invalid_estimator_route")
+        run.assert_not_called()
 
     def test_invalid_profile_is_rejected_with_stable_error(self):
         with self.assertRaisesRegex(

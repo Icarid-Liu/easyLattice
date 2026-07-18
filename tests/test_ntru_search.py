@@ -13,7 +13,7 @@ from app.ntru_search import (
 )
 
 
-def estimator_success(bits=140.0, complete=True, commit="ntru123"):
+def estimator_success(bits=140.0, complete=True, commit="ntru123", variant="ring"):
     models = {
         model: {
             mode: {
@@ -31,6 +31,7 @@ def estimator_success(bits=140.0, complete=True, commit="ntru123"):
         "ok": True,
         "complete": complete,
         "estimator_profile": "standard",
+        "hard_problem_variant": variant,
         "estimator_commit": commit,
         "modes": models["adps16"],
         "models": models,
@@ -62,6 +63,7 @@ def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
         "ok": False,
         "complete": False,
         "estimator_profile": "standard",
+        "hard_problem_variant": "ring",
         "estimator_commit": "partial-ntru",
         "modes": models["adps16"],
         "models": models,
@@ -717,6 +719,7 @@ class NTRUSearchTests(unittest.TestCase):
         cases = {
             "non_object": "not an estimator response",
             "wrong_profile": estimator_success() | {"estimator_profile": "enhanced"},
+            "wrong_variant": estimator_success(variant="matrix"),
             "nonfinite_bits": malformed,
         }
 

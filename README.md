@@ -114,6 +114,14 @@ sets an isolated `PYTHONPATH`, disables the user site, and verifies the imported
 package origin before estimating. Do not put both repositories into one Python
 import path and expect profile selection to be reliable.
 
+Estimator payloads and responses must carry an exact route. Accepted
+combinations are `standard` with LWE/LWR, `enhanced` with
+RLWE/MLWE/RLWR/MLWR, and `standard` with NTRU `matrix`/`ring`. Missing,
+unknown, or mismatched variants fail closed with `invalid_estimator_route`
+before attacks run. Remote response metadata is recursively bounded and made
+strictly JSON-safe; non-finite diagnostics become `null`, while non-finite
+security fields still fail validation.
+
 Recommendation responses distinguish selection from validation:
 
 | Status | Meaning |

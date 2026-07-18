@@ -9,6 +9,41 @@ from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
+    def test_server_never_emits_nonfinite_json_constants(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            with mock.patch(
+                "app.server.recommend_with_agent",
+                return_value={
+                    "ok": True,
+                    "finite": 17.5,
+                    "diagnostics": [float("nan"), float("inf")],
+                },
+            ):
+                connection.request(
+                    "POST",
+                    "/api/rlwe/recommend",
+                    body=b"{}",
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                raw = response.read().decode("utf-8")
+
+            self.assertEqual(response.status, 200)
+            self.assertNotIn("NaN", raw)
+            self.assertNotIn("Infinity", raw)
+            payload = json.loads(raw, parse_constant=lambda value: self.fail(value))
+            self.assertEqual(payload["finite"], 17.5)
+            self.assertEqual(payload["diagnostics"], [None, None])
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_hostile_dfr_scalars_return_400_instead_of_500(self):
         zero = {"type": "custom_pmf", "pmf": {"0": "1"}}
         base = {

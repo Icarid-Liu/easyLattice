@@ -11,11 +11,14 @@ from typing import Any
 from .compression_noise import compression_noise_profile
 from .config import AppConfig, load_config
 from .estimator_contract import (
+    EstimatorRouteError,
     LWE_ATTACKS,
     structure_correction_metadata,
     structure_correction_satisfied,
+    validate_estimator_route,
 )
 from .estimator_process import estimator_profile_for, run_estimator
+from .json_safety import sanitize_json_value
 from .security_result import modulus_bits, selection_status, validation_result
 
 
@@ -1549,7 +1552,9 @@ def normalize_estimator_response(
     response: Any,
     request: RequestOptions,
     expected_profile: str,
+    expected_variant: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    response = sanitize_json_value(response)
     if not isinstance(response, dict):
         failure = invalid_estimator_response("expected an object")
         return None, failure
@@ -1559,6 +1564,26 @@ def normalize_estimator_response(
         return None, invalid_estimator_response("code must be a string or null")
 
     has_structured_results = "models" in response or "modes" in response
+    category = getattr(request, "hard_problem_category", None)
+    expected_variant = expected_variant or request.hard_problem_variant
+    has_route_metadata = (
+        "estimator_profile" in response or "hard_problem_variant" in response
+    )
+    if has_structured_results or has_route_metadata:
+        if response.get("estimator_profile") != expected_profile:
+            return None, invalid_estimator_response(
+                f"estimator_profile must be {expected_profile}"
+            )
+        variant = response.get("hard_problem_variant")
+        try:
+            validate_estimator_route(category, expected_profile, variant)
+        except EstimatorRouteError as exc:
+            return None, invalid_estimator_response(f"{exc.code}: {exc.message}")
+        if variant != expected_variant:
+            return None, invalid_estimator_response(
+                f"hard_problem_variant must be {expected_variant}"
+            )
+
     if response.get("ok") is False and not has_structured_results:
         failure = dict(response)
         message = failure.get("message")
@@ -1571,10 +1596,24 @@ def normalize_estimator_response(
         return None, invalid_estimator_response("ok must be a boolean")
     if type(response.get("complete")) is not bool:
         return None, invalid_estimator_response("complete must be a boolean")
-    if response.get("estimator_profile") != expected_profile:
-        return None, invalid_estimator_response(
-            f"estimator_profile must be {expected_profile}"
-        )
+    parameters = response.get("parameters")
+    if parameters is not None:
+        if not isinstance(parameters, dict):
+            return None, invalid_estimator_response("parameters must be an object")
+        if (
+            "estimator_profile" in parameters
+            and parameters["estimator_profile"] != expected_profile
+        ):
+            return None, invalid_estimator_response(
+                "parameters.estimator_profile disagrees with estimator_profile"
+            )
+        if (
+            "hard_problem_variant" in parameters
+            and parameters["hard_problem_variant"] != expected_variant
+        ):
+            return None, invalid_estimator_response(
+                "parameters.hard_problem_variant disagrees with hard_problem_variant"
+            )
     estimator_commit = response.get("estimator_commit")
     if estimator_commit is not None and not isinstance(estimator_commit, str):
         return None, invalid_estimator_response("estimator_commit must be a string or null")
@@ -1584,9 +1623,9 @@ def normalize_estimator_response(
     if not isinstance(models, dict):
         return None, invalid_estimator_response("models must be an object")
 
-    is_lwe_response = getattr(request, "hard_problem_category", None) == "lwe"
+    is_lwe_response = category == "lwe"
     lwe_profile = expected_profile if is_lwe_response else None
-    lwe_variant = request.hard_problem_variant if is_lwe_response else None
+    lwe_variant = expected_variant if is_lwe_response else None
     try:
         normalized_models = {
             str(model): normalize_mode_results(
