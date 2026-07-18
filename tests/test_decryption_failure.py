@@ -1011,6 +1011,21 @@ class DecryptionFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "custom_pmf"):
             calculate_decryption_failure(payload | {"ec2": {"type": "noise_distribution"}})
 
+    def test_custom_pmf_json_string_rejects_nonfinite_constants(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "^non-finite JSON constant is not allowed: NaN$",
+        ):
+            pmf_from_distribution(
+                {
+                    "type": "custom_pmf",
+                    "pmf": '{"0": 1, "1": NaN}',
+                },
+                default_dimension=1,
+                tail_bits=128,
+                label="noise",
+            )
+
     def test_custom_pmf_support_rejects_hostile_exponent_before_int_conversion(self):
         hostile = {
             "type": "custom_pmf",

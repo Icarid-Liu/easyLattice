@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from .agent import recommend_with_agent
 from .config import public_config
 from .decryption_failure import calculate_decryption_failure
-from .json_safety import sanitize_json_value
+from .json_safety import reject_json_constant, sanitize_json_value
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -231,15 +231,11 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Request body must be valid UTF-8.") from exc
-        numeric_options = (
-            {
-                "parse_int": str,
-                "parse_float": str,
-                "parse_constant": str,
-            }
-            if preserve_numeric_lexemes
-            else {}
-        )
+        numeric_options: dict[str, Any] = {
+            "parse_constant": reject_json_constant,
+        }
+        if preserve_numeric_lexemes:
+            numeric_options.update({"parse_int": str, "parse_float": str})
         payload = json.loads(body or "{}", **numeric_options)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")

@@ -22,6 +22,7 @@ from math import comb
 from typing import Any
 
 from .compression_noise import balanced_mod, compression_noise_pdf
+from .json_safety import reject_json_constant
 from .polynomial_ring import CoefficientProfile, coefficient_profiles, ring_polynomial
 
 
@@ -589,7 +590,7 @@ def custom_pmf(raw: Any, label: str, tail_bits: int) -> PMF:
                 raw,
                 parse_int=str,
                 parse_float=str,
-                parse_constant=str,
+                parse_constant=reject_json_constant,
             )
         except json.JSONDecodeError as exc:
             raise ValueError(f"{label}.pmf must be valid JSON.") from exc

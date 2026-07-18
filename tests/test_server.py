@@ -100,6 +100,84 @@ class ServerTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_api_requests_reject_nonfinite_json_constants_before_logic(self):
+        zero = {"type": "custom_pmf", "pmf": {"0": 1}}
+        valid_dfr = {
+            "type": "ntru",
+            "n": 1,
+            "p0": 0,
+            "p1": 0,
+            "p2": 0,
+            "p3": 0,
+            "delta": 1,
+            "g": zero,
+            "f": zero,
+            "s": zero,
+            "e": zero,
+            "m": zero,
+        }
+        server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+
+        def post(path, body):
+            connection.request(
+                "POST",
+                path,
+                body=body.encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+
+        try:
+            dfr_body = json.dumps(valid_dfr)[:-1] + ', "unused": NaN}'
+            with mock.patch("app.server.calculate_decryption_failure") as calculate:
+                status, payload = post("/api/decryption-failure/calculate", dfr_body)
+
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                payload["error"],
+                "non-finite JSON constant is not allowed: NaN",
+            )
+            calculate.assert_not_called()
+
+            with mock.patch("app.server.recommend_with_agent") as recommend:
+                for constant in ("NaN", "Infinity", "-Infinity"):
+                    with self.subTest(constant=constant):
+                        status, payload = post(
+                            "/api/rlwe/recommend",
+                            f'{{"targetSecurityBits": {constant}}}',
+                        )
+                        self.assertEqual(status, 400)
+                        self.assertEqual(
+                            payload["error"],
+                            f"non-finite JSON constant is not allowed: {constant}",
+                        )
+
+            recommend.assert_not_called()
+
+            with mock.patch(
+                "app.server.recommend_with_agent",
+                return_value={"ok": True},
+            ) as recommend:
+                status, payload = post(
+                    "/api/rlwe/recommend",
+                    '{"targetSecurityBits": 128.5}',
+                )
+
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["ok"])
+            received = recommend.call_args.args[0]
+            self.assertIsInstance(received["targetSecurityBits"], float)
+            self.assertEqual(received["targetSecurityBits"], 128.5)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_hostile_dfr_scalars_return_400_instead_of_500(self):
         zero = {"type": "custom_pmf", "pmf": {"0": "1"}}
         base = {
