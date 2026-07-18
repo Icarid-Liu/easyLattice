@@ -324,6 +324,21 @@ textarea {
   color: #fff;
 }
 
+.problem-options input:disabled + span {
+  border-color: #c7d0cc;
+  background: #edf1ef;
+  color: var(--text);
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+
+.problem-options input:checked:disabled + span {
+  border-color: #b9c5c0;
+  background: #dfe6e3;
+  color: #26332f;
+  opacity: 0.82;
+}
+
 .check-row {
   grid-template-columns: 18px 1fr;
   align-items: center;
