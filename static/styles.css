@@ -208,8 +208,8 @@ textarea {
   padding: 0 12px;
 }
 
-input:not([type="radio"]):not([type="checkbox"]):disabled,
-input:not([type="radio"]):not([type="checkbox"]):read-only,
+input:not([type="radio"]):not([type="checkbox"]):not([type="range"]):disabled,
+input:not([type="radio"]):not([type="checkbox"]):not([type="range"]):read-only,
 select:disabled,
 textarea:read-only {
   border-color: #c7d0cc;
@@ -221,6 +221,8 @@ textarea:read-only {
 
 input[type="range"]:disabled {
   accent-color: #587a75;
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 
 input:focus,
@@ -274,6 +276,15 @@ textarea {
 .segmented input:checked + span {
   background: var(--green);
   color: #fff;
+}
+
+.segmented input:focus-visible + span,
+.problem-options input:focus-visible + span {
+  position: relative;
+  z-index: 1;
+  outline: 3px solid var(--blue);
+  outline-offset: -4px;
+  box-shadow: inset 0 0 0 2px #fff;
 }
 
 .hard-problem-fieldset {

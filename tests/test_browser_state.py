@@ -144,7 +144,17 @@ FETCH_HOOK = r"""
         url: String(url),
         body: options.body ? JSON.parse(options.body) : null,
         resolveResult(data, status = 200) {
-          resolve(response(data, status));
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            json: async () => {
+              entry.jsonRead = true;
+              setTimeout(() => {
+                entry.handlerTurnComplete = true;
+              }, 0);
+              return data;
+            },
+          });
         },
         rejectError(message) {
           reject(new Error(message));
@@ -926,6 +936,49 @@ class BrowserRequestStateTests(unittest.TestCase):
             " && window.__requests.length === 1"
             " && searchState.snapshot().inFlight"
         )
+        self.page.command(
+            "Input.dispatchKeyEvent",
+            {"type": "keyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9},
+        )
+        self.page.command(
+            "Input.dispatchKeyEvent",
+            {"type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9},
+        )
+
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => {
+                  const focusState = (input) => {
+                    input.focus();
+                    const style = getComputedStyle(input.nextElementSibling);
+                    return input.matches(':focus-visible')
+                      && style.outlineStyle === 'solid'
+                      && style.outlineWidth === '3px'
+                      && style.outlineColor === 'rgb(34, 87, 122)'
+                      && style.boxShadow !== 'none';
+                  };
+                  const range = document.querySelector('#ntt-scale');
+                  const rangeStyle = getComputedStyle(range);
+                  return {
+                    liveRangeEnabled: !range.disabled,
+                    liveRangeUsesNormalStyle: rangeStyle.cursor !== 'not-allowed'
+                      && rangeStyle.backgroundColor === 'rgb(255, 255, 255)',
+                    segmentedFocusVisible: focusState(
+                      document.querySelector('input[name=workspaceMode][value=search]')
+                    ),
+                    problemFocusVisible: focusState(
+                      document.querySelector('input[name=hardProblem][value="lwe:rlwe"]')
+                    ),
+                  };
+                })()"""
+            ),
+            {
+                "liveRangeEnabled": True,
+                "liveRangeUsesNormalStyle": True,
+                "segmentedFocusVisible": True,
+                "problemFocusVisible": True,
+            },
+        )
 
         running_revision = self.page.evaluate("searchState.snapshot().revision")
         self.page.evaluate(
@@ -973,16 +1026,27 @@ class BrowserRequestStateTests(unittest.TestCase):
         self.page.evaluate("document.querySelector('#parameter-form button[type=submit]').click()")
         self.page.wait_for("window.__requests.length === 2 && searchState.snapshot().inFlight")
         self.page.evaluate("window.__requests[0].resolveResult({ old: true })")
-        time.sleep(0.1)
+        self.page.wait_for(
+            "window.__requests[0].jsonRead === true"
+            " && window.__requests[0].handlerTurnComplete === true"
+        )
         self.assertEqual(
             self.page.evaluate(
                 """(() => ({
                   inFlight: searchState.snapshot().inFlight,
                   submitDisabled: document.querySelector('#parameter-form button[type="submit"]').disabled,
                   title: document.querySelector('#summary-title').textContent,
+                  staleResultIgnored: searchState.snapshot().result?.old !== true,
+                  activeRequestStillNewer: window.__requests[1].body.targetSecurity === 129,
                 }))()"""
             ),
-            {"inFlight": True, "submitDisabled": True, "title": "正在搜索参数"},
+            {
+                "inFlight": True,
+                "submitDisabled": True,
+                "title": "正在搜索参数",
+                "staleResultIgnored": True,
+                "activeRequestStillNewer": True,
+            },
         )
 
         self.page.evaluate(
@@ -1144,6 +1208,11 @@ class BrowserRequestStateTests(unittest.TestCase):
                     selectorsInteractive: !document.querySelector('#language-select').disabled
                       && !document.querySelector('#ring-family').disabled
                       && !document.querySelector('[name=securityModel][value=classical]').disabled,
+                    rangeLockedStyle: (() => {
+                      const range = document.querySelector('#ntt-scale');
+                      const style = getComputedStyle(range);
+                      return range.disabled && style.cursor === 'not-allowed' && style.opacity === '0.72';
+                    })(),
                   };
                 })()"""
             ),
@@ -1176,6 +1245,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "requestMatchesForm": True,
                 "locked": True,
                 "selectorsInteractive": True,
+                "rangeLockedStyle": True,
             },
         )
         self.assert_viewport_layout(1440, 1000)
