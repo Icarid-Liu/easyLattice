@@ -17,6 +17,7 @@ from app.decryption_failure import (
 
 
 ZERO = {"type": "custom_pmf", "pmf": {"0": "1"}}
+ONE = {"type": "custom_pmf", "pmf": {"1": "1"}}
 BERNOULLI = {"type": "custom_pmf", "pmf": {"0": "0.5", "1": "0.5"}}
 
 
@@ -254,6 +255,167 @@ class DecryptionFailureTests(unittest.TestCase):
             "m": dfr.MAX_LWE_DIMENSION,
             "n": dfr.MAX_LWE_DIMENSION,
         })
+
+    def test_hostile_integer_text_rejects_before_decimal_or_int_conversion(self):
+        exponent = "1e10000000"
+        huge_digits = "9" * 100_000
+        operations = (
+            lambda: dfr.positive_int(exponent, "dimension"),
+            lambda: dfr.nonnegative_int(exponent, "weight"),
+            lambda: dfr.bounded_dimension(
+                exponent,
+                "n",
+                dfr.MAX_NTRU_DIMENSION,
+                "MAX_NTRU_DIMENSION",
+            ),
+            lambda: calculate_decryption_failure({"type": "ntru", "precisionBits": exponent}),
+            lambda: calculate_decryption_failure({"type": "ntru", "tailBits": exponent}),
+            lambda: calculate_decryption_failure({"type": "ntru", "n": exponent}),
+            lambda: calculate_decryption_failure({"type": "ntru", "n": huge_digits}),
+            lambda: calculate_decryption_failure({"type": "lwe", "m": exponent, "n": 1}),
+            lambda: pmf_from_distribution(
+                {"type": "centered_binomial", "eta": exponent},
+                default_dimension=1,
+                tail_bits=128,
+                label="noise",
+            ),
+            lambda: pmf_from_distribution(
+                {
+                    "type": "sparse_ternary",
+                    "plus_weight": exponent,
+                    "minus_weight": 0,
+                    "dimension": 3,
+                },
+                default_dimension=3,
+                tail_bits=128,
+                label="secret",
+            ),
+            lambda: pmf_from_distribution(
+                {"type": "uniform_mod", "modulus": exponent},
+                default_dimension=1,
+                tail_bits=128,
+                label="uniform",
+            ),
+            lambda: pmf_from_distribution(
+                {"type": "kyber_nearest_compression", "q": 3329, "d": exponent},
+                default_dimension=1,
+                tail_bits=128,
+                label="compression",
+            ),
+        )
+        with mock.patch.object(
+            dfr,
+            "scalar",
+            side_effect=AssertionError("integer parser delegated to Decimal scalar parsing"),
+        ):
+            for operation in operations:
+                with self.subTest(operation=operation), self.assertRaises(ValueError):
+                    operation()
+        with self.assertRaisesRegex(
+            ValueError,
+            "^n must be a non-negative integer[.]$",
+        ):
+            calculate_decryption_failure({"type": "ntru", "n": exponent})
+
+    def test_exact_integer_json_values_remain_supported(self):
+        result = calculate_decryption_failure(
+            ntru_product_payload("cyclic")
+            | {
+                "n": "3",
+                "precisionBits": 512.0,
+                "tailBits": "128",
+            }
+        )
+        self.assertEqual(result["dimensions"]["n"], 3)
+        self.assertEqual(result["precision_bits"], 512)
+
+    def test_integer_driven_distribution_loops_have_preflight_limits(self):
+        with (
+            mock.patch.object(
+                dfr,
+                "compression_noise_pdf",
+                side_effect=AssertionError("compression enumeration started"),
+            ),
+            self.assertRaisesRegex(ValueError, "MAX_PMF_SUPPORT"),
+        ):
+            pmf_from_distribution(
+                {
+                    "type": "lwr_floor_compression",
+                    "q": dfr.MAX_PMF_SUPPORT + 1,
+                    "p": 2,
+                },
+                default_dimension=1,
+                tail_bits=128,
+                label="compression",
+            )
+        with self.assertRaisesRegex(ValueError, "MAX_PMF_SUPPORT"):
+            dfr.kyber_nearest_compression_pmf(dfr.MAX_PMF_SUPPORT + 1, 1)
+        with self.assertRaisesRegex(ValueError, "MAX_COMPRESSION_BITS"):
+            dfr.kyber_nearest_compression_pmf(3329, dfr.MAX_COMPRESSION_BITS + 1)
+
+    def test_expensive_ntru_prime_profiles_reject_before_power_convolution(self):
+        for n in (509, 653):
+            with (
+                self.subTest(n=n),
+                mock.patch.object(
+                    dfr,
+                    "convolve_power",
+                    wraps=dfr.convolve_power,
+                ) as convolve_power,
+                self.assertRaisesRegex(ValueError, "MAX_RING_PROFILE_WORK"),
+            ):
+                calculate_decryption_failure(
+                    ntru_product_payload("ntru_prime")
+                    | {"n": n, "delta": n}
+                )
+            self.assertEqual(convolve_power.call_count, 0)
+
+    def test_ntru_profile_budget_is_cumulative_across_active_terms(self):
+        bernoulli = normalized_pmf({Decimal(0): Decimal(1), Decimal(1): Decimal(1)})
+        product = dfr.multiply_pmfs(bernoulli, bernoulli)
+        profiles = dfr.coefficient_profiles(160, "ntru_prime")
+        self.assertLess(dfr.ring_profile_work(product, profiles), dfr.MAX_RING_PROFILE_WORK)
+
+        with (
+            mock.patch.object(
+                dfr,
+                "convolve_power",
+                wraps=dfr.convolve_power,
+            ) as convolve_power,
+            self.assertRaisesRegex(ValueError, "MAX_RING_PROFILE_WORK"),
+        ):
+            calculate_decryption_failure(
+                ntru_product_payload("ntru_prime")
+                | {
+                    "n": 160,
+                    "p1": 1,
+                    "f": BERNOULLI,
+                    "e": BERNOULLI,
+                    "delta": 160,
+                }
+            )
+        self.assertEqual(convolve_power.call_count, 0)
+
+    def test_large_deterministic_ntru_prime_stays_within_profile_budget(self):
+        with mock.patch.object(
+            dfr,
+            "convolve_power",
+            wraps=dfr.convolve_power,
+        ) as convolve_power:
+            result = calculate_decryption_failure(
+                ntru_product_payload("ntru_prime")
+                | {
+                    "n": 653,
+                    "g": ONE,
+                    "s": ONE,
+                    "delta": 1305,
+                }
+            )
+
+        self.assertGreater(convolve_power.call_count, 0)
+        self.assertEqual(result["dimensions"]["n"], 653)
+        self.assertEqual(len(result["coefficient_dfr"]["failure_probabilities"]), 653)
+        self.assertEqual(set(result["coefficient_dfr"]["failure_probabilities"]), {"0"})
 
     def test_lwe_reports_single_and_vector_dfr(self):
         result = calculate_decryption_failure({

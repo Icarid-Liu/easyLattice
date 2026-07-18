@@ -9,7 +9,7 @@ from math import comb
 from typing import Any
 
 from .compression_noise import balanced_mod, compression_noise_pdf
-from .polynomial_ring import coefficient_profiles, ring_polynomial
+from .polynomial_ring import CoefficientProfile, coefficient_profiles, ring_polynomial
 
 
 DEFAULT_PRECISION_BITS = 512
@@ -19,6 +19,10 @@ MAX_TAIL_BITS = 1024
 # Request limits cover supported presets while bounding audit and convolution work.
 MAX_NTRU_DIMENSION = 4096
 MAX_LWE_DIMENSION = 65_536
+MAX_SAFE_INTEGER_PARAMETER = 2**53 - 1
+MAX_INTEGER_TEXT_LENGTH = 64
+MAX_COMPRESSION_BITS = 63
+MAX_RING_PROFILE_WORK = 1_000_000
 MAX_PMF_SUPPORT = 50_000
 MAX_PAIR_PRODUCTS = 30_000_000
 
@@ -35,12 +39,18 @@ def calculate_decryption_failure(raw: dict[str, Any] | None = None) -> dict[str,
     if not isinstance(raw, dict):
         raise ValueError("Request body must be a JSON object.")
 
-    precision_bits = positive_int(raw.get("precisionBits", raw.get("precision_bits", DEFAULT_PRECISION_BITS)), "precisionBits")
-    if precision_bits > MAX_PRECISION_BITS:
-        raise ValueError(f"precisionBits must not exceed {MAX_PRECISION_BITS}.")
-    tail_bits = positive_int(raw.get("tailBits", raw.get("tail_bits", DEFAULT_TAIL_BITS)), "tailBits")
-    if tail_bits > MAX_TAIL_BITS:
-        raise ValueError(f"tailBits must not exceed {MAX_TAIL_BITS}.")
+    precision_bits = bounded_positive_int(
+        raw.get("precisionBits", raw.get("precision_bits", DEFAULT_PRECISION_BITS)),
+        "precisionBits",
+        MAX_PRECISION_BITS,
+        "MAX_PRECISION_BITS",
+    )
+    tail_bits = bounded_positive_int(
+        raw.get("tailBits", raw.get("tail_bits", DEFAULT_TAIL_BITS)),
+        "tailBits",
+        MAX_TAIL_BITS,
+        "MAX_TAIL_BITS",
+    )
 
     decimal_digits = decimal_digits_for_bits(precision_bits)
     with localcontext() as context:
@@ -80,29 +90,35 @@ def calculate_ntru(
         for name in ("g", "f", "s", "e", "m")
     }
 
-    product_terms = (
-        scaled_ring_products(
-            coefficients["p0"],
-            distributions["g"],
-            distributions["s"],
-            n,
-            ring_type,
-        ),
-        scaled_ring_products(
-            coefficients["p1"],
-            distributions["f"],
-            distributions["e"],
-            n,
-            ring_type,
-        ),
-        scaled_ring_products(
-            coefficients["p2"],
-            distributions["f"],
-            distributions["m"],
-            n,
-            ring_type,
-        ),
+    product_specs = (
+        (coefficients["p0"], distributions["g"], distributions["s"]),
+        (coefficients["p1"], distributions["f"], distributions["e"]),
+        (coefficients["p2"], distributions["f"], distributions["m"]),
     )
+    base_products: list[tuple[Decimal, PMF] | None] = []
+    profile_work = 0
+    for scale, left, right in product_specs:
+        if scale == 0:
+            base_products.append(None)
+            continue
+        product = multiply_pmfs(left, right)
+        profile_work = accumulated_ring_profile_work(profile_work, product, profiles)
+        base_products.append((scale, product))
+
+    zero_products = None
+    product_term_list = []
+    for base_product in base_products:
+        if base_product is None:
+            if zero_products is None:
+                zero = zero_pmf()
+                zero_products = (zero,) * n
+            product_term_list.append(zero_products)
+        else:
+            scale, product = base_product
+            product_term_list.append(
+                scaled_ring_products_from_product(scale, product, profiles)
+            )
+    product_terms = tuple(product_term_list)
     direct_error = scale_pmf(distributions["e"], coefficients["p3"])
     error_cache: dict[tuple[int, ...], PMF] = {}
     coefficient_error_list = []
@@ -336,6 +352,7 @@ def pmf_from_distribution(
     distribution_type = aliases.get(distribution_type, distribution_type)
     if distribution_type == "centered_binomial":
         eta = nonnegative_int(value_of(spec, "eta"), f"{label}.eta")
+        ensure_support_size(2 * eta + 1)
         weights = {Decimal(i): Decimal(comb(2 * eta, eta + i)) for i in range(-eta, eta + 1)}
         return normalized_pmf(weights)
     if distribution_type == "discrete_gaussian":
@@ -371,6 +388,7 @@ def pmf_from_distribution(
     if distribution_type == "lwr_floor_compression":
         q = positive_int(value_of(spec, "q", "modulus"), f"{label}.q")
         p = positive_int(value_of(spec, "p", "compression_modulus"), f"{label}.p")
+        ensure_exact_domain_size(q, f"{label}.q")
         return pmf_from_fraction_map(compression_noise_pdf(q, p))
     if distribution_type == "kyber_nearest_compression":
         q = positive_int(value_of(spec, "q", "modulus"), f"{label}.q")
@@ -384,10 +402,14 @@ def pmf_from_distribution(
 
 
 def uniform_pmf(lower: int, upper: int) -> PMF:
+    ensure_support_size(upper - lower + 1)
     return normalized_pmf({Decimal(value): Decimal(1) for value in range(lower, upper + 1)})
 
 
 def t_uniform_pmf(exponent: int) -> PMF:
+    maximum_exponent = (((MAX_PMF_SUPPORT - 1) // 2).bit_length() - 1)
+    if exponent > maximum_exponent:
+        ensure_support_size(MAX_PMF_SUPPORT + 1)
     radius = 2**exponent
     ensure_support_size(2 * radius + 1)
     endpoint_weight = Decimal(1) / (Decimal(2) ** (exponent + 2))
@@ -460,6 +482,12 @@ def custom_pmf(raw: Any, label: str, tail_bits: int) -> PMF:
 def kyber_nearest_compression_pmf(q: int, bits: int) -> PMF:
     if q < 2:
         raise ValueError("Compression modulus q must be at least 2.")
+    ensure_exact_domain_size(q, "Compression modulus q")
+    if bits > MAX_COMPRESSION_BITS:
+        raise ValueError(
+            f"Kyber compression bits d must not exceed {MAX_COMPRESSION_BITS} "
+            "(MAX_COMPRESSION_BITS)."
+        )
     p = 2**bits
     if p < 2:
         raise ValueError("Kyber compression bits d must be at least 1.")
@@ -500,6 +528,14 @@ def ring_product_coefficient_pmfs(
 ) -> tuple[PMF, ...]:
     profiles = coefficient_profiles(n, ring_type)
     product = multiply_pmfs(left, right)
+    accumulated_ring_profile_work(0, product, profiles)
+    return ring_product_pmfs_from_product(product, profiles)
+
+
+def ring_product_pmfs_from_product(
+    product: PMF,
+    profiles: tuple[CoefficientProfile, ...],
+) -> tuple[PMF, ...]:
     negative_product = scale_pmf(product, Decimal(-1))
     cache: dict[tuple[int, int], PMF] = {}
     results = []
@@ -521,18 +557,112 @@ def scaled_ring_products(
     n: int,
     ring_type: str,
 ) -> tuple[PMF, ...]:
+    profiles = coefficient_profiles(n, ring_type)
     if scale == 0:
-        profiles = coefficient_profiles(n, ring_type)
         zero = zero_pmf()
         return (zero,) * len(profiles)
+    product = multiply_pmfs(left, right)
+    accumulated_ring_profile_work(0, product, profiles)
+    return scaled_ring_products_from_product(scale, product, profiles)
+
+
+def scaled_ring_products_from_product(
+    scale: Decimal,
+    product: PMF,
+    profiles: tuple[CoefficientProfile, ...],
+) -> tuple[PMF, ...]:
     cache: dict[int, PMF] = {}
     results = []
-    for pmf in ring_product_coefficient_pmfs(left, right, n, ring_type):
+    for pmf in ring_product_pmfs_from_product(product, profiles):
         key = id(pmf)
         if key not in cache:
             cache[key] = scale_pmf(pmf, scale)
         results.append(cache[key])
     return tuple(results)
+
+
+def accumulated_ring_profile_work(
+    current: int,
+    product: PMF,
+    profiles: tuple[CoefficientProfile, ...],
+) -> int:
+    estimated = ring_profile_work(product, profiles)
+    if estimated > MAX_RING_PROFILE_WORK - current:
+        raise ValueError(
+            "NTRU ring profile work exceeds MAX_RING_PROFILE_WORK "
+            f"({MAX_RING_PROFILE_WORK}); reduce n, distribution support, or active product terms."
+        )
+    return current + estimated
+
+
+def ring_profile_work(
+    product: PMF,
+    profiles: tuple[CoefficientProfile, ...],
+) -> int:
+    work = len(product.probabilities)
+    profile_keys = {
+        (profile.positive_terms, profile.negative_terms)
+        for profile in profiles
+    }
+    for positive_terms, negative_terms in profile_keys:
+        positive_support = convolution_power_support_bound(product, positive_terms)
+        negative_support = convolution_power_support_bound(product, negative_terms)
+        work = capped_work_add(
+            work,
+            repeated_power_work(positive_support, positive_terms),
+            repeated_power_work(negative_support, negative_terms),
+            capped_work_product(positive_support, negative_support),
+            max(positive_support, negative_support),
+        )
+        if work > MAX_RING_PROFILE_WORK:
+            return work
+    return work
+
+
+def convolution_power_support_bound(pmf: PMF, count: int) -> int:
+    if count == 0 or len(pmf.probabilities) == 1:
+        return 1
+    values = pmf.probabilities.keys()
+    if all(decimal_is_integer(value) for value in values):
+        width = max(values) - min(values)
+        if width > MAX_RING_PROFILE_WORK:
+            return MAX_RING_PROFILE_WORK + 1
+        return min(MAX_RING_PROFILE_WORK + 1, 1 + count * int(width))
+    return capped_multiset_count(len(pmf.probabilities), count)
+
+
+def capped_multiset_count(support_size: int, count: int) -> int:
+    total = support_size + count - 1
+    selected = min(support_size - 1, count)
+    result = 1
+    for index in range(1, selected + 1):
+        result = result * (total - selected + index) // index
+        if result > MAX_RING_PROFILE_WORK:
+            return MAX_RING_PROFILE_WORK + 1
+    return result
+
+
+def repeated_power_work(support_bound: int, count: int) -> int:
+    if count == 0:
+        return 1
+    return capped_work_product(support_bound, 2 * count.bit_length())
+
+
+def capped_work_product(left: int, right: int) -> int:
+    if left == 0 or right == 0:
+        return 0
+    if left > MAX_RING_PROFILE_WORK // right:
+        return MAX_RING_PROFILE_WORK + 1
+    return left * right
+
+
+def capped_work_add(*values: int) -> int:
+    total = 0
+    for value in values:
+        if value > MAX_RING_PROFILE_WORK - total:
+            return MAX_RING_PROFILE_WORK + 1
+        total += value
+    return total
 
 
 def zero_pmf() -> PMF:
@@ -767,6 +897,14 @@ def ensure_support_size(size: int) -> None:
         )
 
 
+def ensure_exact_domain_size(size: int, label: str) -> None:
+    if size > MAX_PMF_SUPPORT:
+        raise ValueError(
+            f"{label} exact enumeration must not exceed {MAX_PMF_SUPPORT} "
+            "(MAX_PMF_SUPPORT)."
+        )
+
+
 def value_of(spec: dict[str, Any], *names: str, default: Any = None) -> Any:
     for name in names:
         if name in spec:
@@ -784,32 +922,127 @@ def positive_int(raw: Any, label: str) -> int:
     return value
 
 
+def bounded_positive_int(
+    raw: Any,
+    label: str,
+    maximum: int,
+    maximum_name: str,
+) -> int:
+    value = safe_nonnegative_integer(raw, label, maximum, maximum_name)
+    if value < 1:
+        raise ValueError(f"{label} must be at least 1.")
+    return value
+
+
 def bounded_dimension(
     raw: Any,
     label: str,
     maximum: int,
     maximum_name: str,
 ) -> int:
-    value = positive_int(raw, label)
-    if value > maximum:
-        raise ValueError(f"{label} must not exceed {maximum} ({maximum_name}).")
-    return value
+    return bounded_positive_int(raw, label, maximum, maximum_name)
 
 
 def nonnegative_int(raw: Any, label: str) -> int:
-    value = scalar(raw, label)
-    integral = value.to_integral_value()
-    if value != integral or integral < 0:
-        raise ValueError(f"{label} must be a non-negative integer.")
-    return int(integral)
+    return safe_nonnegative_integer(
+        raw,
+        label,
+        MAX_SAFE_INTEGER_PARAMETER,
+        "MAX_SAFE_INTEGER_PARAMETER",
+    )
+
+
+def safe_nonnegative_integer(
+    raw: Any,
+    label: str,
+    maximum: int,
+    maximum_name: str,
+) -> int:
+    invalid_message = f"{label} must be a non-negative integer."
+    limit_message = f"{label} must not exceed {maximum} ({maximum_name})."
+    if raw is None or isinstance(raw, bool):
+        raise ValueError(invalid_message)
+    if isinstance(raw, int):
+        if raw < 0:
+            raise ValueError(invalid_message)
+        if raw > maximum:
+            raise ValueError(limit_message)
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or len(text) > MAX_INTEGER_TEXT_LENGTH:
+            raise ValueError(limit_message if len(text) > MAX_INTEGER_TEXT_LENGTH else invalid_message)
+        negative = False
+        if text[0] == "+":
+            text = text[1:]
+        elif text[0] == "-":
+            negative = True
+            text = text[1:]
+        if not text or not text.isascii() or not text.isdecimal():
+            raise ValueError(invalid_message)
+        if negative and any(character != "0" for character in text):
+            raise ValueError(invalid_message)
+        digits = text.lstrip("0") or "0"
+        maximum_text = str(maximum)
+        if len(digits) > len(maximum_text) or (
+            len(digits) == len(maximum_text) and digits > maximum_text
+        ):
+            raise ValueError(limit_message)
+        return int(digits)
+    if isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer() or raw < 0:
+            raise ValueError(invalid_message)
+        if raw > maximum:
+            raise ValueError(limit_message)
+        return int(raw)
+    if isinstance(raw, Decimal):
+        if not raw.is_finite() or raw < 0:
+            raise ValueError(invalid_message)
+        if raw > maximum:
+            raise ValueError(limit_message)
+        if not decimal_is_integer(raw):
+            raise ValueError(invalid_message)
+        return int(raw)
+    raise ValueError(invalid_message)
+
+
+def decimal_is_integer(value: Decimal) -> bool:
+    _, digits, exponent = value.as_tuple()
+    if not any(digits) or exponent >= 0:
+        return True
+    fractional_digits = -exponent
+    if fractional_digits > len(digits):
+        return False
+    return not any(digits[-fractional_digits:])
 
 
 def ceiling_int(raw: Any, label: str) -> int:
-    return int(scalar(raw, label).to_integral_value(rounding=ROUND_CEILING))
+    return bounded_rounding_int(raw, label, ROUND_CEILING)
 
 
 def floor_int(raw: Any, label: str) -> int:
-    return int(scalar(raw, label).to_integral_value(rounding=ROUND_FLOOR))
+    return bounded_rounding_int(raw, label, ROUND_FLOOR)
+
+
+def bounded_rounding_int(raw: Any, label: str, rounding: str) -> int:
+    limit_message = (
+        f"{label} magnitude must not exceed {MAX_SAFE_INTEGER_PARAMETER} "
+        "(MAX_SAFE_INTEGER_PARAMETER)."
+    )
+    if isinstance(raw, bool) or raw is None:
+        raise ValueError(f"{label} must be a finite number.")
+    if isinstance(raw, int):
+        if abs(raw) > MAX_SAFE_INTEGER_PARAMETER:
+            raise ValueError(limit_message)
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if len(text) > MAX_INTEGER_TEXT_LENGTH or "e" in text.lower():
+            raise ValueError(limit_message)
+    value = scalar(raw, label)
+    if abs(value) > MAX_SAFE_INTEGER_PARAMETER:
+        raise ValueError(limit_message)
+    return int(value.to_integral_value(rounding=rounding))
 
 
 def positive_scalar(raw: Any, label: str) -> Decimal:
