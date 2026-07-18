@@ -536,6 +536,62 @@ class EstimatorRunnerTests(unittest.TestCase):
         result = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(result["code"], "invalid_estimator_route")
 
+    def test_runner_main_subprocess_emits_strict_utf8_after_sanitizing_result(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (
+            "import app.estimator_runner as runner; "
+            "runner.run = lambda payload: {'ok': True, 'echo': payload}; "
+            "raise SystemExit(runner.main())"
+        )
+        payload = {
+            "nested": {
+                "\udc80-key": "value-\udcff",
+                "中文键": "保留中文",
+            }
+        }
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            input=json.dumps(payload).encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        stdout = completed.stdout.decode("utf-8", errors="strict")
+        self.assertIn("保留中文".encode("utf-8"), completed.stdout)
+        result = json.loads(stdout)
+        self.assertEqual(result["echo"]["nested"]["\\udc80-key"], "value-\\udcff")
+        self.assertEqual(result["echo"]["nested"]["中文键"], "保留中文")
+
+    def test_runner_main_subprocess_sanitizes_reflected_error_output(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (
+            "import app.estimator_runner as runner; "
+            "runner.run = lambda payload: (_ for _ in ()).throw(ValueError(payload['message'])); "
+            "raise SystemExit(runner.main())"
+        )
+        payload = {"message": "错误-\udc80"}
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            input=json.dumps(payload).encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        stdout = completed.stdout.decode("utf-8", errors="strict")
+        self.assertIn("错误".encode("utf-8"), completed.stdout)
+        result = json.loads(stdout)
+        self.assertEqual(result["message"], "ValueError: 错误-\\udc80")
+
     @staticmethod
     def fake_lwe_payload(profile="enhanced", variant="rlwe"):
         return {

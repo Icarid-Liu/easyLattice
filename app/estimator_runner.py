@@ -20,6 +20,7 @@ from app.estimator_contract import (
     structure_correction_satisfied,
     validate_estimator_route,
 )
+from app.json_safety import sanitize_json_value
 
 
 NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
@@ -460,34 +461,42 @@ def estimator_distribution(ND, distribution: dict, n: int):
     raise ValueError(f"Unsupported estimator distribution: {estimator_type}")
 
 
+def write_json_result(result: dict) -> None:
+    serialized = json.dumps(
+        sanitize_json_value(result),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    encoded = serialized.encode("utf-8", errors="strict") + b"\n"
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer is not None:
+        stdout_buffer.write(encoded)
+        stdout_buffer.flush()
+        return
+    sys.stdout.write(encoded.decode("utf-8"))
+    sys.stdout.flush()
+
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
-        print(json.dumps(run(payload), ensure_ascii=False, allow_nan=False))
+        write_json_result(run(payload))
         return 0
     except EstimatorRouteError as exc:
-        print(json.dumps(exc.as_result(), ensure_ascii=False, allow_nan=False))
+        write_json_result(exc.as_result())
         return 1
     except EstimatorOriginMismatch as exc:
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "code": "estimator_origin_mismatch",
-                    "message": str(exc),
-                },
-                ensure_ascii=False,
-                allow_nan=False,
-            )
+        write_json_result(
+            {
+                "ok": False,
+                "code": "estimator_origin_mismatch",
+                "message": str(exc),
+            }
         )
         return 1
     except Exception as exc:
-        print(
-            json.dumps(
-                {"ok": False, "message": f"{type(exc).__name__}: {exc}"},
-                ensure_ascii=False,
-                allow_nan=False,
-            )
+        write_json_result(
+            {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
         )
         return 1
 
