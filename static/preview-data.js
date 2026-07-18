@@ -1,5 +1,6 @@
 (() => {
   const warning = "This is a static preview fixture. Run the local service for live security and DFR calculations.";
+  const quantumUnavailableMessage = "No quantum security estimate is available for this NTRU candidate.";
   const unionBoundWarning = "Vector DFR uses a union bound and does not assume independent output coefficients.";
   const eccNote = "Apply a scheme-specific error-correction calculation outside this module.";
 
@@ -396,7 +397,23 @@
           eligible_candidates: candidatePool.eligibleCandidates,
           message_codes: [],
         };
-    candidate.warning_codes = [...new Set([...candidate.warning_codes, ...validation.message_codes])];
+    if (
+      isNtru
+      && request.security_model === "quantum"
+      && candidate.selection.selected_security_bits == null
+    ) {
+      validation.message_codes = [...new Set([
+        ...validation.message_codes,
+        "quantum_estimate_unavailable",
+      ])];
+      validation.message = quantumUnavailableMessage;
+    }
+    [candidate, ...alternatives].forEach((item) => {
+      item.warning_codes = [...new Set([
+        ...(item.warning_codes || []),
+        ...validation.message_codes,
+      ])];
+    });
     return {
       agent: { name: "static-preview", llm_used: false, notes: ["Preview data is illustrative only."] },
       request,

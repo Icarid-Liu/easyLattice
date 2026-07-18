@@ -188,6 +188,7 @@ const TRANSLATIONS = {
     statusScreened: "Fast screened",
     statusPartial: "Partially validated",
     statusValidationFailed: "Validation failed",
+    statusTargetMet: "Target met",
     statusTargetUnmet: "Target unmet",
     statusInputsChanged: "Inputs changed",
     searchingParameters: "Searching parameters",
@@ -212,7 +213,8 @@ const TRANSLATIONS = {
     bits: "{value} bits",
     decimalDigits: "{value} decimal digits",
     dfrPrecisionDetail: "{bits} ({digits})",
-    margin: "margin +{value} bits",
+    margin: "margin {value} bits",
+    securityTarget: "{bits} ({model})",
     classicalSecurity: "Classical security",
     quantumSecurity: "Quantum security",
     ringDimension: "Ring dimension",
@@ -264,7 +266,8 @@ const TRANSLATIONS = {
     sparseTernary: "Sparse Ternary",
     compressionP: "p={value}",
     distributionText: "{name}, sigma={stddev}, support [{support}]",
-    alternativeSummary: "{model}: {bits} · {margin}",
+    alternativeSummary: "{model}: {bits} · {margin} · {status}",
+    alternativeUnavailableSummary: "{model}: security estimate unavailable · {status}",
     securityLevelUnclassified: "Unclassified",
     securityLevelBelowNistI: "Below NIST-I",
     securityLevelNistI: "NIST-I",
@@ -389,6 +392,7 @@ const TRANSLATIONS = {
     statusScreened: "已快速筛选",
     statusPartial: "已部分验证",
     statusValidationFailed: "验证失败",
+    statusTargetMet: "已达到目标",
     statusTargetUnmet: "未达到目标",
     statusInputsChanged: "输入已更改",
     searchingParameters: "正在搜索参数",
@@ -413,7 +417,8 @@ const TRANSLATIONS = {
     bits: "{value} 比特",
     decimalDigits: "{value} 位十进制数字",
     dfrPrecisionDetail: "{bits}（{digits}）",
-    margin: "余量 +{value} 比特",
+    margin: "余量 {value} 比特",
+    securityTarget: "{bits}（{model}）",
     classicalSecurity: "经典安全",
     quantumSecurity: "量子安全",
     ringDimension: "环维度",
@@ -465,7 +470,8 @@ const TRANSLATIONS = {
     sparseTernary: "稀疏三元分布",
     compressionP: "p={value}",
     distributionText: "{name}, sigma={stddev}, support [{support}]",
-    alternativeSummary: "{model}：{bits} · {margin}",
+    alternativeSummary: "{model}：{bits} · {margin} · {status}",
+    alternativeUnavailableSummary: "{model}：无可用安全估计 · {status}",
     securityLevelUnclassified: "未分类",
     securityLevelBelowNistI: "低于 NIST-I",
     securityLevelNistI: "NIST-I",
@@ -706,14 +712,16 @@ async function requestRecommendation() {
 
 async function requestDfr() {
   if (dfrState.snapshot().inFlight) return;
+  syncPreviewDfrDimension();
   const request = dfrState.begin();
   updateRequestControls();
   if (activeWorkspace === "dfr") renderDfrState();
 
   try {
+    const payload = buildDfrPayload();
     const result = PREVIEW_MODE
       ? previewDfrResult(selectedDfrType(), selectedDfrRingType())
-      : await postJson("/api/decryption-failure/calculate", buildDfrPayload());
+      : await postJson("/api/decryption-failure/calculate", payload);
     dfrState.acceptResult(request, result);
   } catch (error) {
     dfrState.acceptError(request, {
@@ -1063,17 +1071,22 @@ function renderAlternatives(items) {
     node.appendChild(heading);
 
     const selection = item.selection || {};
-    if (
-      selection.security_model != null
-      && selection.selected_security_bits != null
-      && selection.margin_bits != null
-    ) {
+    if (selection.security_model != null) {
       const summary = document.createElement("span");
-      summary.textContent = t("alternativeSummary", {
+      const values = {
         model: securityModelText(selection.security_model),
-        bits: t("bits", { value: selection.selected_security_bits }),
-        margin: t("margin", { value: selection.margin_bits }),
-      });
+        status: selectionStatusText(
+          selection.status
+          || (selection.meets_target === true ? "target_met" : "target_unmet"),
+        ),
+      };
+      summary.textContent = selection.selected_security_bits == null
+        ? t("alternativeUnavailableSummary", values)
+        : t("alternativeSummary", {
+            ...values,
+            bits: t("bits", { value: selection.selected_security_bits }),
+            margin: formatMargin(selection.margin_bits),
+          });
       node.appendChild(summary);
     }
 
@@ -1131,12 +1144,22 @@ function formatLlm(agent) {
 
 function formatSecurityTarget(request) {
   if (request.target_security == null) return null;
-  const model = request.security_model ? ` (${request.security_model})` : "";
-  return `${t("bits", { value: request.target_security })}${model}`;
+  const bits = t("bits", { value: request.target_security });
+  if (!request.security_model) return bits;
+  return t("securityTarget", {
+    bits,
+    model: securityModelText(request.security_model),
+  });
 }
 
 function formatMargin(value) {
-  return value == null ? t("notAvailable") : t("margin", { value });
+  if (value == null) return t("notAvailable");
+  const numeric = Number(value);
+  const raw = String(value);
+  const signed = Number.isFinite(numeric) && numeric > 0 && !raw.startsWith("+")
+    ? `+${raw}`
+    : raw;
+  return t("margin", { value: signed });
 }
 
 function formatOptionalBits(value) {
@@ -1151,6 +1174,14 @@ function validationStatusText(status) {
     validated: "statusReady",
   };
   return status == null ? null : t(keys[status] || status);
+}
+
+function selectionStatusText(status) {
+  const keys = {
+    target_met: "statusTargetMet",
+    target_unmet: "statusTargetUnmet",
+  };
+  return status == null ? t("notAvailable") : t(keys[status] || status);
 }
 
 function securityModelText(model) {
@@ -1447,7 +1478,10 @@ function syncPreviewDfrDimension() {
   const fixture = previewDfrResult("ntru", selectedDfrRingType());
   const dimension = fixture?.dimensions?.n;
   const field = dfrForm.elements.namedItem("dfrNtruN");
-  if (field && dimension != null) field.value = String(dimension);
+  if (field && dimension != null) {
+    field.readOnly = true;
+    field.value = String(dimension);
+  }
 }
 
 function selectedDfrType() {

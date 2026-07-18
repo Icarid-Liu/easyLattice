@@ -550,6 +550,140 @@ class BrowserRequestStateTests(unittest.TestCase):
         self.assertEqual(quantum_lwe["selection"]["selected_security_bits"], 117.6)
         self.assertEqual(quantum_lwe["selection"]["security_level"], "below NIST-I")
 
+        for family in ("power2", "hps", "hrss"):
+            unavailable = self.page.evaluate(
+                f"""(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({{
+                  hardProblemCategory: 'ntru',
+                  hardProblemVariant: 'ring',
+                  ringFamily: '{family}',
+                  targetSecurity: 140,
+                  securityModel: 'quantum',
+                  redCostModel: 'matzov',
+                  useEstimator: true,
+                }}))()"""
+            )
+            self.assertIn(
+                "quantum_estimate_unavailable",
+                unavailable["validation"]["message_codes"],
+            )
+            self.assertIn(
+                "validation_config_missing",
+                unavailable["validation"]["message_codes"],
+            )
+            self.assertEqual(
+                unavailable["validation"]["message"],
+                "No quantum security estimate is available for this NTRU candidate.",
+            )
+            for candidate in [
+                unavailable["recommendation"],
+                *unavailable["alternatives"],
+            ]:
+                self.assertIn(
+                    "quantum_estimate_unavailable",
+                    candidate["warning_codes"],
+                )
+                self.assertIn(
+                    "validation_config_missing",
+                    candidate["warning_codes"],
+                )
+
+        failed_lwe = self.page.evaluate(
+            """(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
+              hardProblemCategory: 'lwe',
+              hardProblemVariant: 'rlwe',
+              ringFamily: 'power2',
+              targetSecurity: 128,
+              securityModel: 'classical',
+              redCostModel: 'matzov',
+              useEstimator: true,
+            }))()"""
+        )
+        for candidate in [failed_lwe["recommendation"], *failed_lwe["alternatives"]]:
+            self.assertIn("validation_config_missing", candidate["warning_codes"])
+
+        self.page.evaluate(
+            """(() => {
+              const result = window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
+                hardProblemCategory: 'lwe',
+                hardProblemVariant: 'rlwe',
+                ringFamily: 'power2',
+                targetSecurity: 140,
+                securityModel: 'classical',
+                redCostModel: 'matzov',
+                useEstimator: false,
+              });
+              searchState.setResult(result);
+              renderSearchState();
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  margin: document.querySelector('#security-margin').textContent,
+                  alternatives: document.querySelector('#candidate-list').textContent,
+                  malformed: document.querySelector('#search-results').textContent.includes('+-'),
+                }))()"""
+            ),
+            {
+                "margin": "margin -10.4 bits",
+                "alternatives": (
+                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
+                    "Classical: 129.9 bits · margin -10.1 bits · Target unmet"
+                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                ),
+                "malformed": False,
+            },
+        )
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'zh';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  margin: document.querySelector('#security-margin').textContent,
+                  alternativeHasMargin: document.querySelector('#candidate-list').textContent
+                    .includes('余量 -10.1 比特'),
+                  malformed: document.querySelector('#search-results').textContent.includes('+-'),
+                }))()"""
+            ),
+            {
+                "margin": "余量 -10.4 比特",
+                "alternativeHasMargin": True,
+                "malformed": False,
+            },
+        )
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'en';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+
+        self.page.evaluate(
+            """(() => {
+              const result = window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
+                hardProblemCategory: 'ntru',
+                hardProblemVariant: 'ring',
+                ringFamily: 'hps',
+                targetSecurity: 140,
+                securityModel: 'quantum',
+                redCostModel: 'matzov',
+                useEstimator: false,
+              });
+              searchState.setResult(result);
+              renderSearchState();
+            })()"""
+        )
+        self.assertIn(
+            "Quantum: security estimate unavailable · Target unmet",
+            self.page.evaluate("document.querySelector('#candidate-list').textContent"),
+        )
+
         self.page.evaluate(
             """(() => {
               document.querySelector('input[name=securityModel][value=quantum]').click();
@@ -566,9 +700,15 @@ class BrowserRequestStateTests(unittest.TestCase):
                 """(() => ({
                   level: document.querySelector('#security-level').textContent,
                   status: document.querySelector('#status-pill').textContent,
+                  target: Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent])).Target,
                 }))()"""
             ),
-            {"level": "Below NIST-I", "status": "Target unmet"},
+            {
+                "level": "Below NIST-I",
+                "status": "Target unmet",
+                "target": "128 bits (Quantum)",
+            },
         )
         self.page.evaluate(
             """(() => {
@@ -582,9 +722,15 @@ class BrowserRequestStateTests(unittest.TestCase):
                 """(() => ({
                   level: document.querySelector('#security-level').textContent,
                   status: document.querySelector('#status-pill').textContent,
+                  target: Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]))['目标'],
                 }))()"""
             ),
-            {"level": "低于 NIST-I", "status": "未达到目标"},
+            {
+                "level": "低于 NIST-I",
+                "status": "未达到目标",
+                "target": "128 比特（量子）",
+            },
         )
 
     def test_request_state_interactions(self):
@@ -809,7 +955,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "nttQuality": "2_layers_remaining, remaining layers 2",
                 "alternativeText": (
                     "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
-                    "Classical: 129.9 bits · margin +1.9 bits"
+                    "Classical: 129.9 bits · margin +1.9 bits · Target met"
                     "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
                 ),
                 "previewWarning": (
@@ -860,7 +1006,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "englishWarning": False,
                 "alternativeText": (
                     "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
-                    "经典：129.9 比特 · 余量 +1.9 比特"
+                    "经典：129.9 比特 · 余量 +1.9 比特 · 已达到目标"
                     "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
                 ),
                 "estimatorStatuses": ["排队中", "运行中", "已完成", "失败"],
@@ -1236,6 +1382,9 @@ class BrowserRequestStateTests(unittest.TestCase):
                   select.value = '{ring_type}';
                   select.dispatchEvent(new Event('input', {{ bubbles: true }}));
                   select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                  const dimension = document.querySelector('[name=dfrNtruN]');
+                  dimension.value = '{dimension + 17}';
+                  dimension.dispatchEvent(new Event('input', {{ bubbles: true }}));
                   document.querySelector('#dfr-form button[type=submit]').click();
                 }})()"""
             )
@@ -1307,6 +1456,7 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.assertFalse(rendered["invalidText"])
             if ring_type == "ntru_prime":
                 self.assertIn("makes no independence claim", rendered["warning"])
+            self.assert_viewport_layout(1440, 1000)
 
         self.assertNotEqual(ring_failures["cyclic"], ring_failures["negacyclic"])
         self.assertNotEqual(ring_failures["cyclic"], ring_failures["ntru_prime"])
@@ -1368,6 +1518,118 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "language": True,
                 "topStrip": True,
                 "invalidText": False,
+            },
+        )
+        self.assert_viewport_layout(390, 844)
+
+        self.page.evaluate(
+            "document.querySelector('input[name=workspaceMode][value=dfr]').click()"
+        )
+        self.page.wait_for(
+            "dfrState.snapshot().resultCurrent"
+            " && dfrState.snapshot().result.type === 'lwe'"
+        )
+        self.assertTrue(
+            self.page.evaluate(
+                "document.querySelector('#dfr-results').getBoundingClientRect().height > 0"
+            )
+        )
+        self.assert_viewport_layout(390, 844)
+
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('input[name=dfrType][value=ntru]').click();
+              const ring = document.querySelector('[name=dfrRingType]');
+              ring.value = 'ntru_prime';
+              ring.dispatchEvent(new Event('input', { bubbles: true }));
+              ring.dispatchEvent(new Event('change', { bubbles: true }));
+              const dimension = document.querySelector('[name=dfrNtruN]');
+              dimension.value = '777';
+              dimension.dispatchEvent(new Event('input', { bubbles: true }));
+              document.querySelector('#dfr-form button[type=submit]').click();
+            })()"""
+        )
+        self.page.wait_for(
+            "dfrState.snapshot().resultCurrent"
+            " && dfrState.snapshot().result.ring_type === 'ntru_prime'"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  form: Number(document.querySelector('[name=dfrNtruN]').value),
+                  request: buildDfrPayload().n,
+                  result: dfrState.snapshot().result.dimensions.n,
+                  invalidText: /\b(undefined|null)\b/.test(
+                    document.querySelector('#dfr-results').innerText
+                  ),
+                }))()"""
+            ),
+            {"form": 64, "request": 64, "result": 64, "invalidText": False},
+        )
+        self.assert_viewport_layout(390, 844)
+
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('input[name=workspaceMode][value=search]').click();
+              const result = previewRecommendation({
+                hardProblemCategory: 'ntru',
+                hardProblemVariant: 'ring',
+                ringFamily: 'hps',
+                targetSecurity: 140,
+                securityModel: 'quantum',
+                redCostModel: 'matzov',
+                useEstimator: true,
+              });
+              searchState.setResult(result);
+              renderSearchState();
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  status: document.querySelector('#status-pill').textContent,
+                  unavailable: document.querySelector('#candidate-list').textContent
+                    .includes('量子：无可用安全估计 · 未达到目标'),
+                  validationWarning: document.querySelector('#warnings').textContent
+                    .includes('运行环境或配置不可用'),
+                  quantumWarning: document.querySelector('#warnings').textContent
+                    .includes('没有可用的量子安全估计'),
+                }))()"""
+            ),
+            {
+                "status": "未达到目标",
+                "unavailable": True,
+                "validationWarning": True,
+                "quantumWarning": True,
+            },
+        )
+        self.assert_viewport_layout(390, 844)
+
+        self.page.evaluate(
+            """(() => {
+              const request = searchState.begin();
+              searchState.acceptError(request, {
+                titleKey: 'requestFailed',
+                message: 'A deliberately long estimator diagnostic remains visible so operators can inspect the complete failure without losing the previous alternatives.',
+              });
+              searchState.finish(request);
+              renderSearchState();
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  status: document.querySelector('#status-pill').textContent,
+                  diagnosticVisible: document.querySelector('#summary-subtitle').textContent
+                    .includes('complete failure without losing the previous alternatives'),
+                  alternativesVisible: document.querySelector('#alternatives')
+                    .getBoundingClientRect().height > 0,
+                }))()"""
+            ),
+            {
+                "status": "错误",
+                "diagnosticVisible": True,
+                "alternativesVisible": True,
             },
         )
         self.assert_viewport_layout(390, 844)

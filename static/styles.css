@@ -161,7 +161,7 @@ textarea {
 
 .dfr-editor-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 1.2fr);
+  grid-template-columns: minmax(0, 1fr) minmax(168px, 1.2fr);
   gap: 10px;
   align-items: center;
 }
