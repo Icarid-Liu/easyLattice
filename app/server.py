@@ -248,7 +248,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             super().handle_one_request()
         except RequestHeaderReadTimeout as exc:
             self.request_reader.clear_deadline()
-            self.write_request_timeout(str(exc))
+            self.write_preparse_timeout(str(exc))
         finally:
             self.request_reader.clear_deadline()
 
@@ -467,11 +467,42 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def write_preparse_timeout(self, message: str) -> None:
+        self.close_connection = True
+        data = json.dumps(
+            sanitize_json_value({"ok": False, "error": message}),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        headers = [
+            "HTTP/1.1 408 Request Timeout",
+            f"Server: {self.version_string()}",
+            f"Date: {self.date_time_string()}",
+            "Content-Type: application/json; charset=utf-8",
+            f"Content-Length: {len(data)}",
+            "Connection: close",
+        ]
+        if "*" in allowed_origins():
+            headers.extend((
+                "Access-Control-Allow-Origin: *",
+                "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers: Content-Type",
+                "Access-Control-Max-Age: 86400",
+            ))
+        response = ("\r\n".join(headers) + "\r\n\r\n").encode("latin-1") + data
+        try:
+            self.wfile.write(response)
+            self.wfile.flush()
+        except OSError:
+            pass
+
     def write_cors_headers(self) -> None:
         allowed = allowed_origins()
         if not allowed:
             return
-        origin = cors_origin_for(self.headers.get("Origin", ""), allowed)
+        request_headers = getattr(self, "headers", None)
+        request_origin = request_headers.get("Origin", "") if request_headers else ""
+        origin = cors_origin_for(request_origin, allowed)
         if not origin:
             return
         self.send_header("Access-Control-Allow-Origin", origin)

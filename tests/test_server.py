@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import threading
 import time
@@ -105,13 +106,13 @@ class ServerTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
-    def test_drip_feed_incomplete_headers_hits_total_deadline(self):
+    def request_preparse_timeout_with_drip(self, initial_bytes):
         class RecordingHandler(EasyLatticeHandler):
             timeout_before_response = object()
 
-            def write_request_timeout(self, message):
+            def write_preparse_timeout(self, message):
                 type(self).timeout_before_response = self.connection.gettimeout()
-                super().write_request_timeout(message)
+                super().write_preparse_timeout(message)
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -132,41 +133,40 @@ class ServerTests(unittest.TestCase):
 
         feeder = threading.Thread(target=drip_header, daemon=True)
         try:
-            incomplete_headers = (
-                b"POST /api/decryption-failure/calculate HTTP/1.1\r\n"
-                b"Host: 127.0.0.1\r\n"
-                b"X-Drip: "
-            )
             started = time.monotonic()
-            with mock.patch.object(
-                server_module,
-                "REQUEST_HEADER_READ_DEADLINE_SECONDS",
-                0.12,
+            with (
+                mock.patch.object(
+                    server_module,
+                    "REQUEST_HEADER_READ_DEADLINE_SECONDS",
+                    0.12,
+                ),
+                mock.patch.dict(
+                    os.environ,
+                    {"EASYLATTICE_ALLOWED_ORIGINS": "*"},
+                ),
             ):
-                client.sendall(incomplete_headers)
+                client.sendall(initial_bytes)
                 feeder.start()
                 response = bytearray()
+                connection_closed = False
                 while True:
                     chunk = client.recv(4096)
                     if not chunk:
+                        connection_closed = True
                         break
                     response.extend(chunk)
             elapsed = time.monotonic() - started
             stop_drip.set()
             feeder.join(timeout=1)
 
-            headers, body = bytes(response).split(b"\r\n\r\n", 1)
-            self.assertIn(b" 408 ", headers)
-            self.assertEqual(
-                json.loads(body.decode("utf-8"))["error"],
-                "Request headers read timed out.",
-            )
             self.assertGreaterEqual(len(sent_chunks), 3)
             self.assertGreaterEqual(elapsed, 0.09)
             self.assertLess(elapsed, 1.5)
             self.assertIsNone(RecordingHandler.timeout_before_response)
             self.assertFalse(feeder.is_alive())
+            self.assertTrue(connection_closed)
             self.assert_no_new_handler_threads(existing_threads)
+            return bytes(response)
         finally:
             stop_drip.set()
             client.close()
@@ -175,6 +175,46 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+    def assert_valid_preparse_timeout_response(self, response):
+        headers, body = response.split(b"\r\n\r\n", 1)
+        self.assertTrue(headers.startswith(b"HTTP/1.1 408 Request Timeout\r\n"))
+        self.assertIn(b"\r\nConnection: close", headers)
+        self.assertIn(b"\r\nAccess-Control-Allow-Origin: *", headers)
+        self.assertNotIn(b"attacker.example", headers)
+        header_fields = {
+            name.strip().lower(): value.strip()
+            for name, value in (
+                line.split(b":", 1)
+                for line in headers.split(b"\r\n")[1:]
+            )
+        }
+        self.assertEqual(int(header_fields[b"content-length"]), len(body))
+        self.assertEqual(
+            header_fields[b"content-type"],
+            b"application/json; charset=utf-8",
+        )
+        payload = json.loads(
+            body.decode("utf-8"),
+            parse_constant=lambda value: self.fail(value),
+        )
+        self.assertEqual(payload, {
+            "ok": False,
+            "error": "Request headers read timed out.",
+        })
+
+    def test_drip_feed_incomplete_request_line_returns_valid_408(self):
+        response = self.request_preparse_timeout_with_drip(b"POST /api/")
+        self.assert_valid_preparse_timeout_response(response)
+
+    def test_drip_feed_incomplete_headers_returns_valid_408(self):
+        response = self.request_preparse_timeout_with_drip(
+            b"POST /api/decryption-failure/calculate HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Origin: https://attacker.example\r\n"
+            b"X-Drip: "
+        )
+        self.assert_valid_preparse_timeout_response(response)
 
     def test_valid_post_and_get_reuse_keep_alive_connection(self):
         class KeepAliveHandler(EasyLatticeHandler):
