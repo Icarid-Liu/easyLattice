@@ -321,14 +321,19 @@
     };
   }
 
-  const NTRU_DFR_DIMENSION = 509;
-  const NTRU_SINGLE_FAILURE_PROBABILITY = "5.76515379864975E-167";
-  const NTRU_VECTOR_FAILURE_PROBABILITY = "2.93446328351272275E-164";
-  const ntruCoefficientDfr = (ringType, distinctProfiles) => ({
-    worst_index: 0,
+  const CYCLIC_NTRU_DFR_DIMENSION = 509;
+  const CYCLIC_NTRU_SINGLE_FAILURE = "5.7651537986497525006899801225417864725039E-167";
+  const coefficientDfr = (
+    dimension,
+    ringType,
+    worstIndex,
+    distinctProfiles,
+    failureProbabilities,
+  ) => ({
+    worst_index: worstIndex,
     distinct_profiles: distinctProfiles,
-    profiles: ringCoefficientProfiles(NTRU_DFR_DIMENSION, ringType),
-    failure_probabilities: Array(NTRU_DFR_DIMENSION).fill(NTRU_SINGLE_FAILURE_PROBABILITY),
+    profiles: ringCoefficientProfiles(dimension, ringType),
+    failure_probabilities: failureProbabilities,
   });
 
   const dfr = {
@@ -337,15 +342,15 @@
       type: "ntru",
       formula: "p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e",
       success_condition: "|E| <= Delta",
-      dimensions: { n: NTRU_DFR_DIMENSION },
+      dimensions: { n: CYCLIC_NTRU_DFR_DIMENSION },
       delta: "1024",
       precision_bits: 512,
       precision_decimal_digits: 167,
       tail_bits: 128,
-      single_coefficient_dfr_log2: "-552.2346327506126",
-      vector_dfr_log2_before_ecc: "-543.2431109045369",
-      single_coefficient_failure_probability: NTRU_SINGLE_FAILURE_PROBABILITY,
-      vector_failure_probability_before_ecc: NTRU_VECTOR_FAILURE_PROBABILITY,
+      single_coefficient_dfr_log2: "-552.234632750612616122207558",
+      vector_dfr_log2_before_ecc: "-543.243110904536920826726148",
+      single_coefficient_failure_probability: CYCLIC_NTRU_SINGLE_FAILURE,
+      vector_failure_probability_before_ecc: "2.9344632835127240228511998823737693145045E-164",
       single_coefficient_semantics: "worst_coefficient",
       vector_aggregation: "union_bound",
       tail_probability_upper_bound: "0",
@@ -360,7 +365,13 @@
       coefficients: { p0: "3", p1: "0", p2: "1", p3: "0" },
       ring_type: "cyclic",
       ring_polynomial: "x^509 - 1",
-      coefficient_dfr: ntruCoefficientDfr("cyclic", 1),
+      coefficient_dfr: coefficientDfr(
+        CYCLIC_NTRU_DFR_DIMENSION,
+        "cyclic",
+        0,
+        1,
+        Array(CYCLIC_NTRU_DFR_DIMENSION).fill(CYCLIC_NTRU_SINGLE_FAILURE),
+      ),
       warnings: [unionBoundWarning],
       warning_codes: ["dfr_union_bound"],
       error_correction: { included: false, code: "dfr_ecc_external", note: eccNote },
@@ -398,21 +409,189 @@
     },
   };
 
-  const ntruNegacyclicDfr = clone(dfr.ntru);
-  ntruNegacyclicDfr.ring_type = "negacyclic";
-  ntruNegacyclicDfr.ring_polynomial = "x^509 + 1";
-  ntruNegacyclicDfr.coefficient_dfr = ntruCoefficientDfr(
-    "negacyclic",
-    NTRU_DFR_DIMENSION,
-  );
+  const BOUNDED_NTRU_DFR_DIMENSION = 64;
+  const boundedNtruDistributions = {
+    g: {
+      support_size: 2,
+      support: ["0", "1.0000000000000000000000000000000000000000E+0"],
+      tail_probability_upper_bound: "0",
+    },
+    f: { support_size: 1, support: ["0", "0"], tail_probability_upper_bound: "0" },
+    s: {
+      support_size: 2,
+      support: ["0", "1.0000000000000000000000000000000000000000E+0"],
+      tail_probability_upper_bound: "0",
+    },
+    e: { support_size: 1, support: ["0", "0"], tail_probability_upper_bound: "0" },
+    m: { support_size: 1, support: ["0", "0"], tail_probability_upper_bound: "0" },
+  };
+  const negacyclicFailurePrefix = [
+    "1.8634100074649824189873420803188510429700E-11",
+    "6.7820207628495972119400109492813030021711E-12",
+    "2.3822199683349344036558778054576439151668E-12",
+    "8.0594757843160185746438959752757871464319E-13",
+    "2.6203905711706144510683720661370221284309E-13",
+    "8.1672794201959505007419702492128302208468E-14",
+    "2.4334619942007729855555189627653763612989E-14",
+    "6.9092673928923931994606038935160974649610E-15",
+    "1.8626608401624475654004596089272726285773E-15",
+    "4.7482492911235188526845345062478175173799E-16",
+    "1.1390749837920500266249210028442886013856E-16",
+    "2.5571731467218471451238219574723249886847E-17",
+    "5.3368250753861299670406344606064384685832E-18",
+    "1.0272461919024845464243746178316265841770E-18",
+    "1.8060661361180785946462554151682147099485E-19",
+    "2.8657282231205571692649137347273313127478E-20",
+    "4.0412474513578076880753258703589948200845E-21",
+    "4.9636756137882886858356644061550458309585E-22",
+    "5.1648189973665641801103186199706793704323E-23",
+    "4.3726077616351190136950197522279381812562E-24",
+    "2.8251282483381484772222682385576373192072E-25",
+    "1.2388306743465313223900918720453315146065E-26",
+    "2.7666193719897721839977237837240654172353E-28",
+  ];
+  const negacyclicFailures = [
+    ...negacyclicFailurePrefix,
+    ...Array(17).fill("0"),
+    ...negacyclicFailurePrefix.slice().reverse(),
+    "4.9501111639157670087038321530746128414527E-11",
+  ];
+  const ntruPrimeFailures = [
+    "4.9501111639157670087038321530746128414527E-11",
+    "3.9138111876143930055000198289701273186318E-2",
+    "3.4671183459641293610572031870118954873692E-2",
+    "3.0606042255205031872785552377165733975429E-2",
+    "2.6920314229849487897192477636888147027671E-2",
+    "2.3591269561786415919237442387605165268405E-2",
+    "2.0596031540656497500047546174158146449771E-2",
+    "1.7911774516255914873013977982872293519410E-2",
+    "1.5515908742410766743099718770815499168344E-2",
+    "1.3386250276770635072064821693431681967396E-2",
+    "1.1501174436035952696582952011489703716698E-2",
+    "9.8397516611511478910735075460493161059122E-3",
+    "8.3818650096852792868088098384833919346248E-3",
+    "7.1083088543817618853821773583108604746497E-3",
+    "6.0008687193352250145764099842477896398886E-3",
+    "5.0423825205814971965690791575733189758849E-3",
+    "4.2167837889116195480199918378419165160351E-3",
+    "3.5091277331945815635493455637864286933067E-3",
+    "2.9056012472377083275443499426700366763252E-3",
+    "2.3935181682439977030552627489955222376741E-3",
+    "1.9613012575337098365140148424078586747760E-3",
+    "1.5984524929868015041090165998404374120961E-3",
+    "1.2955133375395384726930056060458302519771E-3",
+    "1.0440166801870936918948077998767224209348E-3",
+    "8.3643213761047260298200961065777627467775E-4",
+    "6.6610635908606555566894442976017943672323E-4",
+    "5.2719989893023844912236700067864415140109E-4",
+    "4.1462211422878380067938921501779202473479E-4",
+    "3.2396541631738137751078664174634674781538E-4",
+    "2.5144005798825943897590458312919052627986E-4",
+    "1.9381048032606153495492085978357144115399E-4",
+    "1.4833407890555162429890649306185842159889E-4",
+    "1.1270308397814179739316327789845440627736E-4",
+    "8.4990087923489709799807443882473505471726E-5",
+    "6.3597599740951256218971361484172459235799E-5",
+    "4.7211864111772866242160745179090806799770E-5",
+    "3.4761054243006491062648735656949909608235E-5",
+    "2.5377835211472411217219395147510392884180E-5",
+    "1.8366199012084307596459008832764380387084E-5",
+    "1.3172394419944971581080944895915482241087E-5",
+    "9.3597138953782679892678342905882012050740E-6",
+    "6.5868553320570290134037538503501786334283E-6",
+    "4.5895472481321518966893970581480780837371E-6",
+    "3.1651104751004565886450495784380528855078E-6",
+    "2.1596256941369069594372748868780350985223E-6",
+    "1.4573823550512532501493052610265941044373E-6",
+    "9.7229860275112297706685234678383165069175E-7",
+    "6.4102189386322913203493328339853046276799E-7",
+    "4.1744419732983575514096321592861525774948E-7",
+    "2.6839239964090683721164983761533845440381E-7",
+    "1.7028235559249792920754482910533346992312E-7",
+    "1.0655275433028359580316892614156954838010E-7",
+    "6.5721667807306447128503845454829027218345E-8",
+    "3.9933613161215616386610110284256066484602E-8",
+    "2.3887712492536877258320675067010668694718E-8",
+    "1.4057791362175127161710930969959434012627E-8",
+    "8.1329073931899627199187564457093747521888E-9",
+    "4.6218650411987541618196900609685988941512E-9",
+    "2.5778779442649050481845528229035462819602E-9",
+    "1.4098853174455626975359029725806590749940E-9",
+    "7.5535804831008582470864025452532131650085E-10",
+    "3.9600974368668675727406464461258686085755E-10",
+    "2.0292707254575591507041207809231163095965E-10",
+    "1.0150991194647910906445315426348019707389E-10",
+  ];
+  const boundedNtruDfr = ({
+    ringType,
+    ringPolynomial,
+    singleLog2,
+    vectorLog2,
+    singleFailure,
+    vectorFailure,
+    supportSize,
+    supportMaximum,
+    worstIndex,
+    failures,
+  }) => {
+    const result = clone(dfr.ntru);
+    Object.assign(result, {
+      dimensions: { n: BOUNDED_NTRU_DFR_DIMENSION },
+      delta: "4.0000000000000000000000000000000000000000E+1",
+      single_coefficient_dfr_log2: singleLog2,
+      vector_dfr_log2_before_ecc: vectorLog2,
+      single_coefficient_failure_probability: singleFailure,
+      vector_failure_probability_before_ecc: vectorFailure,
+      error_support: {
+        size: supportSize,
+        minimum: "0",
+        maximum: supportMaximum,
+      },
+      distributions: clone(boundedNtruDistributions),
+      coefficients: {
+        p0: "1.0000000000000000000000000000000000000000E+0",
+        p1: "0",
+        p2: "0",
+        p3: "0",
+      },
+      ring_type: ringType,
+      ring_polynomial: ringPolynomial,
+      coefficient_dfr: coefficientDfr(
+        BOUNDED_NTRU_DFR_DIMENSION,
+        ringType,
+        worstIndex,
+        BOUNDED_NTRU_DFR_DIMENSION,
+        failures,
+      ),
+    });
+    return result;
+  };
 
-  const ntruPrimeDfr = clone(dfr.ntru);
-  ntruPrimeDfr.ring_type = "ntru_prime";
-  ntruPrimeDfr.ring_polynomial = "x^509 - x - 1";
-  ntruPrimeDfr.coefficient_dfr = ntruCoefficientDfr(
-    "ntru_prime",
-    NTRU_DFR_DIMENSION,
-  );
+  const ntruNegacyclicDfr = boundedNtruDfr({
+    ringType: "negacyclic",
+    ringPolynomial: "x^64 + 1",
+    singleLog2: "-34.233748119815360079333096",
+    vectorLog2: "-33.115419893542139351128538",
+    singleFailure: "4.9501111639157670087038321530746128414527E-11",
+    vectorFailure: "1.0746456697085385824488062337146024839633E-10",
+    supportSize: 65,
+    supportMaximum: "6.4000000000000000000000000000000000000000E+1",
+    worstIndex: 63,
+    failures: negacyclicFailures,
+  });
+
+  const ntruPrimeDfr = boundedNtruDfr({
+    ringType: "ntru_prime",
+    ringPolynomial: "x^64 - x - 1",
+    singleLog2: "-4.675282031475535990241172",
+    vectorLog2: "-1.771383474664407200657309",
+    singleFailure: "3.9138111876143930055000198289701273186318E-2",
+    vectorFailure: "2.9292769910358933776003313430362565313519E-1",
+    supportSize: 128,
+    supportMaximum: "1.2700000000000000000000000000000000000000E+2",
+    worstIndex: 1,
+    failures: ntruPrimeFailures,
+  });
   ntruPrimeDfr.warning_codes.push("ntru_prime_coefficient_marginal");
   ntruPrimeDfr.warnings.push(
     "NTRU Prime ring products use a coefficient-marginal approximation; the vector union bound makes no joint independence claim.",

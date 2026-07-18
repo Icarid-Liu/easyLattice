@@ -9,12 +9,13 @@ import tempfile
 import threading
 import time
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
+from app.decryption_failure import calculate_decryption_failure
 from app.server import EasyLatticeHandler
 
 try:
@@ -31,6 +32,29 @@ CHROMIUM = next(
     ),
     None,
 )
+
+DFR_BERNOULLI = {"type": "custom_pmf", "pmf": {"0": "0.5", "1": "0.5"}}
+DFR_ZERO = {"type": "custom_pmf", "pmf": {"0": "1"}}
+
+
+def bounded_noncyclic_dfr_payload(ring_type: str) -> dict:
+    return {
+        "type": "ntru",
+        "ringType": ring_type,
+        "n": 64,
+        "delta": "40",
+        "p0": "1",
+        "p1": "0",
+        "p2": "0",
+        "p3": "0",
+        "precisionBits": 512,
+        "tailBits": 128,
+        "g": DFR_BERNOULLI,
+        "s": DFR_BERNOULLI,
+        "f": DFR_ZERO,
+        "e": DFR_ZERO,
+        "m": DFR_ZERO,
+    }
 
 
 FETCH_HOOK = r"""
@@ -362,6 +386,24 @@ class BrowserRequestStateTests(unittest.TestCase):
         self.assertEqual(snapshot["overflowingTextControls"], [], snapshot)
         self.assertEqual(snapshot["overlapFailures"], [], snapshot)
 
+    def test_preview_noncyclic_fixtures_match_backend_contract(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("?preview=1")
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && window.EASYLATTICE_PREVIEW_FIXTURES?.dfr?.ntru_rings"
+        )
+
+        for ring_type in ("negacyclic", "ntru_prime"):
+            with self.subTest(ring_type=ring_type):
+                preview = self.page.evaluate(
+                    f"window.EASYLATTICE_PREVIEW_FIXTURES.dfr.ntru_rings.{ring_type}"
+                )
+                backend = calculate_decryption_failure(
+                    bounded_noncyclic_dfr_payload(ring_type)
+                )
+                self.assertEqual(preview, backend)
+
     def test_request_state_interactions(self):
         self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?request-state-test=1")
@@ -540,6 +582,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                 """(() => {
                   const rows = Object.fromEntries([...document.querySelectorAll('#security-list dt')]
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  const instance = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
                   return {
                     status: document.querySelector('#status-pill').textContent,
                     validation: rows['Validation status'],
@@ -549,6 +593,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     generated: searchState.snapshot().result.search.generated_candidates,
                     source: rows.Source,
                     next: rows.Next,
+                    nttQuality: instance['NTT quality'],
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
                     plaintextJson: Boolean(document.querySelector('#alternatives pre, #dfr-results pre')),
                   };
@@ -563,6 +608,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "generated": 7168,
                 "source": "Fast security screen",
                 "next": "Bind this recommendation to concrete scheme constraints before use.",
+                "nttQuality": "2_layers_remaining, remaining layers 2",
                 "invalidText": False,
                 "plaintextJson": False,
             },
@@ -578,13 +624,23 @@ class BrowserRequestStateTests(unittest.TestCase):
         )
         self.assertEqual(
             self.page.evaluate(
-                """(() => ({
-                  status: document.querySelector('#status-pill').textContent,
-                  warning: document.querySelector('#warnings').textContent.includes('尚未绑定到具体方案'),
-                  invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
-                }))()"""
+                """(() => {
+                  const rows = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    status: document.querySelector('#status-pill').textContent,
+                    warning: document.querySelector('#warnings').textContent.includes('尚未绑定到具体方案'),
+                    nttQuality: rows['NTT 质量'],
+                    invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
+                  };
+                })()"""
             ),
-            {"status": "已快速筛选", "warning": True, "invalidText": False},
+            {
+                "status": "已快速筛选",
+                "warning": True,
+                "nttQuality": "2_layers_remaining，剩余层数：2",
+                "invalidText": False,
+            },
         )
 
         self.page.evaluate(
@@ -624,6 +680,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "warning": True,
             },
         )
+
         self.page.evaluate(
             """(() => {
               const select = document.querySelector('#language-select');
@@ -838,6 +895,56 @@ class BrowserRequestStateTests(unittest.TestCase):
         )
 
         self.page.evaluate(
+            """(() => {
+              const candidate = searchState.snapshot().result.recommendation;
+              candidate.warning_codes.push('quantum_estimate_unavailable');
+              renderSearchState();
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  localized: document.querySelector('#warnings').textContent
+                    .includes('No quantum security estimate is available for this NTRU candidate.'),
+                  machineCode: document.querySelector('#warnings').textContent
+                    .includes('quantum_estimate_unavailable'),
+                }))()"""
+            ),
+            {"localized": True, "machineCode": False},
+        )
+        self.page.evaluate(
+            """(() => {
+              const candidate = searchState.snapshot().result.recommendation;
+              candidate.warning_codes = candidate.warning_codes
+                .filter((code) => code !== 'quantum_estimate_unavailable');
+              candidate.warnings.push(
+                'No quantum security estimate is available for this NTRU candidate.'
+              );
+              const language = document.querySelector('#language-select');
+              language.value = 'zh';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  localized: document.querySelector('#warnings').textContent
+                    .includes('该 NTRU 候选没有可用的量子安全估计'),
+                  english: document.querySelector('#warnings').textContent
+                    .includes('No quantum security estimate'),
+                }))()"""
+            ),
+            {"localized": True, "english": False},
+        )
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'en';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+
+        self.page.evaluate(
             "document.querySelector('input[name=workspaceMode][value=dfr]').click()"
         )
         self.assertEqual(
@@ -878,11 +985,12 @@ class BrowserRequestStateTests(unittest.TestCase):
         )
 
         expected_rings = {
-            "cyclic": ("x^509 - 1", "0", "1"),
-            "negacyclic": ("x^509 + 1", "0", "509"),
-            "ntru_prime": ("x^509 - x - 1", "0", "509"),
+            "cyclic": ("x^509 - 1", "0", "1", 509, "-552.23", "-543.24"),
+            "negacyclic": ("x^64 + 1", "63", "64", 64, "-34.23", "-33.12"),
+            "ntru_prime": ("x^64 - x - 1", "1", "64", 64, "-4.68", "-1.77"),
         }
-        for ring_type, (polynomial, worst, profiles) in expected_rings.items():
+        ring_failures = {}
+        for ring_type, (polynomial, worst, profiles, dimension, single, vector) in expected_rings.items():
             self.page.evaluate(
                 f"""(() => {{
                   const select = document.querySelector('[name=dfrRingType]');
@@ -913,18 +1021,22 @@ class BrowserRequestStateTests(unittest.TestCase):
                     failureProbabilities: result.coefficient_dfr.failure_probabilities,
                     singleProbability: result.single_coefficient_failure_probability,
                     vectorProbability: result.vector_failure_probability_before_ecc,
+                    precision: rows.Precision,
                     warning: document.querySelector('#dfr-warnings').textContent,
                     invalidText: /\b(undefined|null)\b/.test(document.querySelector('#dfr-results').innerText),
                   };
                 })()"""
             )
-            self.assertEqual(rendered["single"], "-552.23")
-            self.assertEqual(rendered["vector"], "-543.24")
+            self.assertEqual(rendered["single"], single)
+            self.assertEqual(rendered["vector"], vector)
             self.assertEqual(rendered["ringType"], ring_type)
             self.assertEqual(rendered["polynomial"], polynomial)
             self.assertEqual(rendered["worst"], worst)
             self.assertEqual(rendered["profiles"], profiles)
+            self.assertEqual(rendered["dimension"], dimension)
+            self.assertEqual(rendered["precision"], "512 bits (167 decimal digits)")
             failure_strings = rendered["failureProbabilities"]
+            ring_failures[ring_type] = failure_strings
             self.assertEqual(len(failure_strings), rendered["dimension"])
             for probability in failure_strings:
                 self.assertIsInstance(probability, str)
@@ -936,15 +1048,26 @@ class BrowserRequestStateTests(unittest.TestCase):
             worst_failure = max(failures)
             self.assertEqual(failures.index(worst_failure), rendered["worstIndex"])
             self.assertEqual(worst_failure, Decimal(rendered["singleProbability"]))
+            with localcontext() as context:
+                context.prec = 200
+                union_probability = min(Decimal(1), sum(failures, Decimal(0)))
+                vector_probability = Decimal(rendered["vectorProbability"])
+                union_at_vector_precision = union_probability.quantize(
+                    Decimal(1).scaleb(vector_probability.as_tuple().exponent)
+                )
             self.assertEqual(
-                min(Decimal(1), sum(failures, Decimal(0))),
-                Decimal(rendered["vectorProbability"]),
+                union_at_vector_precision,
+                vector_probability,
             )
             self.assertIn("union bound", rendered["warning"])
             self.assertIn("outside this module", rendered["warning"])
             self.assertFalse(rendered["invalidText"])
             if ring_type == "ntru_prime":
                 self.assertIn("makes no independence claim", rendered["warning"])
+
+        self.assertNotEqual(ring_failures["cyclic"], ring_failures["negacyclic"])
+        self.assertNotEqual(ring_failures["cyclic"], ring_failures["ntru_prime"])
+        self.assertNotEqual(ring_failures["negacyclic"], ring_failures["ntru_prime"])
 
         self.page.evaluate(
             """(() => {
@@ -953,10 +1076,18 @@ class BrowserRequestStateTests(unittest.TestCase):
               select.dispatchEvent(new Event('change', { bubbles: true }));
             })()"""
         )
-        self.assertTrue(
+        self.assertEqual(
             self.page.evaluate(
-                "document.querySelector('#dfr-warnings').textContent.includes('不作独立性假设')"
-            )
+                """(() => {
+                  const rows = Object.fromEntries([...document.querySelectorAll('#dfr-calculation-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    warning: document.querySelector('#dfr-warnings').textContent.includes('不作独立性假设'),
+                    precision: rows['精度'],
+                  };
+                })()"""
+            ),
+            {"warning": True, "precision": "512 比特（167 位十进制数字）"},
         )
 
         self.set_viewport(390, 844, mobile=True)

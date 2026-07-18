@@ -109,6 +109,7 @@ const RESULT_CODE_KEYS = {
   validation_applied: "warningValidationApplied",
   validation_config_missing: "warningValidationConfigMissing",
   validation_partial_attacks: "warningValidationPartialAttacks",
+  quantum_estimate_unavailable: "warningQuantumEstimateUnavailable",
   ntru_prime_coefficient_marginal: "warningNtruPrimeMarginal",
   dfr_union_bound: "dfrWarningUnionBound",
   dfr_gaussian_tail_excluded: "dfrWarningTail",
@@ -134,6 +135,7 @@ const SECURITY_LEGACY_MESSAGE_CODES = {
   "This is an NTRU lattice-hardness prototype. It is not yet bound to scheme-specific correctness, encoding, failure-rate, or key-invertibility checks.": "screen_scheme_not_bound",
   "Sage/lattice-estimator rough validation was applied to this recommendation.": "validation_applied",
   "Sage/lattice-estimator NTRU validation was applied to this recommendation.": "validation_applied",
+  "No quantum security estimate is available for this NTRU candidate.": "quantum_estimate_unavailable",
 };
 const DFR_LEGACY_MESSAGE_CODES = {
   "Vector DFR uses a union bound and does not assume independent output coefficients.": "dfr_union_bound",
@@ -187,6 +189,8 @@ const TRANSLATIONS = {
     sageEstimator: "Sage estimator",
     fastScreen: "fast screen",
     bits: "{value} bits",
+    decimalDigits: "{value} decimal digits",
+    dfrPrecisionDetail: "{bits} ({digits})",
     margin: "margin +{value} bits",
     classicalSecurity: "Classical security",
     quantumSecurity: "Quantum security",
@@ -210,6 +214,7 @@ const TRANSLATIONS = {
     qMinusOne: "q - 1",
     split: "Split",
     nttQuality: "NTT quality",
+    nttQualityWithRemainingLayers: "{quality}, remaining layers {value}",
     secret: "Secret",
     error: "Error",
     lwrP: "LWR p",
@@ -317,6 +322,7 @@ const TRANSLATIONS = {
     warningValidationApplied: "Sage/lattice-estimator validation was applied to this recommendation.",
     warningValidationConfigMissing: "Estimator validation was requested, but its runtime or configuration is unavailable; the displayed security remains a fast screen.",
     warningValidationPartialAttacks: "Estimator validation covered only part of the requested attack models or candidate set.",
+    warningQuantumEstimateUnavailable: "No quantum security estimate is available for this NTRU candidate.",
     warningNtruPrimeMarginal: "NTRU Prime products use coefficient-marginal estimates; the vector result uses a union bound and makes no independence claim.",
     nextBindSchemeConstraints: "Bind this recommendation to concrete scheme constraints before use.",
     dfrWarningUnionBound: "Vector DFR uses a union bound and does not assume independent output coefficients.",
@@ -367,8 +373,10 @@ const TRANSLATIONS = {
     summaryStats: "{source} · {count} 个候选 · {ms} ms",
     sageEstimator: "Sage estimator",
     fastScreen: "快速筛选",
-    bits: "{value} bits",
-    margin: "余量 +{value} bits",
+    bits: "{value} 比特",
+    decimalDigits: "{value} 位十进制数字",
+    dfrPrecisionDetail: "{bits}（{digits}）",
+    margin: "余量 +{value} 比特",
     classicalSecurity: "经典安全",
     quantumSecurity: "量子安全",
     ringDimension: "环维度",
@@ -391,6 +399,7 @@ const TRANSLATIONS = {
     qMinusOne: "q - 1",
     split: "分解",
     nttQuality: "NTT 质量",
+    nttQualityWithRemainingLayers: "{quality}，剩余层数：{value}",
     secret: "Secret",
     error: "Error",
     lwrP: "LWR p",
@@ -498,6 +507,7 @@ const TRANSLATIONS = {
     warningValidationApplied: "该推荐已应用 Sage/lattice-estimator 验证。",
     warningValidationConfigMissing: "已请求 estimator 验证，但运行环境或配置不可用；当前显示的安全性仍来自快速筛选。",
     warningValidationPartialAttacks: "Estimator 仅验证了部分攻击模型或候选集。",
+    warningQuantumEstimateUnavailable: "该 NTRU 候选没有可用的量子安全估计。",
     warningNtruPrimeMarginal: "NTRU Prime 乘积采用系数边缘估计；向量结果使用 union bound，不作独立性假设。",
     nextBindSchemeConstraints: "使用前请将该推荐绑定到具体方案约束。",
     dfrWarningUnionBound: "向量 DFR 使用 union bound，不假定输出系数相互独立。",
@@ -677,7 +687,9 @@ function renderDfrResult(result) {
 
   setText("#dfr-single", formatLog2(result.single_coefficient_dfr_log2));
   setText("#dfr-vector", formatLog2(result.vector_dfr_log2_before_ecc));
-  setText("#dfr-precision", result.precision_bits == null ? "-" : `${result.precision_bits} bits`);
+  setText("#dfr-precision", result.precision_bits == null
+    ? "-"
+    : t("bits", { value: result.precision_bits }));
   setText("#dfr-tail", result.tail_probability_upper_bound == null
     ? "-"
     : `${t("tailBound")}: ${formatProbability(result.tail_probability_upper_bound)}`);
@@ -763,8 +775,12 @@ function formatVectorAggregation(value) {
 
 function formatDfrPrecision(result) {
   if (result.precision_bits == null) return null;
-  if (result.precision_decimal_digits == null) return `${result.precision_bits} bits`;
-  return `${result.precision_bits} bits (${result.precision_decimal_digits} decimal digits)`;
+  const bits = t("bits", { value: result.precision_bits });
+  if (result.precision_decimal_digits == null) return bits;
+  return t("dfrPrecisionDetail", {
+    bits,
+    digits: t("decimalDigits", { value: result.precision_decimal_digits }),
+  });
 }
 
 function setDfrIdleHeading() {
@@ -1035,7 +1051,10 @@ function distributionText(distribution) {
 function formatNttQuality(modulus) {
   if (modulus.ntt_quality == null) return null;
   if (modulus.ntt_layers_remaining == null) return modulus.ntt_quality;
-  return `${modulus.ntt_quality}, remaining layers ${modulus.ntt_layers_remaining}`;
+  return t("nttQualityWithRemainingLayers", {
+    quality: modulus.ntt_quality,
+    value: modulus.ntt_layers_remaining,
+  });
 }
 
 function formatLlm(agent) {
@@ -1051,7 +1070,7 @@ function formatLlm(agent) {
 function formatSecurityTarget(request) {
   if (request.target_security == null) return null;
   const model = request.security_model ? ` (${request.security_model})` : "";
-  return `${request.target_security} bits${model}`;
+  return `${t("bits", { value: request.target_security })}${model}`;
 }
 
 function formatMargin(value) {
