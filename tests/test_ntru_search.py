@@ -1,3 +1,5 @@
+import json
+import math
 import unittest
 from unittest.mock import patch
 
@@ -265,9 +267,102 @@ class NTRUSearchTests(unittest.TestCase):
 
         self.assertEqual(request.estimator_timeout, 300)
 
-    def test_ntru_quantum_target_requires_sage_estimation(self):
-        with self.assertRaisesRegex(ValueError, "quantum targets require useEstimator=true"):
-            parse_ntru_request({"securityModel": "quantum", "useEstimator": False})
+    def test_old_family_quantum_without_estimator_is_json_safe_and_explicit(self):
+        for family in ("power2", "hps", "hrss"):
+            with self.subTest(family=family):
+                request = {
+                    "ringFamily": family,
+                    "securityModel": "quantum",
+                    "useEstimator": False,
+                }
+                result = recommend_ntru(request)
+                repeated = recommend_ntru(request)
+                candidate = result["recommendation"]
+                selection = candidate["selection"]
+
+                self.assertIsNone(selection["selected_security_bits"])
+                self.assertIsNone(selection["margin_bits"])
+                self.assertFalse(selection["meets_target"])
+                self.assertEqual(selection["status"], "target_unmet")
+                self.assertEqual(selection["security_level"], "unclassified")
+                self.assertTrue(
+                    all(
+                        not isinstance(value, (int, float)) or math.isfinite(value)
+                        for value in selection["rank_score"]
+                    )
+                )
+                self.assertIsNone(candidate["security"]["quantum_bits"])
+                self.assertIsNone(candidate["security"]["ntru_bits"])
+                self.assertIsNone(candidate["visual_scores"]["security"]["bits"])
+                self.assertIn("quantum_estimate_unavailable", candidate["warning_codes"])
+                self.assertEqual(result["validation"]["status"], "not_requested")
+                self.assertIn(
+                    "quantum_estimate_unavailable",
+                    result["validation"]["message_codes"],
+                )
+                self.assertEqual(
+                    (
+                        candidate["ring"]["family_id"],
+                        candidate["ring"]["n"],
+                        candidate["modulus"]["q"],
+                        selection["rank_score"],
+                    ),
+                    (
+                        repeated["recommendation"]["ring"]["family_id"],
+                        repeated["recommendation"]["ring"]["n"],
+                        repeated["recommendation"]["modulus"]["q"],
+                        repeated["recommendation"]["selection"]["rank_score"],
+                    ),
+                )
+                json.dumps(result, allow_nan=False)
+
+    def test_old_family_quantum_estimator_failure_is_json_safe_and_explicit(self):
+        cases = {
+            "power2": {"minN": 512, "maxN": 512, "minQBits": 9, "maxQBits": 9},
+            "hps": {"minN": 592, "maxN": 592, "minQBits": 11, "maxQBits": 11},
+            "hrss": {"minN": 672, "maxN": 672, "minQBits": 13, "maxQBits": 13},
+        }
+        failure = {
+            "ok": False,
+            "code": "standard_estimator_not_configured",
+            "message": "standard estimator path is not configured.",
+        }
+        for family, bounds in cases.items():
+            with self.subTest(family=family):
+                with patch("app.ntru_search.run_estimator", return_value=failure):
+                    result = recommend_ntru(
+                        {
+                            "ringFamily": family,
+                            "securityModel": "quantum",
+                            "useEstimator": True,
+                            "validationCount": 1,
+                            "validationAttempts": 1,
+                            **bounds,
+                        },
+                        config=AppConfig(),
+                    )
+                candidate = result["recommendation"]
+                selection = candidate["selection"]
+
+                self.assertIsNone(selection["selected_security_bits"])
+                self.assertIsNone(selection["margin_bits"])
+                self.assertFalse(selection["meets_target"])
+                self.assertEqual(selection["status"], "target_unmet")
+                self.assertTrue(
+                    all(
+                        not isinstance(value, (int, float)) or math.isfinite(value)
+                        for value in selection["rank_score"]
+                    )
+                )
+                self.assertEqual(result["validation"]["status"], "failed")
+                self.assertIn(
+                    "quantum_estimate_unavailable",
+                    result["validation"]["message_codes"],
+                )
+                self.assertIn("validation_config_missing", candidate["warning_codes"])
+                self.assertIn("quantum_estimate_unavailable", candidate["warning_codes"])
+                self.assertEqual(result["estimator"]["validated"][0], failure)
+                json.dumps(result, allow_nan=False)
 
     def test_ntru_estimator_uses_selected_model_for_classical_and_quantum_bits(self):
         candidate = recommend_ntru(

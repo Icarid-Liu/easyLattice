@@ -24,8 +24,6 @@ from .parameter_search import (
     parse_hard_problem,
     parse_security_bits,
     performance_profile,
-    meets_target,
-    security_margin_bits,
     selected_security_bits,
     update_visual_security,
     security_level_for_bits,
@@ -37,6 +35,10 @@ SUPPORTED_NTRU_RING_FAMILIES = {"auto", "power2", "hps", "hrss", "ntru_prime"}
 NTRU_ESTIMATOR_PROFILE = "standard"
 NTRU_ESTIMATOR_MODELS = ("matzov", "adps16")
 NTRU_ESTIMATOR_MODES = ("classical", "quantum")
+QUANTUM_ESTIMATE_UNAVAILABLE_CODE = "quantum_estimate_unavailable"
+QUANTUM_ESTIMATE_UNAVAILABLE_MESSAGE = (
+    "No quantum security estimate is available for this NTRU candidate."
+)
 SNTRUP_ROWS = (
     ("sntrup653", 653, 4621, 288, 129.0, 117.0, 1),
     ("sntrup761", 761, 4591, 286, 153.0, 139.0, 2),
@@ -207,6 +209,16 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
 
     recommendation = ranked[0]
     alternatives = ranked[1:5]
+    if (
+        request.security_model == "quantum"
+        and recommendation["selection"]["selected_security_bits"] is None
+    ):
+        validation["message_codes"] = list(
+            dict.fromkeys(
+                validation["message_codes"] + [QUANTUM_ESTIMATE_UNAVAILABLE_CODE]
+            )
+        )
+        validation.setdefault("message", QUANTUM_ESTIMATE_UNAVAILABLE_MESSAGE)
     for candidate in [recommendation, *alternatives]:
         candidate["warning_codes"] = list(
             dict.fromkeys(candidate.get("warning_codes", []) + validation["message_codes"])
@@ -282,8 +294,6 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
     validation_attempts = int(raw.get("validation_attempts", raw.get("validationAttempts", validation_count + 2)))
 
     use_estimator = bool(raw.get("use_estimator", raw.get("useEstimator", False)))
-    if security_model == "quantum" and not use_estimator:
-        raise ValueError("NTRU quantum targets require useEstimator=true for Sage evaluation.")
 
     return NTRURequest(
         target_security=target,
@@ -555,7 +565,12 @@ def ntru_ntt_strategy_text(request: NTRURequest) -> str:
 
 
 def ntru_visual_scores(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[str, Any]:
-    security_bits = floor_bits(spec.screen_bits)
+    reference_bits = (
+        spec.screen_quantum_bits
+        if request.security_model == "quantum"
+        else spec.screen_bits
+    )
+    security_bits = floor_optional_bits(reference_bits)
     compactness = compactness_profile(spec.q, request)
     performance = performance_profile(
         n=spec.n,
@@ -565,7 +580,11 @@ def ntru_visual_scores(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[st
     return {
         "security": {
             "label": "Security",
-            "score": round(max(0.0, min(1.0, security_bits / 512.0)), 4),
+            "score": (
+                round(max(0.0, min(1.0, security_bits / 512.0)), 4)
+                if security_bits is not None
+                else 0.0
+            ),
             "bits": security_bits,
             "max_bits": 512,
         },
@@ -597,21 +616,38 @@ def select_best_distribution_per_modulus(
 
 def distribution_rank(candidate: dict[str, Any], request: NTRURequest) -> tuple[float, ...]:
     recalculate_ntru_selection(candidate, request)
-    margin = float(candidate["selection"]["margin_bits"])
+    margin = candidate["selection"]["margin_bits"]
+    available = margin is not None
+    margin_value = float(margin) if available else 0.0
     stddev = float(candidate["distribution"]["secret"].get("stddev", 0.0))
-    shortage = abs(min(0.0, margin)) * 10_000.0
-    return (shortage, max(0.0, margin), stddev)
+    shortage = abs(min(0.0, margin_value)) * 10_000.0
+    return (
+        0.0 if available else 1.0,
+        shortage,
+        max(0.0, margin_value),
+        stddev,
+    )
 
 
 def candidate_rank(candidate: dict[str, Any], request: NTRURequest) -> tuple[float, ...]:
     recalculate_ntru_selection(candidate, request)
-    margin = float(candidate["selection"]["margin_bits"])
-    shortage = abs(min(0.0, margin)) * 10_000.0
+    margin = candidate["selection"]["margin_bits"]
+    available = margin is not None
+    margin_value = float(margin) if available else 0.0
+    shortage = abs(min(0.0, margin_value)) * 10_000.0
     family_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
     n = int(candidate["ring"]["n"])
     q = int(candidate["modulus"]["q"])
     stddev = float(candidate["distribution"]["secret"].get("stddev", 0.0))
-    rank = (shortage, family_rank, n, q, max(0.0, margin), stddev)
+    rank = (
+        0.0 if available else 1.0,
+        shortage,
+        family_rank,
+        n,
+        q,
+        max(0.0, margin_value),
+        stddev,
+    )
     candidate["selection"]["rank_score"] = rank
     return rank
 
@@ -621,10 +657,12 @@ def validated_ntru_candidate_rank(
     request: NTRURequest,
 ) -> tuple[Any, ...]:
     recalculate_ntru_selection(candidate, request)
-    selected = float(candidate["selection"]["selected_security_bits"])
-    measured_rank = -selected if math.isfinite(selected) else float("inf")
+    selected = candidate["selection"]["selected_security_bits"]
+    available = selected is not None
+    measured_rank = -float(selected) if available else 0.0
     rank = (
         0 if candidate["selection"]["meets_target"] else 1,
+        0 if available else 1,
         measured_rank,
         0 if candidate["ring"]["family_id"] == request.ring_family else 1,
         int(candidate["ring"]["n"]),
@@ -641,17 +679,37 @@ def recalculate_ntru_selection(
     request: NTRURequest,
     update_visual: bool = True,
 ) -> None:
-    selected = selected_security_bits(candidate["security"], request)
-    margin = security_margin_bits(candidate["security"], request)
-    meets = meets_target(candidate["security"], request)
+    raw_selected = selected_security_bits(candidate["security"], request)
+    selected = raw_selected if math.isfinite(raw_selected) else None
+    margin = round(selected - request.target_security, 3) if selected is not None else None
+    meets = margin is not None and margin >= 0
     candidate["selection"]["selected_security_bits"] = selected
     candidate["selection"]["margin_bits"] = margin
     candidate["selection"]["meets_target"] = meets
     candidate["selection"]["status"] = selection_status(meets)
     candidate["selection"]["security_level"] = security_level_for_bits(
-        selected if math.isfinite(selected) else None
+        selected
     )
-    if update_visual and math.isfinite(selected):
+    warning_codes = candidate.setdefault("warning_codes", [])
+    warnings = candidate.setdefault("warnings", [])
+    unavailable = request.security_model == "quantum" and selected is None
+    if unavailable:
+        candidate["warning_codes"] = list(
+            dict.fromkeys(warning_codes + [QUANTUM_ESTIMATE_UNAVAILABLE_CODE])
+        )
+        candidate["warnings"] = list(
+            dict.fromkeys(warnings + [QUANTUM_ESTIMATE_UNAVAILABLE_MESSAGE])
+        )
+    else:
+        candidate["warning_codes"] = [
+            code for code in warning_codes if code != QUANTUM_ESTIMATE_UNAVAILABLE_CODE
+        ]
+        candidate["warnings"] = [
+            message
+            for message in warnings
+            if message != QUANTUM_ESTIMATE_UNAVAILABLE_MESSAGE
+        ]
+    if update_visual and selected is not None:
         update_visual_security(candidate)
 
 
