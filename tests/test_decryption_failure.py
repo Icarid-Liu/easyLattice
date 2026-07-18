@@ -1,7 +1,16 @@
 import itertools
 import json
 import unittest
-from decimal import Decimal, InvalidOperation, Overflow, localcontext
+from decimal import (
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    ROUND_DOWN,
+    getcontext,
+    localcontext,
+    setcontext,
+)
 from unittest import mock
 
 import app.decryption_failure as dfr
@@ -817,6 +826,102 @@ class DecryptionFailureTests(unittest.TestCase):
 
         self.assertLess(Decimal(result["tail_probability_upper_bound"]), Decimal(2) ** Decimal(-40))
         self.assertIn("dfr_gaussian_tail_excluded", result["warning_codes"])
+
+    def test_discrete_gaussian_preflights_exp_work_and_bounds_valid_calls(self):
+        decimal_digits = dfr.decimal_digits_for_bits(dfr.DEFAULT_PRECISION_BITS)
+        with dfr.dfr_decimal_context(decimal_digits):
+            with mock.patch.object(
+                dfr,
+                "decimal_exp",
+                wraps=dfr.decimal_exp,
+            ) as decimal_exp:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "MAX_GAUSSIAN_EXP_WORK",
+                ):
+                    dfr.discrete_gaussian_pmf(
+                        Decimal(dfr.MAX_SCALAR_ABS),
+                        Decimal(0),
+                        dfr.DEFAULT_TAIL_BITS,
+                    )
+            self.assertEqual(decimal_exp.call_count, 0)
+
+            plan = dfr.discrete_gaussian_work_plan(
+                Decimal(50),
+                dfr.DEFAULT_TAIL_BITS,
+            )
+            self.assertLessEqual(plan.projected_work, dfr.MAX_GAUSSIAN_EXP_WORK)
+            self.assertGreater(plan.projected_work, dfr.MAX_GAUSSIAN_EXP_WORK // 2)
+            with mock.patch.object(
+                dfr,
+                "decimal_exp",
+                wraps=dfr.decimal_exp,
+            ) as decimal_exp:
+                gaussian = dfr.discrete_gaussian_pmf(
+                    Decimal(50),
+                    Decimal(0),
+                    dfr.DEFAULT_TAIL_BITS,
+                )
+
+            self.assertLessEqual(decimal_exp.call_count, plan.exp_calls_upper_bound)
+            self.assertLessEqual(len(gaussian.probabilities), plan.support_width)
+
+        maximum_digits = dfr.decimal_digits_for_bits(dfr.MAX_PRECISION_BITS)
+        with dfr.dfr_decimal_context(maximum_digits):
+            with mock.patch.object(
+                dfr,
+                "decimal_exp",
+                wraps=dfr.decimal_exp,
+            ) as decimal_exp:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "MAX_GAUSSIAN_EXP_WORK",
+                ):
+                    dfr.discrete_gaussian_pmf(
+                        Decimal(50),
+                        Decimal(0),
+                        dfr.DEFAULT_TAIL_BITS,
+                    )
+            self.assertEqual(decimal_exp.call_count, 0)
+
+    def test_dfr_decimal_context_isolated_from_caller_context(self):
+        payload = {
+            "type": "ntru",
+            "n": 1,
+            "p0": 0,
+            "p1": "sqrt(2)",
+            "p2": 0,
+            "p3": 1,
+            "delta": 10,
+            "g": ZERO,
+            "f": ZERO,
+            "s": ZERO,
+            "e": {"type": "discrete_gaussian", "stddev": "1.5"},
+            "m": ZERO,
+            "tailBits": 40,
+        }
+        expected = calculate_decryption_failure(payload)
+        saved = getcontext().copy()
+        caller = getcontext()
+        try:
+            caller.rounding = ROUND_DOWN
+            caller.Emax = 9
+            caller.Emin = -9
+            caller.capitals = 0
+            caller.clamp = 1
+            caller.traps[Inexact] = True
+
+            actual = calculate_decryption_failure(payload)
+
+            self.assertEqual(actual, expected)
+            self.assertEqual(getcontext().rounding, ROUND_DOWN)
+            self.assertEqual(getcontext().Emax, 9)
+            self.assertEqual(getcontext().Emin, -9)
+            self.assertEqual(getcontext().capitals, 0)
+            self.assertEqual(getcontext().clamp, 1)
+            self.assertTrue(getcontext().traps[Inexact])
+        finally:
+            setcontext(saved)
 
     def test_ntru_reports_ring_and_worst_coefficient_metadata(self):
         result = calculate_decryption_failure(ntru_product_payload("negacyclic"))

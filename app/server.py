@@ -25,6 +25,11 @@ STATIC_ROOT = ROOT / "static"
 API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1"))))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
+MAX_REQUEST_BODY_BYTES = 1_048_576
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
 
 
 @dataclass
@@ -157,6 +162,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_json(preserve_numeric_lexemes=True)
                 result = calculate_decryption_failure(payload)
+            except RequestBodyTooLarge as exc:
+                self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+                return
             except ValueError as exc:
                 self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -173,6 +181,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/agent/jobs":
             try:
                 payload = self.read_json()
+            except RequestBodyTooLarge as exc:
+                self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+                return
             except ValueError as exc:
                 self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -199,6 +210,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             result = recommend_with_agent(payload)
+        except RequestBodyTooLarge as exc:
+            self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+            return
         except ValueError as exc:
             self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -212,8 +226,11 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         self.write_json(result)
 
     def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8") if length else "{}"
+        length = self.request_content_length()
+        try:
+            body = self.rfile.read(length).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Request body must be valid UTF-8.") from exc
         numeric_options = (
             {
                 "parse_int": str,
@@ -227,6 +244,29 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
         return payload
+
+    def request_content_length(self) -> int:
+        values = self.headers.get_all("Content-Length", [])
+        if not values:
+            raise ValueError("Content-Length header is required.")
+        if len(values) != 1:
+            raise ValueError("Content-Length header must appear exactly once.")
+        raw = values[0]
+        if not raw or not raw.isascii() or not raw.isdigit():
+            raise ValueError("Content-Length must be a positive decimal integer.")
+        normalized = raw.lstrip("0") or "0"
+        maximum = str(MAX_REQUEST_BODY_BYTES)
+        if len(normalized) > len(maximum) or (
+            len(normalized) == len(maximum) and normalized > maximum
+        ):
+            raise RequestBodyTooLarge(
+                f"Content-Length exceeds {MAX_REQUEST_BODY_BYTES} "
+                "(MAX_REQUEST_BODY_BYTES)."
+            )
+        length = int(normalized)
+        if length < 1:
+            raise ValueError("Content-Length must be a positive decimal integer.")
+        return length
 
     def serve_file(self, path: Path) -> None:
         resolved = path.resolve()

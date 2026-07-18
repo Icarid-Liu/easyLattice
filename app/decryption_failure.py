@@ -4,7 +4,19 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, DecimalException, ROUND_CEILING, ROUND_FLOOR, getcontext, localcontext
+from decimal import (
+    Decimal,
+    DecimalException,
+    DefaultContext,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    getcontext,
+    localcontext,
+)
 from fractions import Fraction
 from math import comb
 from typing import Any
@@ -30,6 +42,14 @@ MAX_COMPRESSION_BITS = 63
 MAX_RING_PROFILE_WORK = 1_000_000
 MAX_PMF_SUPPORT = 50_000
 MAX_PAIR_PRODUCTS = 30_000_000
+MAX_GAUSSIAN_EXP_WORK = 300_000
+
+DFR_DECIMAL_ROUNDING = ROUND_HALF_EVEN
+DFR_DECIMAL_EMIN = -999_999
+DFR_DECIMAL_EMAX = 999_999
+DFR_DECIMAL_CAPITALS = 1
+DFR_DECIMAL_CLAMP = 0
+DFR_DECIMAL_TRAPS = frozenset((InvalidOperation, DivisionByZero, Overflow))
 
 DECIMAL_NUMBER_PATTERN = re.compile(
     r"^[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))"
@@ -42,6 +62,29 @@ class PMF:
     probabilities: dict[Decimal, Decimal]
     tail_bound: Decimal = Decimal(0)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class GaussianWorkPlan:
+    radius_upper_bound: int
+    support_width: int
+    exp_calls_upper_bound: int
+    projected_work: int
+
+
+def dfr_decimal_context(decimal_digits: int):
+    """Return a local Decimal context independent of the calling thread."""
+    context = DefaultContext.copy()
+    context.prec = decimal_digits
+    context.rounding = DFR_DECIMAL_ROUNDING
+    context.Emin = DFR_DECIMAL_EMIN
+    context.Emax = DFR_DECIMAL_EMAX
+    context.capitals = DFR_DECIMAL_CAPITALS
+    context.clamp = DFR_DECIMAL_CLAMP
+    for signal in context.traps:
+        context.traps[signal] = signal in DFR_DECIMAL_TRAPS
+        context.flags[signal] = False
+    return localcontext(context)
 
 
 def calculate_decryption_failure(raw: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -64,8 +107,7 @@ def calculate_decryption_failure(raw: dict[str, Any] | None = None) -> dict[str,
 
     decimal_digits = decimal_digits_for_bits(precision_bits)
     try:
-        with localcontext() as context:
-            context.prec = decimal_digits
+        with dfr_decimal_context(decimal_digits):
             kind = str(raw.get("type", "")).strip().lower()
             if kind == "ntru":
                 return calculate_ntru(raw, precision_bits, decimal_digits, tail_bits)
@@ -453,22 +495,89 @@ def sparse_ternary_pmf(plus: int, minus: int, dimension: int) -> PMF:
 
 
 def discrete_gaussian_pmf(stddev: Decimal, mean: Decimal, tail_bits: int) -> PMF:
+    plan = discrete_gaussian_work_plan(stddev, tail_bits)
     target_tail = Decimal(2) ** Decimal(-tail_bits)
-    radius = 0
-    while discrete_gaussian_tail_bound(stddev, radius) > target_tail:
-        radius += 1
-        ensure_support_size(2 * radius + 1)
+    radius = minimum_discrete_gaussian_radius(
+        stddev,
+        target_tail,
+        plan.radius_upper_bound,
+    )
 
     weights = {
-        mean + Decimal(offset): (-(Decimal(offset * offset) / (Decimal(2) * stddev * stddev))).exp()
+        mean + Decimal(offset): decimal_exp(
+            -(Decimal(offset * offset) / (Decimal(2) * stddev * stddev))
+        )
         for offset in range(-radius, radius + 1)
     }
     return normalized_pmf(weights, tail_bound=discrete_gaussian_tail_bound(stddev, radius))
 
 
+def discrete_gaussian_work_plan(stddev: Decimal, tail_bits: int) -> GaussianWorkPlan:
+    precision = getcontext().prec
+    variance = stddev * stddev
+    log_envelope = (Decimal(2) * (Decimal(1) + variance)).ln()
+    log_inverse_tail = Decimal(tail_bits) * Decimal(2).ln()
+    projected_x = (
+        Decimal(2) * variance * (log_inverse_tail + log_envelope)
+    ).sqrt().to_integral_value(rounding=ROUND_CEILING) + 1
+    projected_x = max(Decimal(1), projected_x)
+
+    max_exp_calls = MAX_GAUSSIAN_EXP_WORK // precision
+    max_radius = min(
+        (MAX_PMF_SUPPORT - 1) // 2,
+        max(0, (max_exp_calls - 1) // 2),
+    )
+    if projected_x > max_radius + 1:
+        raise ValueError(
+            "Discrete Gaussian projected exponential work exceeds "
+            "MAX_GAUSSIAN_EXP_WORK; reduce stddev, tailBits, or precisionBits."
+        )
+
+    radius_upper_bound = int(projected_x) - 1
+    support_width = 2 * radius_upper_bound + 1
+    search_calls = (radius_upper_bound + 1).bit_length()
+    exp_calls_upper_bound = support_width + search_calls + 2
+    projected_work = exp_calls_upper_bound * precision
+    if support_width > MAX_PMF_SUPPORT or projected_work > MAX_GAUSSIAN_EXP_WORK:
+        raise ValueError(
+            "Discrete Gaussian projected exponential work exceeds "
+            "MAX_GAUSSIAN_EXP_WORK; reduce stddev, tailBits, or precisionBits."
+        )
+    return GaussianWorkPlan(
+        radius_upper_bound=radius_upper_bound,
+        support_width=support_width,
+        exp_calls_upper_bound=exp_calls_upper_bound,
+        projected_work=projected_work,
+    )
+
+
+def minimum_discrete_gaussian_radius(
+    stddev: Decimal,
+    target_tail: Decimal,
+    radius_upper_bound: int,
+) -> int:
+    lower = 0
+    upper = radius_upper_bound
+    while lower < upper:
+        middle = (lower + upper) // 2
+        if discrete_gaussian_tail_bound(stddev, middle) > target_tail:
+            lower = middle + 1
+        else:
+            upper = middle
+    if discrete_gaussian_tail_bound(stddev, lower) > target_tail:
+        raise ValueError("Discrete Gaussian tail projection failed to meet tailBits.")
+    return lower
+
+
+def decimal_exp(value: Decimal) -> Decimal:
+    return value.exp()
+
+
 def discrete_gaussian_tail_bound(stddev: Decimal, radius: int) -> Decimal:
     first_omitted = Decimal(radius + 1)
-    exponent = (-(first_omitted * first_omitted) / (Decimal(2) * stddev * stddev)).exp()
+    exponent = decimal_exp(
+        -(first_omitted * first_omitted) / (Decimal(2) * stddev * stddev)
+    )
     bound = Decimal(2) * exponent * (Decimal(1) + (stddev * stddev / first_omitted))
     return min(Decimal(1), bound)
 
@@ -1178,13 +1287,14 @@ def scalar(raw: Any, label: str) -> Decimal:
         if len(raw) > MAX_NUMERIC_TEXT_LENGTH:
             raise ValueError(limit_message)
         if raw.strip() == "sqrt(2)":
-            return validated_bounded_decimal(
-                Decimal(2).sqrt(),
-                MAX_SCALAR_ABS,
-                invalid_message,
-                limit_message,
-                enforce_digit_limit=False,
-            )
+            with dfr_decimal_context(getcontext().prec):
+                return validated_bounded_decimal(
+                    Decimal(2).sqrt(),
+                    MAX_SCALAR_ABS,
+                    invalid_message,
+                    limit_message,
+                    enforce_digit_limit=False,
+                )
     return bounded_decimal_number(
         raw,
         MAX_SCALAR_ABS,

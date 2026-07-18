@@ -5,10 +5,66 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from unittest import mock
 
+import app.server as server_module
 from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
+    def test_all_post_endpoints_reject_invalid_or_oversized_content_lengths(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request_without_body(path, content_length):
+            connection = HTTPConnection(
+                "127.0.0.1",
+                server.server_address[1],
+                timeout=1,
+            )
+            connection.putrequest("POST", path)
+            connection.putheader("Content-Type", "application/json")
+            if content_length is not None:
+                connection.putheader("Content-Length", content_length)
+            connection.endheaders()
+            response = connection.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            return response.status, body
+
+        paths = (
+            "/api/decryption-failure/calculate",
+            "/api/agent/jobs",
+            "/api/rlwe/recommend",
+            "/api/agent/recommend",
+        )
+        cases = (
+            ("missing", None, 400),
+            ("invalid", "abc", 400),
+            ("negative", "-1", 400),
+            ("zero", "0", 400),
+            (
+                "oversized",
+                str(server_module.MAX_REQUEST_BODY_BYTES + 1),
+                413,
+            ),
+        )
+        try:
+            with (
+                mock.patch("app.server.recommend_with_agent", return_value={"ok": True}),
+                mock.patch("app.server.submit_job"),
+            ):
+                for path in paths:
+                    for name, content_length, expected_status in cases:
+                        with self.subTest(path=path, case=name):
+                            status, body = request_without_body(path, content_length)
+                            self.assertEqual(status, expected_status)
+                            self.assertFalse(body["ok"])
+                            self.assertIn("Content-Length", body["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_server_never_emits_nonfinite_json_constants(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
