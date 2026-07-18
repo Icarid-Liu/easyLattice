@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import socket
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -26,9 +27,14 @@ API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1")))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
 MAX_REQUEST_BODY_BYTES = 1_048_576
+POST_BODY_READ_TIMEOUT_SECONDS = 5.0
 
 
 class RequestBodyTooLarge(ValueError):
+    pass
+
+
+class RequestBodyReadTimeout(TimeoutError):
     pass
 
 
@@ -162,6 +168,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_json(preserve_numeric_lexemes=True)
                 result = calculate_decryption_failure(payload)
+            except RequestBodyReadTimeout as exc:
+                self.write_request_timeout(str(exc))
+                return
             except RequestBodyTooLarge as exc:
                 self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
                 return
@@ -181,6 +190,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/agent/jobs":
             try:
                 payload = self.read_json()
+            except RequestBodyReadTimeout as exc:
+                self.write_request_timeout(str(exc))
+                return
             except RequestBodyTooLarge as exc:
                 self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
                 return
@@ -210,6 +222,9 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             result = recommend_with_agent(payload)
+        except RequestBodyReadTimeout as exc:
+            self.write_request_timeout(str(exc))
+            return
         except RequestBodyTooLarge as exc:
             self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
             return
@@ -227,8 +242,23 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
         length = self.request_content_length()
+        previous_timeout = self.connection.gettimeout()
+        body_timeout = (
+            POST_BODY_READ_TIMEOUT_SECONDS
+            if previous_timeout is None
+            else min(previous_timeout, POST_BODY_READ_TIMEOUT_SECONDS)
+        )
         try:
-            body = self.rfile.read(length).decode("utf-8")
+            self.connection.settimeout(body_timeout)
+            body_bytes = self.rfile.read(length)
+        except (socket.timeout, TimeoutError) as exc:
+            raise RequestBodyReadTimeout("Request body read timed out.") from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if len(body_bytes) != length:
+            raise ValueError("Request body ended before Content-Length bytes were received.")
+        try:
+            body = body_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Request body must be valid UTF-8.") from exc
         numeric_options: dict[str, Any] = {
@@ -299,6 +329,13 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def write_error(self, status: HTTPStatus, message: str) -> None:
         self.write_json({"ok": False, "error": message}, status)
+
+    def write_request_timeout(self, message: str) -> None:
+        self.close_connection = True
+        try:
+            self.write_error(HTTPStatus.REQUEST_TIMEOUT, message)
+        except OSError:
+            pass
 
     def write_cors_headers(self) -> None:
         allowed = allowed_origins()

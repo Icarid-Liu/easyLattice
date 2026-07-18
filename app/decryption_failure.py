@@ -44,6 +44,29 @@ MAX_RING_PROFILE_WORK = 1_000_000
 MAX_PMF_SUPPORT = 50_000
 MAX_PAIR_PRODUCTS = 30_000_000
 MAX_GAUSSIAN_EXP_WORK = 300_000
+MAX_GAUSSIAN_REQUEST_WORK = 300_000
+
+DISTRIBUTION_TYPE_ALIASES = {
+    "sparse_ternary_fixed_weight": "sparse_ternary",
+    "compression_noise": "lwr_floor_compression",
+    "lwr_compression": "lwr_floor_compression",
+    "kyber_compression": "kyber_nearest_compression",
+}
+SUPPORTED_DISTRIBUTION_TYPES = frozenset({
+    "centered_binomial",
+    "discrete_gaussian",
+    "uniform",
+    "uniform_mod",
+    "t_uniform",
+    "sparse_ternary",
+    "sparse_binary",
+    "binary",
+    "ternary",
+    "lwr_floor_compression",
+    "kyber_nearest_compression",
+    "custom_pmf",
+    "noise_distribution",
+})
 
 DFR_DECIMAL_ROUNDING = ROUND_HALF_EVEN
 DFR_DECIMAL_EMIN = -999_999
@@ -143,9 +166,14 @@ def calculate_ntru(
         name: nonnegative_scalar(raw.get(name), name)
         for name in ("p0", "p1", "p2", "p3")
     }
-    distributions = {
-        name: pmf_from_distribution(raw.get(name), default_dimension=n, tail_bits=tail_bits, label=name)
+    distribution_inputs = tuple(
+        (name, raw.get(name))
         for name in ("g", "f", "s", "e", "m")
+    )
+    preflight_gaussian_request_work(distribution_inputs, tail_bits)
+    distributions = {
+        name: pmf_from_distribution(spec, default_dimension=n, tail_bits=tail_bits, label=name)
+        for name, spec in distribution_inputs
     }
 
     product_specs = (
@@ -253,9 +281,17 @@ def calculate_lwe(
         "ec1": m,
         "ec2": n,
     }
-    distributions = {
-        name: pmf_from_distribution(raw.get(name), default_dimension=dimension, tail_bits=tail_bits, label=name)
+    distribution_inputs = tuple(
+        (name, raw.get(name), dimension)
         for name, dimension in defaults.items()
+    )
+    preflight_gaussian_request_work(
+        tuple((name, spec) for name, spec, _ in distribution_inputs),
+        tail_bits,
+    )
+    distributions = {
+        name: pmf_from_distribution(spec, default_dimension=dimension, tail_bits=tail_bits, label=name)
+        for name, spec, dimension in distribution_inputs
     }
 
     e1_ec1 = add_pmfs(distributions["e1"], distributions["ec1"])
@@ -394,20 +430,8 @@ def pmf_from_distribution(
     tail_bits: int,
     label: str,
 ) -> PMF:
-    if not isinstance(raw, dict):
-        raise ValueError(f"{label} must be a distribution object.")
-    spec = raw.get("estimator") if isinstance(raw.get("estimator"), dict) else raw
-    if not isinstance(spec, dict):
-        raise ValueError(f"{label} must contain a distribution object.")
+    spec, distribution_type = normalized_distribution_spec(raw, label)
 
-    distribution_type = str(spec.get("type", spec.get("family", ""))).strip().lower()
-    aliases = {
-        "sparse_ternary_fixed_weight": "sparse_ternary",
-        "compression_noise": "lwr_floor_compression",
-        "lwr_compression": "lwr_floor_compression",
-        "kyber_compression": "kyber_nearest_compression",
-    }
-    distribution_type = aliases.get(distribution_type, distribution_type)
     if distribution_type == "centered_binomial":
         eta = nonnegative_int(value_of(spec, "eta"), f"{label}.eta")
         ensure_support_size(2 * eta + 1)
@@ -456,7 +480,48 @@ def pmf_from_distribution(
         return custom_pmf(value_of(spec, "pmf", "distribution"), label, tail_bits)
     if distribution_type == "noise_distribution":
         raise ValueError(f"{label} NoiseDistribution only has moments; use custom_pmf instead.")
-    raise ValueError(f"Unsupported distribution type for {label}: {distribution_type or 'missing type'}.")
+    raise ValueError(
+        f"Unsupported distribution type for {label}: "
+        f"{distribution_type or 'missing type'}."
+    )
+
+
+def normalized_distribution_spec(raw: Any, label: str) -> tuple[dict[str, Any], str]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a distribution object.")
+    spec = raw.get("estimator") if isinstance(raw.get("estimator"), dict) else raw
+    if not isinstance(spec, dict):
+        raise ValueError(f"{label} must contain a distribution object.")
+
+    distribution_type = str(spec.get("type", spec.get("family", ""))).strip().lower()
+    distribution_type = DISTRIBUTION_TYPE_ALIASES.get(distribution_type, distribution_type)
+    if distribution_type not in SUPPORTED_DISTRIBUTION_TYPES:
+        raise ValueError(
+            f"Unsupported distribution type for {label}: "
+            f"{distribution_type or 'missing type'}."
+        )
+    return spec, distribution_type
+
+
+def preflight_gaussian_request_work(
+    distributions: tuple[tuple[str, Any], ...],
+    tail_bits: int,
+) -> int:
+    projected_work = 0
+    for label, raw in distributions:
+        spec, distribution_type = normalized_distribution_spec(raw, label)
+        if distribution_type != "discrete_gaussian":
+            continue
+        stddev = positive_scalar(value_of(spec, "stddev"), f"{label}.stddev")
+        scalar(value_of(spec, "mean", default=0), f"{label}.mean")
+        projected_work += discrete_gaussian_work_plan(stddev, tail_bits).projected_work
+        if projected_work > MAX_GAUSSIAN_REQUEST_WORK:
+            raise ValueError(
+                "Discrete Gaussian cumulative projected exponential work exceeds "
+                "MAX_GAUSSIAN_REQUEST_WORK; reduce the number of Gaussian "
+                "distributions, stddev, tailBits, or precisionBits."
+            )
+    return projected_work
 
 
 def uniform_pmf(lower: int, upper: int) -> PMF:

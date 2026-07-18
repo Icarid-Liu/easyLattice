@@ -1,5 +1,7 @@
 import json
+import socket
 import threading
+import time
 import unittest
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
@@ -10,6 +12,75 @@ from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
+    def test_partial_post_body_times_out_without_leaking_handler_thread(self):
+        class RecordingHandler(EasyLatticeHandler):
+            timeout_before_response = object()
+
+            def write_request_timeout(self, message):
+                type(self).timeout_before_response = self.connection.gettimeout()
+                super().write_request_timeout(message)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler)
+        self.assertTrue(server.daemon_threads)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        existing_threads = set(threading.enumerate())
+        client = socket.create_connection(server.server_address, timeout=2)
+        client.settimeout(2)
+        try:
+            request = (
+                b"POST /api/decryption-failure/calculate HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 128\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+                b'{"type":'
+            )
+            started = time.monotonic()
+            with mock.patch.object(
+                server_module,
+                "POST_BODY_READ_TIMEOUT_SECONDS",
+                0.1,
+            ):
+                client.sendall(request)
+                response = bytearray()
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            elapsed = time.monotonic() - started
+
+            headers, body = bytes(response).split(b"\r\n\r\n", 1)
+            self.assertIn(b" 408 ", headers)
+            self.assertEqual(
+                json.loads(body.decode("utf-8"))["error"],
+                "Request body read timed out.",
+            )
+            self.assertLess(elapsed, 1.5)
+            self.assertIsNone(RecordingHandler.timeout_before_response)
+
+            deadline = time.monotonic() + 1
+            handlers = []
+            while time.monotonic() < deadline:
+                handlers = [
+                    item
+                    for item in threading.enumerate()
+                    if item not in existing_threads
+                    and "process_request_thread" in item.name
+                    and item.is_alive()
+                ]
+                if not handlers:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(handlers, [])
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_all_post_endpoints_reject_invalid_or_oversized_content_lengths(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

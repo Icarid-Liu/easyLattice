@@ -884,6 +884,65 @@ class DecryptionFailureTests(unittest.TestCase):
                     )
             self.assertEqual(decimal_exp.call_count, 0)
 
+    def test_ntru_rejects_cumulative_gaussian_work_before_generation(self):
+        gaussian = {"type": "discrete_gaussian", "stddev": "15"}
+        payload = {
+            "type": "ntru",
+            "n": 1,
+            "p0": 0,
+            "p1": 0,
+            "p2": 0,
+            "p3": 0,
+            "delta": 1,
+            "g": gaussian,
+            "f": gaussian,
+            "s": gaussian,
+            "e": gaussian,
+            "m": gaussian,
+        }
+
+        with mock.patch.object(
+            dfr,
+            "decimal_exp",
+            wraps=dfr.decimal_exp,
+        ) as decimal_exp:
+            with self.assertRaisesRegex(
+                ValueError,
+                "MAX_GAUSSIAN_REQUEST_WORK",
+            ):
+                calculate_decryption_failure(payload)
+
+        self.assertEqual(decimal_exp.call_count, 0)
+
+    def test_lwe_rejects_cumulative_gaussian_work_before_generation(self):
+        gaussian = {"type": "discrete_gaussian", "stddev": "10"}
+        payload = {
+            "type": "lwe",
+            "m": 1,
+            "n": 1,
+            "delta": 1,
+            "s": gaussian,
+            "e": gaussian,
+            "e1": gaussian,
+            "r": gaussian,
+            "e2": gaussian,
+            "ec1": gaussian,
+            "ec2": gaussian,
+        }
+
+        with mock.patch.object(
+            dfr,
+            "decimal_exp",
+            wraps=dfr.decimal_exp,
+        ) as decimal_exp:
+            with self.assertRaisesRegex(
+                ValueError,
+                "MAX_GAUSSIAN_REQUEST_WORK",
+            ):
+                calculate_decryption_failure(payload)
+
+        self.assertEqual(decimal_exp.call_count, 0)
+
     def test_dfr_decimal_context_isolated_from_caller_context(self):
         payload = {
             "type": "ntru",
