@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from decimal import Decimal
 from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -357,6 +358,7 @@ class BrowserRequestStateTests(unittest.TestCase):
         self.assertFalse(snapshot["documentOverflow"], snapshot)
         self.assertFalse(snapshot["bodyOverflow"], snapshot)
         self.assertEqual(snapshot["outOfViewport"], [], snapshot)
+        self.assertEqual(snapshot["overflowNodes"], [], snapshot)
         self.assertEqual(snapshot["overflowingTextControls"], [], snapshot)
         self.assertEqual(snapshot["overlapFailures"], [], snapshot)
 
@@ -544,6 +546,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     profile: rows['Estimator profile'],
                     attempted: rows['Candidates attempted'],
                     eligible: rows['Candidates eligible'],
+                    generated: searchState.snapshot().result.search.generated_candidates,
                     source: rows.Source,
                     next: rows.Next,
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
@@ -557,6 +560,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "profile": "enhanced",
                 "attempted": "0",
                 "eligible": "7168",
+                "generated": 7168,
                 "source": "Fast security screen",
                 "next": "Bind this recommendation to concrete scheme constraints before use.",
                 "invalidText": False,
@@ -606,6 +610,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     validation: rows['Validation status'],
                     source: rows.Source,
                     eligible: rows['Candidates eligible'],
+                    generated: searchState.snapshot().result.search.generated_candidates,
                     warning: document.querySelector('#warnings').textContent.includes('runtime or configuration is unavailable'),
                   };
                 })()"""
@@ -615,6 +620,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "validation": "Validation failed",
                 "source": "Fast security screen",
                 "eligible": "7168",
+                "generated": 7168,
                 "warning": True,
             },
         )
@@ -657,7 +663,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "bits": 13,
                 "cyclotomic": 1024,
                 "preset": None,
-                "generated": 8,
+                "generated": 5,
+                "eligible": 4,
             },
             {
                 "family": "power2",
@@ -672,7 +679,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "bits": 13,
                 "cyclotomic": 1024,
                 "preset": None,
-                "generated": 8,
+                "generated": 5,
+                "eligible": 4,
             },
             {
                 "family": "hps",
@@ -688,6 +696,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "cyclotomic": None,
                 "preset": None,
                 "generated": 4,
+                "eligible": 4,
             },
             {
                 "family": "hrss",
@@ -703,6 +712,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "cyclotomic": None,
                 "preset": None,
                 "generated": 4,
+                "eligible": 4,
             },
             {
                 "family": "ntru_prime",
@@ -718,6 +728,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "cyclotomic": None,
                 "preset": "sntrup653",
                 "generated": 6,
+                "eligible": 6,
             },
         )
         for expected in family_cases:
@@ -786,7 +797,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     "preset": expected["preset"],
                     "effectiveVariant": expected["effective_variant"],
                     "generated": expected["generated"],
-                    "eligible": expected["generated"],
+                    "eligible": expected["eligible"],
                     "renderedFamily": expected["family_name"],
                     "renderedNtruType": expected["ntru_type"],
                     "invalidText": False,
@@ -869,7 +880,7 @@ class BrowserRequestStateTests(unittest.TestCase):
         expected_rings = {
             "cyclic": ("x^509 - 1", "0", "1"),
             "negacyclic": ("x^509 + 1", "0", "509"),
-            "ntru_prime": ("x^509 - x - 1", "1", "509"),
+            "ntru_prime": ("x^509 - x - 1", "0", "509"),
         }
         for ring_type, (polynomial, worst, profiles) in expected_rings.items():
             self.page.evaluate(
@@ -889,6 +900,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 """(() => {
                   const rows = Object.fromEntries([...document.querySelectorAll('#dfr-calculation-list dt')]
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  const result = dfrState.snapshot().result;
                   return {
                     single: document.querySelector('#dfr-single').textContent,
                     vector: document.querySelector('#dfr-vector').textContent,
@@ -896,6 +908,11 @@ class BrowserRequestStateTests(unittest.TestCase):
                     polynomial: rows['Ring polynomial'],
                     worst: rows['Worst coefficient index'],
                     profiles: rows['Distinct coefficient profiles'],
+                    dimension: result.dimensions.n,
+                    worstIndex: result.coefficient_dfr.worst_index,
+                    failureProbabilities: result.coefficient_dfr.failure_probabilities,
+                    singleProbability: result.single_coefficient_failure_probability,
+                    vectorProbability: result.vector_failure_probability_before_ecc,
                     warning: document.querySelector('#dfr-warnings').textContent,
                     invalidText: /\b(undefined|null)\b/.test(document.querySelector('#dfr-results').innerText),
                   };
@@ -907,6 +924,22 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.assertEqual(rendered["polynomial"], polynomial)
             self.assertEqual(rendered["worst"], worst)
             self.assertEqual(rendered["profiles"], profiles)
+            failure_strings = rendered["failureProbabilities"]
+            self.assertEqual(len(failure_strings), rendered["dimension"])
+            for probability in failure_strings:
+                self.assertIsInstance(probability, str)
+                self.assertRegex(
+                    probability,
+                    r"^(?:0|[1-9]\d*)(?:\.\d+)?(?:E[+-]?\d+)?$",
+                )
+            failures = [Decimal(probability) for probability in failure_strings]
+            worst_failure = max(failures)
+            self.assertEqual(failures.index(worst_failure), rendered["worstIndex"])
+            self.assertEqual(worst_failure, Decimal(rendered["singleProbability"]))
+            self.assertEqual(
+                min(Decimal(1), sum(failures, Decimal(0))),
+                Decimal(rendered["vectorProbability"]),
+            )
             self.assertIn("union bound", rendered["warning"])
             self.assertIn("outside this module", rendered["warning"])
             self.assertFalse(rendered["invalidText"])

@@ -105,7 +105,8 @@
   };
   const ntruPreviewFamilies = {
     power2: {
-      generatedCandidates: 8,
+      generatedCandidates: 5,
+      eligibleCandidates: 4,
       candidate: ntruFixture(
         {
           family_id: "power2",
@@ -138,6 +139,7 @@
     },
     hps: {
       generatedCandidates: 4,
+      eligibleCandidates: 4,
       candidate: ntruFixture(
         {
           family_id: "hps",
@@ -161,6 +163,7 @@
     },
     hrss: {
       generatedCandidates: 4,
+      eligibleCandidates: 4,
       candidate: ntruFixture(
         {
           family_id: "hrss",
@@ -184,6 +187,7 @@
     },
     ntru_prime: {
       generatedCandidates: 6,
+      eligibleCandidates: 6,
       candidate: ntruFixture(
         {
           family_id: "ntru_prime",
@@ -211,7 +215,10 @@
       ),
     },
   };
-  const LWE_GENERATED_CANDIDATES = 7168;
+  const LWE_CANDIDATE_POOL = {
+    generatedCandidates: 7168,
+    eligibleCandidates: 7168,
+  };
 
   function withSelection(candidate, payload) {
     const selected = payload.securityModel === "quantum"
@@ -263,9 +270,7 @@
     if (isNtru && family === "power2") {
       candidate.ring.ntru_type = effectiveVariant === "matrix" ? "matrix" : "circulant";
     }
-    const generatedCandidates = isNtru
-      ? familyFixture.generatedCandidates
-      : LWE_GENERATED_CANDIDATES;
+    const candidatePool = isNtru ? familyFixture : LWE_CANDIDATE_POOL;
     const request = {
       target_security: Number(payload.targetSecurity) || 128,
       hard_problem_category: isNtru ? "ntru" : payload.hardProblemCategory || "lwe",
@@ -289,7 +294,7 @@
           attempted_candidates: 1,
           successful_candidates: 0,
           covered_candidates: 0,
-          eligible_candidates: generatedCandidates,
+          eligible_candidates: candidatePool.eligibleCandidates,
           message_codes: ["validation_config_missing"],
         }
       : {
@@ -300,7 +305,7 @@
           attempted_candidates: 0,
           successful_candidates: 0,
           covered_candidates: 0,
-          eligible_candidates: generatedCandidates,
+          eligible_candidates: candidatePool.eligibleCandidates,
           message_codes: [],
         };
     candidate.warning_codes = [...new Set([...candidate.warning_codes, ...validation.message_codes])];
@@ -310,11 +315,21 @@
       recommendation: candidate,
       alternatives,
       validation,
-      search: { elapsed_ms: 0, generated_candidates: generatedCandidates },
+      search: { elapsed_ms: 0, generated_candidates: candidatePool.generatedCandidates },
       next_question: "Run the local service to evaluate parameters and bind them to a concrete scheme.",
       next_step_code: "bind_scheme_constraints",
     };
   }
+
+  const NTRU_DFR_DIMENSION = 509;
+  const NTRU_SINGLE_FAILURE_PROBABILITY = "5.76515379864975E-167";
+  const NTRU_VECTOR_FAILURE_PROBABILITY = "2.93446328351272275E-164";
+  const ntruCoefficientDfr = (ringType, distinctProfiles) => ({
+    worst_index: 0,
+    distinct_profiles: distinctProfiles,
+    profiles: ringCoefficientProfiles(NTRU_DFR_DIMENSION, ringType),
+    failure_probabilities: Array(NTRU_DFR_DIMENSION).fill(NTRU_SINGLE_FAILURE_PROBABILITY),
+  });
 
   const dfr = {
     ntru: {
@@ -322,15 +337,15 @@
       type: "ntru",
       formula: "p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e",
       success_condition: "|E| <= Delta",
-      dimensions: { n: 509 },
+      dimensions: { n: NTRU_DFR_DIMENSION },
       delta: "1024",
       precision_bits: 512,
       precision_decimal_digits: 167,
       tail_bits: 128,
       single_coefficient_dfr_log2: "-552.2346327506126",
       vector_dfr_log2_before_ecc: "-543.2431109045369",
-      single_coefficient_failure_probability: "5.76515379864975E-167",
-      vector_failure_probability_before_ecc: "2.93446328351272E-164",
+      single_coefficient_failure_probability: NTRU_SINGLE_FAILURE_PROBABILITY,
+      vector_failure_probability_before_ecc: NTRU_VECTOR_FAILURE_PROBABILITY,
       single_coefficient_semantics: "worst_coefficient",
       vector_aggregation: "union_bound",
       tail_probability_upper_bound: "0",
@@ -345,11 +360,7 @@
       coefficients: { p0: "3", p1: "0", p2: "1", p3: "0" },
       ring_type: "cyclic",
       ring_polynomial: "x^509 - 1",
-      coefficient_dfr: {
-        worst_index: 0,
-        distinct_profiles: 1,
-        profiles: ringCoefficientProfiles(509, "cyclic"),
-      },
+      coefficient_dfr: ntruCoefficientDfr("cyclic", 1),
       warnings: [unionBoundWarning],
       warning_codes: ["dfr_union_bound"],
       error_correction: { included: false, code: "dfr_ecc_external", note: eccNote },
@@ -390,20 +401,18 @@
   const ntruNegacyclicDfr = clone(dfr.ntru);
   ntruNegacyclicDfr.ring_type = "negacyclic";
   ntruNegacyclicDfr.ring_polynomial = "x^509 + 1";
-  ntruNegacyclicDfr.coefficient_dfr = {
-    worst_index: 0,
-    distinct_profiles: 509,
-    profiles: ringCoefficientProfiles(509, "negacyclic"),
-  };
+  ntruNegacyclicDfr.coefficient_dfr = ntruCoefficientDfr(
+    "negacyclic",
+    NTRU_DFR_DIMENSION,
+  );
 
   const ntruPrimeDfr = clone(dfr.ntru);
   ntruPrimeDfr.ring_type = "ntru_prime";
   ntruPrimeDfr.ring_polynomial = "x^509 - x - 1";
-  ntruPrimeDfr.coefficient_dfr = {
-    worst_index: 1,
-    distinct_profiles: 509,
-    profiles: ringCoefficientProfiles(509, "ntru_prime"),
-  };
+  ntruPrimeDfr.coefficient_dfr = ntruCoefficientDfr(
+    "ntru_prime",
+    NTRU_DFR_DIMENSION,
+  );
   ntruPrimeDfr.warning_codes.push("ntru_prime_coefficient_marginal");
   ntruPrimeDfr.warnings.push(
     "NTRU Prime ring products use a coefficient-marginal approximation; the vector union bound makes no joint independence claim.",
