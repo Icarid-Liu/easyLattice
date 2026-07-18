@@ -208,6 +208,21 @@ textarea {
   padding: 0 12px;
 }
 
+input:not([type="radio"]):not([type="checkbox"]):disabled,
+input:not([type="radio"]):not([type="checkbox"]):read-only,
+select:disabled,
+textarea:read-only {
+  border-color: #c7d0cc;
+  background: #edf1ef;
+  color: #45534f;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+input[type="range"]:disabled {
+  accent-color: #587a75;
+}
+
 input:focus,
 select:focus,
 textarea:focus,

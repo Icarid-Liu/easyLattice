@@ -246,6 +246,10 @@ const TRANSLATIONS = {
     source: "Source",
     target: "Target",
     reductionModel: "Reduction model",
+    matzovClassical: "MATZOV (classical)",
+    matzovQuantum: "MATZOV (quantum)",
+    adps16Classical: "ADPS16 (classical)",
+    adps16Quantum: "ADPS16 (quantum)",
     securityLevel: "Security level",
     marginLabel: "Margin",
     estimator: "Estimator",
@@ -450,6 +454,10 @@ const TRANSLATIONS = {
     source: "来源",
     target: "目标",
     reductionModel: "规约模型",
+    matzovClassical: "MATZOV（经典）",
+    matzovQuantum: "MATZOV（量子）",
+    adps16Classical: "ADPS16（经典）",
+    adps16Quantum: "ADPS16（量子）",
     securityLevel: "安全级别",
     marginLabel: "余量",
     estimator: "Estimator",
@@ -570,8 +578,8 @@ languageSelect.value = currentLanguage;
 applyLanguage();
 syncRingControls();
 syncDistributionOptions();
+syncPreviewSecurityForm();
 updateNttScaleLabel();
-renderDfrDistributionEditors();
 syncDfrForm();
 syncWorkspace();
 updateRequestControls();
@@ -611,6 +619,7 @@ copyDfrJson.addEventListener("click", async () => {
 nttScale.addEventListener("input", updateNttScaleLabel);
 ringFamily.addEventListener("change", () => {
   syncRingControls();
+  syncPreviewSecurityForm();
   updateNttScaleLabel();
 });
 languageSelect.addEventListener("change", () => {
@@ -619,8 +628,8 @@ languageSelect.addEventListener("change", () => {
   applyLanguage();
   syncRingControls();
   syncDistributionOptions();
+  syncPreviewSecurityForm();
   updateNttScaleLabel();
-  renderDfrDistributionEditors();
   syncDfrForm();
   if (publicConfig) renderPublicConfig(publicConfig);
   syncWorkspace();
@@ -629,6 +638,7 @@ document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
   input.addEventListener("change", () => {
     syncRingControls();
     syncDistributionOptions();
+    syncPreviewSecurityForm();
     updateNttScaleLabel();
   });
 });
@@ -636,12 +646,9 @@ document.querySelectorAll('input[name="workspaceMode"]').forEach((input) => {
   input.addEventListener("change", syncWorkspace);
 });
 document.querySelectorAll('input[name="dfrType"]').forEach((input) => {
-  input.addEventListener("change", () => {
-    syncPreviewDfrDimension();
-    syncDfrForm();
-  });
+  input.addEventListener("change", syncDfrForm);
 });
-dfrForm.elements.namedItem("dfrRingType")?.addEventListener("change", syncPreviewDfrDimension);
+dfrForm.elements.namedItem("dfrRingType")?.addEventListener("change", syncPreviewDfrForm);
 dfrDistributionEditors.addEventListener("change", (event) => {
   if (event.target.matches("[data-dfr-distribution-type]")) {
     renderDfrDistributionEditors();
@@ -652,8 +659,9 @@ dfrForm.addEventListener("input", markDfrInputsChanged);
 
 async function requestRecommendation() {
   if (searchState.snapshot().inFlight) return;
+  syncPreviewSecurityForm();
   const data = new FormData(form);
-  const useEstimator = data.get("useEstimator") === "on";
+  const useEstimator = form.elements.namedItem("useEstimator")?.checked === true;
   const request = searchState.begin({
     subtitleKey: useEstimator ? "estimatorSubtitle" : "generatingSubtitle",
     subtitleValues: {},
@@ -668,26 +676,26 @@ async function requestRecommendation() {
       String(data.get("ringFamily") || "power2"),
       hardProblem.variant,
     );
-    const secretDistribution = data.get("secretDistribution");
-    const errorDistribution = data.get("errorDistribution");
+    const secretDistribution = secretDistributionSelect.value;
+    const errorDistribution = errorDistributionSelect.value;
     const payload = {
       problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
       hardProblemCategory: hardProblem.category,
       hardProblemVariant: ringSelection.variant,
       ringFamily: ringSelection.family,
-      targetSecurity: Number(data.get("targetSecurity")),
-      securityModel: data.get("securityModel"),
-      redCostModel: data.get("redCostModel"),
-      nttScalePower: Number(data.get("nttScalePower")),
-      minQBits: Number(data.get("minQBits")),
-      maxQBits: Number(data.get("maxQBits")),
+      targetSecurity: Number(form.elements.namedItem("targetSecurity")?.value),
+      securityModel: form.elements.namedItem("securityModel")?.value,
+      redCostModel: form.elements.namedItem("redCostModel")?.value,
+      nttScalePower: Number(nttScale.value),
+      minQBits: Number(form.elements.namedItem("minQBits")?.value),
+      maxQBits: Number(form.elements.namedItem("maxQBits")?.value),
       distribution: secretDistribution,
       secretDistribution,
       errorDistribution,
       useEstimator,
       estimatorTimeout: useEstimator ? 240 : undefined,
-      intent: String(data.get("intent") || ""),
-      useLLM: data.get("useLLM") === "on",
+      intent: String(form.elements.namedItem("intent")?.value || ""),
+      useLLM: useLLM.checked,
     };
 
     const result = PREVIEW_MODE
@@ -712,7 +720,7 @@ async function requestRecommendation() {
 
 async function requestDfr() {
   if (dfrState.snapshot().inFlight) return;
-  syncPreviewDfrDimension();
+  syncPreviewDfrForm();
   const request = dfrState.begin();
   updateRequestControls();
   if (activeWorkspace === "dfr") renderDfrState();
@@ -980,19 +988,19 @@ function renderResult(result) {
     [t("agent"), result.agent?.name],
     [t("llm"), formatLlm(result.agent)],
     [t("source"), localizeSource(sourceCode, security.source)],
-    ["MATZOV (classical)", formatOptionalBits(security.matzov_bits)],
-    ["MATZOV (quantum)", formatOptionalBits(security.matzov_quantum_bits)],
-    ["ADPS16 (classical)", formatOptionalBits(security.adps16_core_svp_bits)],
-    ["ADPS16 (quantum)", formatOptionalBits(security.adps16_quantum_bits)],
+    [t("matzovClassical"), formatOptionalBits(security.matzov_bits)],
+    [t("matzovQuantum"), formatOptionalBits(security.matzov_quantum_bits)],
+    [t("adps16Classical"), formatOptionalBits(security.adps16_core_svp_bits)],
+    [t("adps16Quantum"), formatOptionalBits(security.adps16_quantum_bits)],
     [t("classical"), formatOptionalBits(displayedSecurity.classical)],
     [t("quantum"), formatOptionalBits(displayedSecurity.quantum)],
     [t("referenceClassicalSecurity"), formatOptionalBits(security.reference_classical_bits)],
     [t("referenceQuantumSecurity"), formatOptionalBits(security.reference_quantum_bits)],
     [t("target"), formatSecurityTarget(request)],
-    [t("reductionModel"), redCostModel],
+    [t("reductionModel"), reductionModelText(redCostModel)],
     [t("securityLevel"), securityLevelText(selection.security_level)],
     [t("nistCategory"), security.nist_category],
-    [t("marginLabel"), formatOptionalBits(selection.margin_bits)],
+    [t("marginLabel"), formatSignedBits(selection.margin_bits)],
     [t("validationStatus"), validationStatusText(validation.status)],
     [t("estimatorProfile"), validation.profile],
     [t("estimatorCommit"), validation.estimator_commit || security.estimator_commit],
@@ -1154,12 +1162,19 @@ function formatSecurityTarget(request) {
 
 function formatMargin(value) {
   if (value == null) return t("notAvailable");
+  return t("margin", { value: signedNumber(value) });
+}
+
+function signedNumber(value) {
   const numeric = Number(value);
   const raw = String(value);
-  const signed = Number.isFinite(numeric) && numeric > 0 && !raw.startsWith("+")
+  return Number.isFinite(numeric) && numeric > 0 && !raw.startsWith("+")
     ? `+${raw}`
     : raw;
-  return t("margin", { value: signed });
+}
+
+function formatSignedBits(value) {
+  return value == null || value === "" ? null : t("bits", { value: signedNumber(value) });
 }
 
 function formatOptionalBits(value) {
@@ -1187,6 +1202,11 @@ function selectionStatusText(status) {
 function securityModelText(model) {
   const keys = { classical: "classical", quantum: "quantum" };
   return model == null ? null : t(keys[model] || model);
+}
+
+function reductionModelText(model) {
+  const labels = { matzov: "MATZOV", adps16: "ADPS16" };
+  return model == null ? null : labels[model] || model;
 }
 
 function securityLevelText(level) {
@@ -1320,12 +1340,14 @@ function syncRingControls() {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
+      option.disabled = PREVIEW_MODE && hardProblem.category !== "ntru" && value !== "power2";
       return option;
     }),
   );
   ringFamily.value = options.some(({ value }) => value === previousFamily)
     ? previousFamily
     : options[0].value;
+  if (ringFamily.selectedOptions[0]?.disabled) ringFamily.value = "power2";
 
   const normalized = EasyLatticeModel.normalizeRingSelection(
     hardProblem.category,
@@ -1338,6 +1360,39 @@ function syncRingControls() {
   if (hardProblem.category === "ntru" && normalized.variant === "ring") {
     ringInput.checked = true;
   }
+  if (PREVIEW_MODE) {
+    const supported = new Set(["lwe:rlwe", "ntru:ring", "ntru:matrix"]);
+    document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
+      input.disabled = !supported.has(input.value)
+        || (input.value === "ntru:matrix" && hardProblem.category === "ntru" && !normalized.matrixAllowed);
+    });
+  }
+}
+
+function syncPreviewSecurityForm() {
+  if (!PREVIEW_MODE) return;
+  const fixedValues = {
+    targetSecurity: "128",
+    nttScalePower: "0",
+    minQBits: "2",
+    maxQBits: "24",
+    secretDistribution: "auto",
+    errorDistribution: "auto",
+    intent: "",
+  };
+  Object.entries(fixedValues).forEach(([name, value]) => {
+    const field = form.elements.namedItem(name);
+    if (!field) return;
+    field.value = value;
+    if (field.matches("input:not([type=range]), textarea")) {
+      field.readOnly = true;
+      field.setAttribute("aria-readonly", "true");
+    } else {
+      field.disabled = true;
+    }
+  });
+  useLLM.checked = false;
+  useLLM.disabled = true;
 }
 
 function updateRequestControls() {
@@ -1464,7 +1519,11 @@ function syncDfrForm() {
   const type = selectedDfrType();
   dfrNtruFields.classList.toggle("hidden", type !== "ntru");
   dfrLweFields.classList.toggle("hidden", type !== "lwe");
-  renderDfrDistributionEditors(PREVIEW_MODE && renderedDfrType !== null && renderedDfrType !== type);
+  if (PREVIEW_MODE) {
+    syncPreviewDfrForm();
+  } else {
+    renderDfrDistributionEditors(renderedDfrType !== null && renderedDfrType !== type);
+  }
   const state = dfrState.snapshot();
   if (PREVIEW_MODE && (!state.result || state.result.type !== type)) {
     dfrState.setResult(previewDfrResult(type, selectedDfrRingType()));
@@ -1473,15 +1532,39 @@ function syncDfrForm() {
   if (activeWorkspace === "dfr") renderDfrState();
 }
 
-function syncPreviewDfrDimension() {
-  if (!PREVIEW_MODE || selectedDfrType() !== "ntru") return;
-  const fixture = previewDfrResult("ntru", selectedDfrRingType());
-  const dimension = fixture?.dimensions?.n;
-  const field = dfrForm.elements.namedItem("dfrNtruN");
-  if (field && dimension != null) {
+function syncPreviewDfrForm() {
+  if (!PREVIEW_MODE) return;
+  const fixture = previewDfrRequest(selectedDfrType(), selectedDfrRingType());
+  if (!fixture) return;
+  const fieldValues = fixture.type === "ntru"
+    ? {
+        dfrNtruN: fixture.n,
+        dfrNtruDelta: fixture.delta,
+        dfrP0: fixture.p0,
+        dfrP1: fixture.p1,
+        dfrP2: fixture.p2,
+        dfrP3: fixture.p3,
+      }
+    : { dfrLweM: fixture.m, dfrLweN: fixture.n, dfrLweDelta: fixture.delta };
+  Object.assign(fieldValues, {
+    dfrPrecisionBits: fixture.precisionBits,
+    dfrTailBits: fixture.tailBits,
+  });
+  Object.entries(fieldValues).forEach(([name, value]) => {
+    const field = dfrForm.elements.namedItem(name);
+    if (!field) return;
+    field.value = String(value);
     field.readOnly = true;
-    field.value = String(dimension);
-  }
+    field.setAttribute("aria-readonly", "true");
+  });
+  renderDfrDistributionEditors(true, fixture);
+  dfrDistributionEditors.querySelectorAll("select").forEach((field) => {
+    field.disabled = true;
+  });
+  dfrDistributionEditors.querySelectorAll("input, textarea").forEach((field) => {
+    field.readOnly = true;
+    field.setAttribute("aria-readonly", "true");
+  });
 }
 
 function selectedDfrType() {
@@ -1492,13 +1575,32 @@ function selectedDfrRingType() {
   return dfrForm.elements.namedItem("dfrRingType")?.value || "cyclic";
 }
 
-function renderDfrDistributionEditors(useDefaults = false) {
-  const previous = useDefaults ? {} : dfrDistributionState();
+function renderDfrDistributionEditors(useDefaults = false, fixtureRequest = null) {
+  const previous = fixtureRequest
+    ? dfrDistributionStateFromRequest(fixtureRequest)
+    : useDefaults ? {} : dfrDistributionState();
   const type = selectedDfrType();
   dfrDistributionEditors.replaceChildren(
     ...DFR_FIELDS[type].map((name) => createDfrDistributionEditor(name, previous[name], type)),
   );
   renderedDfrType = type;
+}
+
+function dfrDistributionStateFromRequest(request) {
+  const state = {};
+  DFR_FIELDS[request.type].forEach((name) => {
+    const distribution = request[name];
+    if (!distribution) return;
+    const params = cloneValue(distribution);
+    delete params.type;
+    if (params.pmf) params.pmf = JSON.stringify(params.pmf);
+    state[name] = { type: distribution.type, params };
+  });
+  return state;
+}
+
+function cloneValue(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function dfrDistributionState() {
@@ -1772,6 +1874,12 @@ function previewDfrResult(type, ringType = "cyclic") {
     : fixtures?.[type];
   if (!fixture) throw new Error(`preview ${type} DFR data is unavailable`);
   return JSON.parse(JSON.stringify(fixture));
+}
+
+function previewDfrRequest(type, ringType = "cyclic") {
+  const requests = previewFixtures()?.dfr?.requests;
+  const request = type === "ntru" ? requests?.ntru?.[ringType] : requests?.lwe;
+  return request ? JSON.parse(JSON.stringify(request)) : null;
 }
 
 function hasLiveApi() {

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import asdict
 from decimal import Decimal, localcontext
 from unittest import mock
 from http.server import ThreadingHTTPServer
@@ -16,6 +17,13 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from app.decryption_failure import calculate_decryption_failure
+from app.ntru_search import recommend_ntru
+from app.parameter_search import (
+    RequestOptions,
+    candidate_rank,
+    make_candidate,
+    sparse_ternary_spec,
+)
 from app.server import EasyLatticeHandler
 
 try:
@@ -35,6 +43,21 @@ CHROMIUM = next(
 
 DFR_BERNOULLI = {"type": "custom_pmf", "pmf": {"0": "0.5", "1": "0.5"}}
 DFR_ZERO = {"type": "custom_pmf", "pmf": {"0": "1"}}
+LWE_DFR_PAYLOAD = {
+    "type": "lwe",
+    "m": 512,
+    "n": 256,
+    "delta": "832",
+    "precisionBits": 512,
+    "tailBits": 128,
+    "s": {"type": "centered_binomial", "eta": "3"},
+    "e": {"type": "centered_binomial", "eta": "3"},
+    "e1": {"type": "centered_binomial", "eta": "2"},
+    "r": {"type": "centered_binomial", "eta": "3"},
+    "e2": {"type": "centered_binomial", "eta": "2"},
+    "ec1": {"type": "kyber_nearest_compression", "q": "3329", "d": "10"},
+    "ec2": {"type": "kyber_nearest_compression", "q": "3329", "d": "4"},
+}
 
 
 def bounded_noncyclic_dfr_payload(ring_type: str) -> dict:
@@ -55,6 +78,43 @@ def bounded_noncyclic_dfr_payload(ring_type: str) -> dict:
         "e": DFR_ZERO,
         "m": DFR_ZERO,
     }
+
+
+def assert_nested_key_contract(
+    testcase: unittest.TestCase,
+    preview: object,
+    backend: object,
+    path: str = "candidate",
+    *,
+    top_level_extra: set[str] | None = None,
+) -> None:
+    if isinstance(preview, dict) and isinstance(backend, dict):
+        expected = set(backend)
+        if path == "candidate" and top_level_extra:
+            expected |= top_level_extra
+        testcase.assertEqual(set(preview), expected, path)
+        for key in set(backend) & set(preview):
+            assert_nested_key_contract(
+                testcase,
+                preview[key],
+                backend[key],
+                f"{path}.{key}",
+            )
+    elif (
+        isinstance(preview, list)
+        and isinstance(backend, list)
+        and preview
+        and backend
+        and isinstance(preview[0], dict)
+        and isinstance(backend[0], dict)
+    ):
+        for index, item in enumerate(preview):
+            assert_nested_key_contract(
+                testcase,
+                item,
+                backend[min(index, len(backend) - 1)],
+                f"{path}[{index}]",
+            )
 
 
 FETCH_HOOK = r"""
@@ -404,6 +464,15 @@ class BrowserRequestStateTests(unittest.TestCase):
                 )
                 self.assertEqual(preview, backend)
 
+        self.assertEqual(
+            self.page.evaluate("window.EASYLATTICE_PREVIEW_FIXTURES.dfr.lwe"),
+            calculate_decryption_failure(LWE_DFR_PAYLOAD),
+        )
+        self.assertEqual(
+            self.page.evaluate("window.EASYLATTICE_PREVIEW_FIXTURES.dfr.requests.lwe"),
+            LWE_DFR_PAYLOAD,
+        )
+
         distribution_summaries = self.page.evaluate(
             """(() => {
               const fixtures = window.EASYLATTICE_PREVIEW_FIXTURES.dfr;
@@ -432,15 +501,92 @@ class BrowserRequestStateTests(unittest.TestCase):
             " && typeof window.EASYLATTICE_PREVIEW_FIXTURES?.recommendation === 'function'"
         )
 
+        lwe_request = RequestOptions()
+        lwe_distribution = sparse_ternary_spec(1024, 4, 2)
+        backend_lwe_candidates = []
+        for q in (12289, 13313, 15361):
+            candidate = make_candidate(
+                1024,
+                q,
+                lwe_distribution,
+                lwe_distribution,
+                lwe_request,
+            )
+            candidate_rank(candidate, lwe_request)
+            backend_lwe_candidates.append(candidate)
+
+        preview_default = self.page.evaluate(
+            """(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
+              hardProblemCategory: 'lwe',
+              hardProblemVariant: 'rlwe',
+              ringFamily: 'power2',
+              targetSecurity: 128,
+              securityModel: 'classical',
+              redCostModel: 'matzov',
+              nttScalePower: 0,
+              minQBits: 2,
+              maxQBits: 24,
+              distribution: 'auto',
+              secretDistribution: 'auto',
+              errorDistribution: 'auto',
+              useEstimator: false,
+              intent: '',
+              useLLM: false,
+            }))()"""
+        )
+        for field, value in asdict(lwe_request).items():
+            self.assertEqual(preview_default["request"][field], value, field)
+        self.assertEqual(preview_default["request"]["problem"], "rlwe")
+        self.assertEqual(preview_default["request"]["intent"], "")
+        self.assertFalse(preview_default["request"]["use_llm"])
+        for section in (
+            "ring",
+            "modulus",
+            "distribution",
+            "security",
+            "selection",
+            "visual_scores",
+        ):
+            self.assertEqual(
+                preview_default["recommendation"][section],
+                json.loads(json.dumps(backend_lwe_candidates[0][section])),
+                section,
+            )
+
+        backend_ntru_candidates = {}
+        for family in ("power2", "hps", "hrss", "ntru_prime"):
+            response = recommend_ntru(
+                {
+                    "targetSecurity": 128,
+                    "hardProblemCategory": "ntru",
+                    "hardProblemVariant": "ring",
+                    "ringFamily": family,
+                    "securityModel": "classical",
+                    "redCostModel": "matzov",
+                    "nttScalePower": 0,
+                    "minQBits": 2,
+                    "maxQBits": 24,
+                    "distribution": "auto",
+                    "useEstimator": False,
+                }
+            )
+            backend_ntru_candidates[family] = [
+                response["recommendation"],
+                *response["alternatives"],
+            ]
+
         cases = (
-            ("lwe", "power2", 7168, 7168),
+            ("lwe", "power2", 105216, 105216),
             ("ntru", "power2", 5, 4),
             ("ntru", "hps", 4, 4),
             ("ntru", "hrss", 4, 4),
             ("ntru", "ntru_prime", 6, 6),
         )
         expected_alternatives = {
-            ("lwe", "power2"): [(512, 769, 129.9, 117.9)],
+            ("lwe", "power2"): [
+                (1024, 13313, 132.9, 117.8),
+                (1024, 15361, 130.3, 115.4),
+            ],
             ("ntru", "power2"): [
                 (512, 10753, 130.2, None),
                 (512, 11777, 128.4, None),
@@ -536,6 +682,26 @@ class BrowserRequestStateTests(unittest.TestCase):
                             else "target_unmet",
                         )
 
+                        backend_pool = (
+                            backend_ntru_candidates[family]
+                            if category == "ntru"
+                            else backend_lwe_candidates
+                        )
+                        backend_candidate = next(
+                            item
+                            for item in backend_pool
+                            if item["ring"]["n"] == candidate["ring"]["n"]
+                            and item["modulus"]["q"] == candidate["modulus"]["q"]
+                            and item["distribution"]["name"]
+                            == candidate["distribution"]["name"]
+                        )
+                        assert_nested_key_contract(
+                            self,
+                            candidate,
+                            backend_candidate,
+                            top_level_extra={"problem"} if category == "lwe" else None,
+                        )
+
         quantum_lwe = self.page.evaluate(
             """(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
               hardProblemCategory: 'lwe',
@@ -547,7 +713,7 @@ class BrowserRequestStateTests(unittest.TestCase):
               useEstimator: false,
             }).recommendation)()"""
         )
-        self.assertEqual(quantum_lwe["selection"]["selected_security_bits"], 117.6)
+        self.assertEqual(quantum_lwe["selection"]["selected_security_bits"], 119.4)
         self.assertEqual(quantum_lwe["selection"]["security_level"], "below NIST-I")
 
         for family in ("power2", "hps", "hrss"):
@@ -620,16 +786,22 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.page.evaluate(
                 """(() => ({
                   margin: document.querySelector('#security-margin').textContent,
+                  detailedMargin: Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent])).Margin,
                   alternatives: document.querySelector('#candidate-list').textContent,
                   malformed: document.querySelector('#search-results').textContent.includes('+-'),
                 }))()"""
             ),
             {
-                "margin": "margin -10.4 bits",
+                "margin": "margin -5.4 bits",
+                "detailedMargin": "-5.4 bits",
                 "alternatives": (
-                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
-                    "Classical: 129.9 bits · margin -10.1 bits · Target unmet"
-                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                    "n=1024, q=13313, ST(l0=4, l1=2)"
+                    "Classical: 132.9 bits · margin -7.1 bits · Target unmet"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
+                    "n=1024, q=15361, ST(l0=4, l1=2)"
+                    "Classical: 130.3 bits · margin -9.7 bits · Target unmet"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
                 ),
                 "malformed": False,
             },
@@ -645,13 +817,16 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.page.evaluate(
                 """(() => ({
                   margin: document.querySelector('#security-margin').textContent,
+                  detailedMargin: Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]))['余量'],
                   alternativeHasMargin: document.querySelector('#candidate-list').textContent
-                    .includes('余量 -10.1 比特'),
+                    .includes('余量 -7.1 比特'),
                   malformed: document.querySelector('#search-results').textContent.includes('+-'),
                 }))()"""
             ),
             {
-                "margin": "余量 -10.4 比特",
+                "margin": "余量 -5.4 比特",
+                "detailedMargin": "-5.4 比特",
                 "alternativeHasMargin": True,
                 "malformed": False,
             },
@@ -926,6 +1101,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
                   const instance = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  const result = searchState.snapshot().result;
                   return {
                     status: document.querySelector('#status-pill').textContent,
                     validation: rows['Validation status'],
@@ -940,6 +1116,24 @@ class BrowserRequestStateTests(unittest.TestCase):
                     previewWarning: document.querySelector('#warnings').textContent,
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
                     plaintextJson: Boolean(document.querySelector('#alternatives pre, #dfr-results pre')),
+                    requestMatchesForm: result.request.target_security === Number(document.querySelector('[name=targetSecurity]').value)
+                      && result.request.ntt_scale_power === Number(document.querySelector('[name=nttScalePower]').value)
+                      && result.request.min_q_bits === Number(document.querySelector('[name=minQBits]').value)
+                      && result.request.max_q_bits === Number(document.querySelector('[name=maxQBits]').value)
+                      && result.request.secret_distribution === document.querySelector('[name=secretDistribution]').value
+                      && result.request.error_distribution === document.querySelector('[name=errorDistribution]').value,
+                    locked: [
+                      document.querySelector('[name=targetSecurity]').readOnly,
+                      document.querySelector('[name=nttScalePower]').disabled,
+                      document.querySelector('[name=minQBits]').readOnly,
+                      document.querySelector('[name=maxQBits]').readOnly,
+                      document.querySelector('[name=secretDistribution]').disabled,
+                      document.querySelector('[name=errorDistribution]').disabled,
+                      document.querySelector('[name=intent]').readOnly,
+                    ].every(Boolean),
+                    selectorsInteractive: !document.querySelector('#language-select').disabled
+                      && !document.querySelector('#ring-family').disabled
+                      && !document.querySelector('[name=securityModel][value=classical]').disabled,
                   };
                 })()"""
             ),
@@ -948,15 +1142,18 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "validation": "Fast screened",
                 "profile": "enhanced",
                 "attempted": "0",
-                "eligible": "7168",
-                "generated": 7168,
+                "eligible": "105216",
+                "generated": 105216,
                 "source": "Fast security screen",
                 "next": "Bind this recommendation to concrete scheme constraints before use.",
-                "nttQuality": "2_layers_remaining, remaining layers 2",
+                "nttQuality": "full_split, remaining layers 0",
                 "alternativeText": (
-                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
-                    "Classical: 129.9 bits · margin +1.9 bits · Target met"
-                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                    "n=1024, q=13313, ST(l0=4, l1=2)"
+                    "Classical: 132.9 bits · margin +4.9 bits · Target met"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
+                    "n=1024, q=15361, ST(l0=4, l1=2)"
+                    "Classical: 130.3 bits · margin +2.3 bits · Target met"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
                 ),
                 "previewWarning": (
                     "This fast screen is not bound to a concrete scheme; scheme-level "
@@ -966,6 +1163,9 @@ class BrowserRequestStateTests(unittest.TestCase):
                 ),
                 "invalidText": False,
                 "plaintextJson": False,
+                "requestMatchesForm": True,
+                "locked": True,
+                "selectorsInteractive": True,
             },
         )
         self.assert_viewport_layout(1440, 1000)
@@ -982,6 +1182,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                 """(() => {
                   const rows = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  const security = Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
                   return {
                     status: document.querySelector('#status-pill').textContent,
                     warning: document.querySelector('#warnings').textContent.includes('尚未绑定到具体方案'),
@@ -995,6 +1197,11 @@ class BrowserRequestStateTests(unittest.TestCase):
                       .map(estimatorJobStatusText),
                     fallbackError: localizeErrorMessage('request failed'),
                     nttQuality: rows['NTT 质量'],
+                    localizedModels: ['MATZOV（经典）', 'MATZOV（量子）', 'ADPS16（经典）', 'ADPS16（量子）']
+                      .every((label) => label in security),
+                    rawModels: [...document.querySelectorAll('#security-list dt')]
+                      .some((node) => /\((classical|quantum)\)/.test(node.textContent)),
+                    signedMargin: security['余量'],
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
                   };
                 })()"""
@@ -1005,13 +1212,19 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "previewWarning": True,
                 "englishWarning": False,
                 "alternativeText": (
-                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
-                    "经典：129.9 比特 · 余量 +1.9 比特 · 已达到目标"
-                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                    "n=1024, q=13313, ST(l0=4, l1=2)"
+                    "经典：132.9 比特 · 余量 +4.9 比特 · 已达到目标"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
+                    "n=1024, q=15361, ST(l0=4, l1=2)"
+                    "经典：130.3 比特 · 余量 +2.3 比特 · 已达到目标"
+                    "one_layer_remaining · 1024 | q - 1; 2048 does not divide q - 1"
                 ),
                 "estimatorStatuses": ["排队中", "运行中", "已完成", "失败"],
                 "fallbackError": "请求失败",
-                "nttQuality": "2_layers_remaining，剩余层数：2",
+                "nttQuality": "full_split，剩余层数：0",
+                "localizedModels": True,
+                "rawModels": False,
+                "signedMargin": "+6.6 比特",
                 "invalidText": False,
             },
         )
@@ -1048,8 +1261,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "status": "Validation failed",
                 "validation": "Validation failed",
                 "source": "Fast security screen",
-                "eligible": "7168",
-                "generated": 7168,
+                "eligible": "105216",
+                "generated": 105216,
                 "warning": True,
             },
         )
@@ -1334,13 +1547,35 @@ class BrowserRequestStateTests(unittest.TestCase):
         )
         self.assertEqual(
             self.page.evaluate(
-                """(() => ({
-                  single: document.querySelector('#dfr-single').textContent,
-                  vector: document.querySelector('#dfr-vector').textContent,
-                  type: dfrState.snapshot().result.type,
-                }))()"""
+                """(() => {
+                  const stable = (value) => Array.isArray(value)
+                    ? value.map(stable)
+                    : value && typeof value === 'object'
+                      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]))
+                      : value;
+                  return {
+                    single: document.querySelector('#dfr-single').textContent,
+                    vector: document.querySelector('#dfr-vector').textContent,
+                    type: dfrState.snapshot().result.type,
+                    requestMatches: JSON.stringify(stable(buildDfrPayload())) === JSON.stringify(stable(
+                      window.EASYLATTICE_PREVIEW_FIXTURES.dfr.requests.lwe
+                    )),
+                    locked: [...document.querySelectorAll('#dfr-form input:not([type=radio]), #dfr-form textarea')]
+                      .filter((field) => field.getBoundingClientRect().height > 0)
+                      .every((field) => field.readOnly),
+                    selectorsInteractive: !document.querySelector('[name=dfrType][value=lwe]').disabled
+                      && !document.querySelector('[name=dfrRingType]').disabled,
+                  };
+                })()"""
             ),
-            {"single": "-147.14", "vector": "-139.14", "type": "lwe"},
+            {
+                "single": "-147.14",
+                "vector": "-139.14",
+                "type": "lwe",
+                "requestMatches": True,
+                "locked": True,
+                "selectorsInteractive": True,
+            },
         )
         before_switch = self.page.evaluate("dfrState.snapshot().revision")
         self.assertFalse(
@@ -1397,6 +1632,11 @@ class BrowserRequestStateTests(unittest.TestCase):
                   const rows = Object.fromEntries([...document.querySelectorAll('#dfr-calculation-list dt')]
                     .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
                   const result = dfrState.snapshot().result;
+                  const stable = (value) => Array.isArray(value)
+                    ? value.map(stable)
+                    : value && typeof value === 'object'
+                      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]))
+                      : value;
                   return {
                     single: document.querySelector('#dfr-single').textContent,
                     vector: document.querySelector('#dfr-vector').textContent,
@@ -1414,6 +1654,12 @@ class BrowserRequestStateTests(unittest.TestCase):
                     precision: rows.Precision,
                     warning: document.querySelector('#dfr-warnings').textContent,
                     invalidText: /\b(undefined|null)\b/.test(document.querySelector('#dfr-results').innerText),
+                    requestMatchesFixture: JSON.stringify(stable(buildDfrPayload())) === JSON.stringify(stable(
+                      window.EASYLATTICE_PREVIEW_FIXTURES.dfr.requests.ntru[result.ring_type]
+                    )),
+                    locked: [...document.querySelectorAll('#dfr-form input:not([type=radio]), #dfr-form textarea')]
+                      .filter((field) => field.getBoundingClientRect().height > 0)
+                      .every((field) => field.readOnly),
                   };
                 })()"""
             )
@@ -1454,6 +1700,8 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.assertIn("union bound", rendered["warning"])
             self.assertIn("outside this module", rendered["warning"])
             self.assertFalse(rendered["invalidText"])
+            self.assertTrue(rendered["requestMatchesFixture"])
+            self.assertTrue(rendered["locked"])
             if ring_type == "ntru_prime":
                 self.assertIn("makes no independence claim", rendered["warning"])
             self.assert_viewport_layout(1440, 1000)

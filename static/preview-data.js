@@ -5,7 +5,8 @@
   const eccNote = "Apply a scheme-specific error-correction calculation outside this module.";
 
   const clone = (value) => JSON.parse(JSON.stringify(value));
-  const distribution = (name, stddev, support = [-1, 1]) => ({ name, stddev, support });
+  const lweScreenWarning = "This is an RLWE/LWE fast screen. It is not bound to a concrete scheme, so decryption error or rejection sampling times are not computed.";
+  const ntruScreenWarning = "This is an NTRU lattice-hardness prototype. It is not yet bound to scheme-specific correctness, encoding, failure-rate, or key-invertibility checks.";
   const ringCoefficientProfiles = (n, ringType) => {
     const positive = Array(n).fill(0);
     const negative = Array(n).fill(0);
@@ -29,93 +30,214 @@
     }));
   };
 
-  const lweCandidate = {
+  const completeModulus = (values) => ({
+    q: values.q,
+    bits: values.bits,
+    prime: values.prime,
+    q_minus_1_factorization: values.q_minus_1_factorization,
+    ntt_condition: values.ntt_condition ?? null,
+    ntt_friendly: values.ntt_friendly ?? null,
+    ntt_quality: values.ntt_quality ?? null,
+    ntt_layers_remaining: values.ntt_layers_remaining ?? null,
+    polynomial_factorization: values.polynomial_factorization ?? null,
+    factor_count: values.factor_count ?? null,
+    factor_degree: values.factor_degree ?? null,
+    decomposition_score: values.decomposition_score ?? null,
+    two_adicity: values.two_adicity ?? null,
+    small_factor_weight: values.small_factor_weight ?? null,
+  });
+
+  const sparseEstimator = {
+    type: "sparse_ternary_fixed_weight",
+    plus_weight: 15,
+    minus_weight: 15,
+    fixed_weight_stddev: 0.1711632992203644,
+    iid_stddev: 0.1711632992203644,
+    fast_screen_penalty_bits: 30,
+    note: "fixed-weight approximation to the iid sparse ternary distribution",
+  };
+  const sparseParameters = {
+    l0: 4,
+    l1: 2,
+    probability_plus: 0.0146484375,
+    probability_minus: 0.0146484375,
+    probability_zero: 0.970703125,
+    nonzero_probability: 0.029296875,
+  };
+  const lweDistributionProfile = () => ({
+    family: "sparse_ternary",
+    name: "ST(l0=4, l1=2)",
+    parameters: { secret: clone(sparseParameters), error: clone(sparseParameters) },
+    secret: {
+      family: "sparse_ternary",
+      name: "ST(l0=4, l1=2)",
+      mean: 0,
+      variance: 0.029296875,
+      stddev: 0.171163299,
+      support: [-1, 1],
+      symmetric: true,
+      sampling: "sample sign/magnitude from bit arithmetic; zero otherwise",
+      estimator: clone(sparseEstimator),
+    },
+    error: {
+      family: "sparse_ternary",
+      name: "ST(l0=4, l1=2)",
+      mean: 0,
+      variance: 0.029296875,
+      stddev: 0.171163299,
+      support: [-1, 1],
+      symmetric: true,
+      sampling: "sample sign/magnitude from bit arithmetic; zero otherwise",
+      estimator: clone(sparseEstimator),
+    },
+    estimator: { secret: clone(sparseEstimator), error: clone(sparseEstimator) },
+  });
+  const lweSecurity = (classical, quantum, beta) => ({
+    source: "fast-screen",
+    source_code: "fast_screen",
+    classical_bits: classical,
+    quantum_bits: quantum,
+    matzov_bits: classical,
+    matzov_quantum_bits: quantum,
+    adps16_core_svp_bits: classical,
+    adps16_quantum_bits: quantum,
+    attacks: {
+      matzov_proxy_screen: {
+        bkz_beta: beta,
+        classical_bits: classical,
+        quantum_bits: quantum,
+        matzov_bits: classical,
+        adps16_core_svp_bits: classical,
+        sparse_penalty_bits: 30,
+        cost_model: "ADPS16/MATZOV-style first-pass screen",
+      },
+    },
+    notes: [
+      "This is a screening estimate calibrated to lattice-estimator Matzov/dual-hybrid rough outputs, not a proof.",
+      "Sparse ternary candidates include a conservative fast-screen penalty for sparse-secret attacks.",
+      "Use Sage/lattice-estimator validation before relying on a parameter set.",
+    ],
+  });
+  const visualScores = (bits, q, qBits, compactness, performance) => ({
+    security: { label: "Security", score: Math.round((bits / 512) * 10000) / 10000, bits, max_bits: 512 },
+    compactness: {
+      label: "Compactness",
+      score: compactness,
+      q,
+      q_bits: qBits,
+      min_q_bits: 2,
+      max_q_bits: 24,
+    },
+    performance,
+  });
+  const lweCandidate = ({ q, factorization, condition, quality, layers, factorCount, factorDegree, score, twoAdicity, smallWeight, classical, quantum, beta }) => ({
+    problem: "rlwe",
     ring: {
       family_id: "power2",
       family: "2-power cyclotomic",
-      n: 512,
-      cyclotomic_index: 1024,
-      polynomial: "x^512 + 1",
-      quotient: "Z_257[x] / (x^512 + 1)",
+      n: 1024,
+      cyclotomic_index: 2048,
+      polynomial: "x^1024 + 1",
+      quotient: `Z_${q}[x] / (x^1024 + 1)`,
+      dimension_rule: "n is a power of 2",
     },
-    modulus: {
-      q: 257,
-      bits: 9,
-      q_minus_1_factorization: "2^8",
-      ntt_condition: "256 | q - 1; 512 does not divide q - 1",
-      ntt_quality: "2_layers_remaining",
-      ntt_layers_remaining: 2,
-      polynomial_factorization: "x^512 + 1 splits into 128 quartic factors over F_q",
+    modulus: completeModulus({
+      q,
+      bits: 14,
+      prime: true,
+      q_minus_1_factorization: factorization,
+      ntt_condition: condition,
+      ntt_friendly: true,
+      ntt_quality: quality,
+      ntt_layers_remaining: layers,
+      polynomial_factorization: `x^1024 + 1 splits into ${factorCount} ${factorDegree === 1 ? "linear" : "quadratic"} factors over F_q`,
+      factor_count: factorCount,
+      factor_degree: factorDegree,
+      decomposition_score: score,
+      two_adicity: twoAdicity,
+      small_factor_weight: smallWeight,
+    }),
+    distribution: lweDistributionProfile(),
+    security: lweSecurity(classical, quantum, beta),
+    selection: {
+      target_security: 128,
+      security_model: "classical",
+      selected_security_bits: classical,
+      margin_bits: classical - 128,
+      meets_target: true,
+      status: "target_met",
+      security_level: "NIST-I",
+      rank_score: null,
     },
-    distribution: {
-      name: "Xs=ST(l0=1, l1=0), Xe=ST(l0=3, l1=2)",
-      secret: distribution("ST(l0=1, l1=0)", "0.707106781", [-1, 1]),
-      error: distribution("ST(l0=3, l1=2)", "0.233853587", [-1, 1]),
-    },
-    security: {
-      source: "fast-screen",
-      source_code: "fast_screen",
-      classical_bits: 129.6,
-      quantum_bits: 117.6,
-      matzov_bits: 129.6,
-      matzov_quantum_bits: 117.6,
-      adps16_core_svp_bits: 129.6,
-      adps16_quantum_bits: 117.6,
-    },
-    warnings: [warning],
+    visual_scores: visualScores(classical, q, 14, 0.4545, {
+      label: "Performance",
+      score: 1,
+      condition: layers === 0 ? "2n | q - 1" : "n | q - 1",
+      divisor: layers === 0 ? 2048 : 1024,
+      k: layers === 0 ? 0.5 : 1,
+      k_label: layers === 0 ? "1/2" : "1",
+    }),
+    warnings: [lweScreenWarning, warning],
     warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
-    visual_scores: {
-      security: { score: 0.253 },
-      compactness: { score: 0.682 },
-      performance: { score: 0.5 },
-    },
-  };
-
-  const lweAlternativeCandidates = [
-    {
-      ring: {
-        family_id: "power2",
-        family: "2-power cyclotomic",
-        n: 512,
-        cyclotomic_index: 1024,
-        polynomial: "x^512 + 1",
-        quotient: "Z_769[x] / (x^512 + 1)",
-      },
-      modulus: {
-        q: 769,
-        bits: 10,
-        q_minus_1_factorization: "2^8 * 3",
-        ntt_condition: "256 | q - 1; 512 does not divide q - 1",
-        ntt_quality: "2_layers_remaining",
-        ntt_layers_remaining: 2,
-        polynomial_factorization: "x^512 + 1 splits into 128 quartic factors over F_q",
-      },
-      distribution: {
-        name: "Xs=ST(l0=1, l1=0), Xe=CBD(1)",
-        secret: distribution("ST(l0=1, l1=0)", "0.707106781", [-1, 1]),
-        error: distribution("CBD(1)", "0.707106781", [-1, 1]),
-      },
-      security: {
-        source: "fast-screen",
-        source_code: "fast_screen",
-        classical_bits: 129.9,
-        quantum_bits: 117.9,
-        matzov_bits: 129.9,
-        matzov_quantum_bits: 117.9,
-        adps16_core_svp_bits: 129.9,
-        adps16_quantum_bits: 117.9,
-      },
-      warnings: [warning],
-      warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
-      visual_scores: {
-        security: { score: 0.254 },
-        compactness: { score: 0.625 },
-        performance: { score: 0.5 },
-      },
-    },
+  });
+  const lweCandidates = [
+    lweCandidate({ q: 12289, factorization: "2^12 * 3", condition: "2048 | q - 1", quality: "full_split", layers: 0, factorCount: 1024, factorDegree: 1, score: 77, twoAdicity: 12, smallWeight: 13, classical: 134.6, quantum: 119.4, beta: 564 }),
+    lweCandidate({ q: 13313, factorization: "2^10 * 13", condition: "1024 | q - 1; 2048 does not divide q - 1", quality: "one_layer_remaining", layers: 1, factorCount: 512, factorDegree: 2, score: 64, twoAdicity: 10, smallWeight: 11, classical: 132.9, quantum: 117.8, beta: 558 }),
+    lweCandidate({ q: 15361, factorization: "2^10 * 3 * 5", condition: "1024 | q - 1; 2048 does not divide q - 1", quality: "one_layer_remaining", layers: 1, factorCount: 512, factorDegree: 2, score: 67, twoAdicity: 10, smallWeight: 12, classical: 130.3, quantum: 115.4, beta: 549 }),
   ];
 
-  const ntruSecurity = (classical, quantum = null, nistCategory = null) => ({
+  const distributionProfile = ({ family, name, variance, stddev, support, sampling, estimator, components }) => {
+    const profile = {
+      family,
+      name,
+      mean: 0,
+      variance,
+      stddev,
+      support,
+      symmetric: true,
+      sampling,
+      estimator,
+    };
+    if (components) profile.components = components;
+    return profile;
+  };
+  const uniformModProfile = () => distributionProfile({
+    family: "uniform_mod",
+    name: "UniformMod(3)",
+    variance: 0.666666667,
+    stddev: 0.816496581,
+    support: [-1, 1],
+    sampling: "uniform centered coefficients modulo small integer",
+    estimator: { type: "uniform_mod", modulus: 3 },
+  });
+  const sparseFixedProfile = (weight, stddev, variance) => distributionProfile({
+    family: "sparse_ternary_fixed_weight",
+    name: `SparseTernary(p=${weight}, m=${weight})`,
+    variance,
+    stddev,
+    support: [-1, 1],
+    sampling: "fixed-weight sparse ternary sampler",
+    estimator: { type: "sparse_ternary_fixed_weight", plus_weight: weight, minus_weight: weight },
+  });
+  const compositeComponent = (family, name, variance, stddev, support, estimator) => ({
+    family, name, variance, stddev, support, estimator,
+  });
+  const compositeProfile = (name, variance, stddev, support, components) => distributionProfile({
+    family: "composite",
+    name,
+    variance,
+    stddev,
+    support,
+    sampling: "sample each listed fast component independently and add the coefficients",
+    estimator: {
+      type: "composite_moment",
+      stddev: Math.sqrt(variance),
+      bounds: support,
+      note: "moment approximation for a sum of fast-sampling centered distributions",
+    },
+    components,
+  });
+  const ntruSecurity = (classical, quantum, nistCategory, attack) => ({
     source: "ntru-reference-screen",
     source_code: "ntru_reference_screen",
     classical_bits: classical,
@@ -124,165 +246,125 @@
     matzov_quantum_bits: quantum,
     adps16_core_svp_bits: classical,
     adps16_quantum_bits: quantum,
+    ntru_bits: classical,
     reference_classical_bits: classical,
     reference_quantum_bits: quantum,
+    reference_attack: attack,
     nist_category: nistCategory,
+    reference_screen: { classical_bits: classical, quantum_bits: quantum, attack, nist_category: nistCategory },
+    attacks: {
+      [attack]: {
+        ok: true,
+        rop_bits: classical,
+        quantum_rop_bits: quantum,
+        source: "NTRU family reference security screen",
+      },
+    },
+    notes: [
+      "NTRU reference screens are analytical recommendations, not scheme-level proofs.",
+      "Live validation uses the standard lattice-estimator profile when requested.",
+    ],
   });
-  const ntruFixture = (ring, modulus, distributionProfile, security) => ({
+  const ntruPerformance = (family, n) => {
+    if (family === "power2") return { label: "Performance", score: 1, condition: "n | q - 1", divisor: n, k: 1, k_label: "1" };
+    if (family === "ntru_prime") return { label: "Performance", score: 0.0312, condition: "n/32 | q - 1", divisor: Math.floor(n / 32), k: 32, k_label: "32" };
+    return { label: "Performance", score: 0.002, condition: "n/512 | q - 1", divisor: 1, k: 512, k_label: "512" };
+  };
+  const ntruFixture = ({ ring, modulus, distribution, security, note }) => ({
+    problem: "ntru",
     ring,
-    modulus,
-    distribution: distributionProfile,
+    modulus: completeModulus(modulus),
+    distribution,
     security,
-    warnings: [warning],
+    selection: {
+      target_security: 128,
+      security_model: "classical",
+      selected_security_bits: security.classical_bits,
+      margin_bits: security.classical_bits - 128,
+      meets_target: security.classical_bits >= 128,
+      status: security.classical_bits >= 128 ? "target_met" : "target_unmet",
+      security_level: "NIST-I",
+      rank_score: null,
+    },
+    visual_scores: visualScores(
+      security.classical_bits,
+      modulus.q,
+      modulus.bits,
+      Math.round(((24 - modulus.bits) / 22) * 10000) / 10000,
+      ntruPerformance(ring.family_id, ring.n),
+    ),
+    warnings: [ntruScreenWarning, warning],
     warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
-    visual_scores: {
-      security: { score: 0.262 },
-      compactness: { score: 0.591 },
-      performance: { score: 0.6 },
-    },
+    notes: [note],
   });
-  const inapplicableNtt = {
-    ntt_condition: null,
-    ntt_friendly: null,
-    ntt_quality: null,
-    ntt_layers_remaining: null,
-    polynomial_factorization: null,
+  const power2NtruCandidate = (q, factorization, profileName, stddev, support, variance, bits) => {
+    const components = profileName.startsWith("ST")
+      ? [
+          compositeComponent("sparse_ternary_fixed_weight", "ST(l0=2, l1=0)", 0.375, 0.612372436, [-1, 1], { type: "sparse_ternary_fixed_weight", plus_weight: 96, minus_weight: 96, note: "fixed-weight approximation to iid sparse ternary" }),
+          compositeComponent("centered_binomial", "CBD(5)", 2.5, 1.58113883, [-5, 5], { type: "centered_binomial", eta: 5 }),
+          compositeComponent("centered_binomial", "CBD(8)", 4, 2, [-8, 8], { type: "centered_binomial", eta: 8 }),
+        ]
+      : [
+          compositeComponent("centered_binomial", "CBD(2)", 1, 1, [-2, 2], { type: "centered_binomial", eta: 2 }),
+          compositeComponent("centered_binomial", "CBD(8)", 4, 2, [-8, 8], { type: "centered_binomial", eta: 8 }),
+          compositeComponent("centered_binomial", "CBD(8)", 4, 2, [-8, 8], { type: "centered_binomial", eta: 8 }),
+        ];
+    const profile = compositeProfile(profileName, variance, stddev, support, components);
+    const gaussian = distributionProfile({
+      family: "discrete_gaussian",
+      name: "DGaussian(sigma=2.6)",
+      variance: 6.76,
+      stddev: 2.6,
+      support: ["Z"],
+      sampling: "discrete Gaussian sampler required; prototype does not certify sampler quality",
+      estimator: { type: "discrete_gaussian", stddev: 2.6 },
+    });
+    return ntruFixture({
+      ring: { family_id: "power2", family: "2-power cyclotomic NTRU", n: 512, cyclotomic_index: 1024, polynomial: "x^512 + 1", quotient: `Z_${q}[x] / (x^512 + 1)`, ntru_type: "circulant", preset: null },
+      modulus: { q, bits: 13 + (q >= 8192 ? 1 : 0), prime: true, q_minus_1_factorization: factorization, ntt_condition: "512 | q - 1; one layer below full split", ntt_friendly: true, ntt_quality: "selected_scale", two_adicity: 9, small_factor_weight: factorization.includes("23") ? 10 : 11 },
+      distribution: { family: "composite", name: profileName, fixed_weight: null, secret: clone(profile), error: clone(profile), calibration: { method: "gaussian_proxy_then_fast_distribution", sigma_lower_bound: 2.6, gaussian_proxy: gaussian, gaussian_proxy_bits: bits, chosen_fast_distribution: profileName, chosen_fast_stddev: stddev } },
+      security: ntruSecurity(bits, null, null, "usvp"),
+      note: "power-of-two cyclotomic NTRU candidate",
+    });
   };
-  const power2NtruCandidate = (q, factorization, profileName, stddev, support, bits) => ntruFixture(
-    {
-      family_id: "power2",
-      family: "2-power cyclotomic NTRU",
-      n: 512,
-      cyclotomic_index: 1024,
-      polynomial: "x^512 + 1",
-      quotient: `Z_${q}[x] / (x^512 + 1)`,
-      ntru_type: "circulant",
-      preset: null,
-    },
-    {
-      q,
-      bits: Math.floor(Math.log2(q)) + 1,
-      q_minus_1_factorization: factorization,
-      ntt_condition: "512 | q - 1; one layer below full split",
-      ntt_friendly: true,
-      ntt_quality: "selected_scale",
-      ntt_layers_remaining: null,
-      polynomial_factorization: null,
-    },
-    {
-      name: profileName,
-      fixed_weight: null,
-      secret: distribution(profileName, stddev, support),
-      error: distribution(profileName, stddev, support),
-    },
-    ntruSecurity(bits),
-  );
-  const hpsCandidate = (publicN, bits, errorStddev) => {
-    const n = publicN - 1;
-    return ntruFixture(
-      {
-        family_id: "hps",
-        family: "NTRU-HPS style",
-        n,
-        cyclotomic_index: null,
-        polynomial: `x^${publicN} - 1 with one relation removed by the estimator`,
-        quotient: `NTRU-HPS style mod q=2048, public polynomial degree N=${publicN}`,
-        ntru_type: "circulant",
-        preset: null,
-      },
-      { q: 2048, bits: 11, q_minus_1_factorization: "23 * 89", ...inapplicableNtt },
-      {
-        name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)",
-        fixed_weight: null,
-        secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-        error: distribution("SparseTernary(p=127, m=127)", errorStddev, [-1, 1]),
-      },
-      ntruSecurity(bits),
-    );
-  };
-  const hrssCandidate = (publicN, bits) => {
-    const n = publicN - 1;
-    return ntruFixture(
-      {
-        family_id: "hrss",
-        family: "NTRU-HRSS style",
-        n,
-        cyclotomic_index: null,
-        polynomial: `x^${publicN} - 1 with one relation removed by the estimator`,
-        quotient: `NTRU-HRSS style mod q=8192, public polynomial degree N=${publicN}`,
-        ntru_type: "circulant",
-        preset: null,
-      },
-      { q: 8192, bits: 13, q_minus_1_factorization: "8191", ...inapplicableNtt },
-      {
-        name: "UniformMod(3)",
-        fixed_weight: null,
-        secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-        error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-      },
-      ntruSecurity(bits),
-    );
-  };
-  const ntruPrimeCandidate = (
-    preset,
-    n,
-    q,
-    factorization,
-    signWeight,
-    fixedWeight,
-    stddev,
-    classical,
-    quantum,
-    category,
-  ) => ntruFixture(
-    {
-      family_id: "ntru_prime",
-      family: "Streamlined NTRU Prime",
-      n,
-      cyclotomic_index: null,
-      polynomial: `x^${n} - x - 1`,
-      quotient: `Z_${q}[x] / (x^${n} - x - 1)`,
-      ntru_type: "circulant",
-      preset,
-    },
-    {
-      q,
-      bits: Math.floor(Math.log2(q)) + 1,
-      q_minus_1_factorization: factorization,
-      ...inapplicableNtt,
-    },
-    {
-      name: `Xs=SparseTernary(p=${signWeight}, m=${signWeight}), Xe=UniformMod(3)`,
-      fixed_weight: fixedWeight,
-      secret: distribution(`SparseTernary(p=${signWeight}, m=${signWeight})`, stddev, [-1, 1]),
-      error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-    },
-    ntruSecurity(classical, quantum, category),
-  );
+  const hpsCandidate = (publicN, bits, errorStddev, errorVariance) => ntruFixture({
+    ring: { family_id: "hps", family: "NTRU-HPS style", n: publicN - 1, cyclotomic_index: null, polynomial: `x^${publicN} - 1 with one relation removed by the estimator`, quotient: `NTRU-HPS style mod q=2048, public polynomial degree N=${publicN}`, ntru_type: "circulant", preset: null },
+    modulus: { q: 2048, bits: 11, prime: false, q_minus_1_factorization: "23 * 89" },
+    distribution: { family: "uniform_mod / sparse_ternary_fixed_weight", name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)", fixed_weight: null, secret: uniformModProfile(), error: sparseFixedProfile(127, errorStddev, errorVariance), calibration: null },
+    security: ntruSecurity(bits, null, null, "bdd_hybrid"),
+    note: "HPS-like NTRU candidate",
+  });
+  const hrssCandidate = (publicN, bits) => ntruFixture({
+    ring: { family_id: "hrss", family: "NTRU-HRSS style", n: publicN - 1, cyclotomic_index: null, polynomial: `x^${publicN} - 1 with one relation removed by the estimator`, quotient: `NTRU-HRSS style mod q=8192, public polynomial degree N=${publicN}`, ntru_type: "circulant", preset: null },
+    modulus: { q: 8192, bits: 13, prime: false, q_minus_1_factorization: "8191" },
+    distribution: { family: "uniform_mod", name: "UniformMod(3)", fixed_weight: null, secret: uniformModProfile(), error: uniformModProfile(), calibration: null },
+    security: ntruSecurity(bits, null, null, "usvp"),
+    note: "HRSS-like NTRU candidate",
+  });
+  const ntruPrimeCandidate = (preset, n, q, factorization, signWeight, fixedWeight, stddev, variance, classical, quantum, category) => ntruFixture({
+    ring: { family_id: "ntru_prime", family: "Streamlined NTRU Prime", n, cyclotomic_index: null, polynomial: `x^${n} - x - 1`, quotient: `Z_${q}[x] / (x^${n} - x - 1)`, ntru_type: "circulant", preset },
+    modulus: { q, bits: Math.floor(Math.log2(q)) + 1, prime: true, q_minus_1_factorization: factorization },
+    distribution: { family: "sparse_ternary_fixed_weight / uniform_mod", name: `Xs=SparseTernary(p=${signWeight}, m=${signWeight}), Xe=UniformMod(3)`, fixed_weight: fixedWeight, secret: sparseFixedProfile(signWeight, stddev, variance), error: uniformModProfile(), calibration: null },
+    security: ntruSecurity(classical, quantum, category, "official-including-hybrid-minimum"),
+    note: "Streamlined NTRU Prime Round-3 preset; fixed-weight signs use a balanced estimator approximation.",
+  });
   const ntruPreviewFamilies = {
     power2: {
       generatedCandidates: 5,
       eligibleCandidates: 4,
-      candidate: power2NtruCandidate(
-        7681,
-        "2^9 * 3 * 5",
-        "ST(l0=2, l1=0) + CBD(5) + CBD(8)",
-        "2.62202212",
-        [-14, 14],
-        131.4,
-      ),
+      candidate: power2NtruCandidate(7681, "2^9 * 3 * 5", "ST(l0=2, l1=0) + CBD(5) + CBD(8)", 2.62202212, [-14, 14], 6.875, 131.4),
       alternatives: [
-        power2NtruCandidate(10753, "2^9 * 3 * 7", "CBD(2) + CBD(8) + CBD(8)", "3", [-18, 18], 130.2),
-        power2NtruCandidate(11777, "2^9 * 23", "CBD(2) + CBD(8) + CBD(8)", "3", [-18, 18], 128.4),
+        power2NtruCandidate(10753, "2^9 * 3 * 7", "CBD(2) + CBD(8) + CBD(8)", 3, [-18, 18], 9, 130.2),
+        power2NtruCandidate(11777, "2^9 * 23", "CBD(2) + CBD(8) + CBD(8)", 3, [-18, 18], 9, 128.4),
       ],
     },
     hps: {
       generatedCandidates: 4,
       eligibleCandidates: 4,
-      candidate: hpsCandidate(593, 128.6, "0.655022178"),
+      candidate: hpsCandidate(593, 128.6, 0.655022178, 0.429054054),
       alternatives: [
-        hpsCandidate(599, 129.9, "0.65172783"),
-        hpsCandidate(607, 131.8, "0.647411704"),
+        hpsCandidate(599, 129.9, 0.65172783, 0.424749164),
+        hpsCandidate(607, 131.8, 0.647411704, 0.419141914),
       ],
     },
     hrss: {
@@ -295,21 +377,65 @@
       generatedCandidates: 6,
       eligibleCandidates: 6,
       candidate: ntruPrimeCandidate(
-        "sntrup653", 653, 4621, "2^2 * 3 * 5 * 7 * 11", 144, 288, "0.664109439", 129, 117, 1,
+        "sntrup653", 653, 4621, "2^2 * 3 * 5 * 7 * 11", 144, 288, 0.664109439, 0.441041348, 129, 117, 1,
       ),
       alternatives: [
         ntruPrimeCandidate(
-          "sntrup761", 761, 4591, "2 * 3^3 * 5 * 17", 143, 286, "0.613042648", 153, 139, 2,
+          "sntrup761", 761, 4591, "2 * 3^3 * 5 * 17", 143, 286, 0.613042648, 0.375821288, 153, 139, 2,
         ),
         ntruPrimeCandidate(
-          "sntrup857", 857, 5167, "2 * 3^2 * 7 * 41", 161, 322, "0.612967608", 175, 159, 3,
+          "sntrup857", 857, 5167, "2 * 3^2 * 7 * 41", 161, 322, 0.612967608, 0.375729291, 175, 159, 3,
         ),
       ],
     },
   };
-  const LWE_CANDIDATE_POOL = {
-    generatedCandidates: 7168,
-    eligibleCandidates: 7168,
+  const LWE_CANDIDATE_POOL = { generatedCandidates: 105216, eligibleCandidates: 105216 };
+
+  const LWE_REQUEST = {
+    problem: "rlwe",
+    target_security: 128,
+    hard_problem_category: "lwe",
+    hard_problem_variant: "rlwe",
+    ring_family: "power2",
+    security_model: "classical",
+    red_cost_model: "matzov",
+    ntt_scale_power: 0,
+    min_q_bits: 2,
+    max_q_bits: 24,
+    min_n: 512,
+    max_n: 8192,
+    distribution: "auto",
+    secret_distribution: "auto",
+    error_distribution: "auto",
+    use_estimator: false,
+    estimator_timeout: 16,
+    validation_count: 1,
+    validation_attempts: 1,
+    intent: "",
+    use_llm: false,
+  };
+  const NTRU_REQUEST = {
+    problem: "ntru",
+    target_security: 128,
+    hard_problem_category: "ntru",
+    hard_problem_variant: "ring",
+    ring_family: "power2",
+    security_model: "classical",
+    red_cost_model: "matzov",
+    ntt_scale_power: 0,
+    min_q_bits: 2,
+    max_q_bits: 24,
+    min_n: 256,
+    max_n: 2048,
+    distribution: "auto",
+    secret_distribution: "auto",
+    error_distribution: "auto",
+    use_estimator: false,
+    estimator_timeout: 16,
+    validation_count: 3,
+    validation_attempts: 5,
+    intent: "",
+    use_llm: false,
   };
 
   function securityLevelForBits(bits) {
@@ -320,22 +446,28 @@
     return "NIST-V";
   }
 
-  function withSelection(candidate, payload) {
-    const selected = payload.securityModel === "quantum"
-      ? (payload.redCostModel === "adps16" ? candidate.security.adps16_quantum_bits : candidate.security.matzov_quantum_bits)
-      : (payload.redCostModel === "adps16" ? candidate.security.adps16_core_svp_bits : candidate.security.matzov_bits);
-    const target = Number(payload.targetSecurity) || 128;
+  function withSelection(candidate, request) {
+    const selected = request.security_model === "quantum"
+      ? (request.red_cost_model === "adps16" ? candidate.security.adps16_quantum_bits : candidate.security.matzov_quantum_bits)
+      : (request.red_cost_model === "adps16" ? candidate.security.adps16_core_svp_bits : candidate.security.matzov_bits);
+    const target = request.target_security;
     const hasEstimate = selected !== null && selected !== undefined;
     const meetsTarget = hasEstimate && selected >= target;
+    const margin = hasEstimate ? Math.round((selected - target) * 10) / 10 : null;
     candidate.selection = {
       target_security: target,
-      security_model: payload.securityModel || "classical",
+      security_model: request.security_model,
       selected_security_bits: selected,
-      margin_bits: hasEstimate ? Math.round((selected - target) * 10) / 10 : null,
+      margin_bits: margin,
       meets_target: meetsTarget,
       status: meetsTarget ? "target_met" : "target_unmet",
       security_level: securityLevelForBits(selected),
+      rank_score: candidate.problem === "ntru"
+        ? [hasEstimate ? 0 : 1, hasEstimate && !meetsTarget ? Math.abs(margin) * 10000 : 0, 0, candidate.ring.n, candidate.modulus.q, hasEstimate ? Math.max(0, margin) : 0, candidate.distribution.secret.stddev]
+        : [meetsTarget ? 0 : Math.abs(Math.min(0, margin)) * 10000, 0, candidate.ring.n, candidate.modulus.q, candidate.modulus.bits, candidate.modulus.ntt_layers_remaining, hasEstimate ? Math.max(0, margin) : 0, candidate.distribution.secret.stddev, -candidate.modulus.decomposition_score],
     };
+    candidate.visual_scores.security.bits = selected;
+    candidate.visual_scores.security.score = selected == null ? 0 : Math.round((selected / 512) * 10000) / 10000;
     return candidate;
   }
 
@@ -349,23 +481,35 @@
     const effectiveVariant = isNtru
       ? (family === "power2" && requestedVariant === "matrix" ? "matrix" : "ring")
       : requestedVariant;
-    const candidateFixture = isNtru ? familyFixture.candidate : lweCandidate;
-    const candidate = withSelection(clone(candidateFixture), payload);
-    if (isNtru && family === "power2") {
-      candidate.ring.ntru_type = effectiveVariant === "matrix" ? "matrix" : "circulant";
-    }
-    const candidatePool = isNtru ? familyFixture : LWE_CANDIDATE_POOL;
+    const baseRequest = clone(isNtru ? NTRU_REQUEST : LWE_REQUEST);
     const request = {
-      target_security: Number(payload.targetSecurity) || 128,
+      ...baseRequest,
+      target_security: Number(payload.targetSecurity ?? baseRequest.target_security),
       hard_problem_category: isNtru ? "ntru" : payload.hardProblemCategory || "lwe",
       hard_problem_variant: effectiveVariant,
       ring_family: isNtru ? family : payload.ringFamily || "power2",
       security_model: payload.securityModel || "classical",
       red_cost_model: payload.redCostModel || "matzov",
+      ntt_scale_power: Number(payload.nttScalePower ?? baseRequest.ntt_scale_power),
+      min_q_bits: Number(payload.minQBits ?? baseRequest.min_q_bits),
+      max_q_bits: Number(payload.maxQBits ?? baseRequest.max_q_bits),
+      distribution: payload.distribution || payload.secretDistribution || "auto",
+      secret_distribution: payload.secretDistribution || payload.distribution || "auto",
+      error_distribution: payload.errorDistribution || payload.distribution || "auto",
+      use_estimator: Boolean(payload.useEstimator),
+      estimator_timeout: payload.useEstimator ? Number(payload.estimatorTimeout || 240) : baseRequest.estimator_timeout,
+      intent: String(payload.intent || ""),
+      use_llm: Boolean(payload.useLLM),
     };
-    const alternativeFixtures = isNtru ? familyFixture.alternatives : lweAlternativeCandidates;
+    const candidateFixture = isNtru ? familyFixture.candidate : lweCandidates[0];
+    const candidate = withSelection(clone(candidateFixture), request);
+    if (isNtru && family === "power2") {
+      candidate.ring.ntru_type = effectiveVariant === "matrix" ? "matrix" : "circulant";
+    }
+    const candidatePool = isNtru ? familyFixture : LWE_CANDIDATE_POOL;
+    const alternativeFixtures = isNtru ? familyFixture.alternatives : lweCandidates.slice(1);
     const alternatives = alternativeFixtures.map((fixture) => {
-      const alternative = withSelection(clone(fixture), payload);
+      const alternative = withSelection(clone(fixture), request);
       if (isNtru && family === "power2") {
         alternative.ring.ntru_type = effectiveVariant === "matrix" ? "matrix" : "circulant";
       }
@@ -420,7 +564,13 @@
       recommendation: candidate,
       alternatives,
       validation,
-      search: { elapsed_ms: 0, generated_candidates: candidatePool.generatedCandidates },
+      search: {
+        elapsed_ms: 0,
+        generated_candidates: candidatePool.generatedCandidates,
+        viable_candidates: candidatePool.eligibleCandidates,
+        modulus_candidates: isNtru ? candidatePool.eligibleCandidates : 411,
+        strategy: isNtru ? ["ring family first", "fixed preview candidate pool"] : ["ring family first", "fixed default fast-screen pool"],
+      },
       next_question: "Run the local service to evaluate parameters and bind them to a concrete scheme.",
       next_step_code: "bind_scheme_constraints",
     };
@@ -487,26 +637,30 @@
       formula: "((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2",
       success_condition: "|E| <= Delta",
       dimensions: { m: 512, n: 256 },
-      delta: "832",
+      delta: "8.3200000000000000000000000000000000000000E+2",
       precision_bits: 512,
       precision_decimal_digits: 167,
       tail_bits: 128,
-      single_coefficient_dfr_log2: "-147.135837014246",
-      vector_dfr_log2_before_ecc: "-139.135837014246",
-      single_coefficient_failure_probability: "5.10152032873539E-45",
-      vector_failure_probability_before_ecc: "1.30598920415626E-42",
+      single_coefficient_dfr_log2: "-147.135837014245977165109554",
+      vector_dfr_log2_before_ecc: "-139.135837014245977165109554",
+      single_coefficient_failure_probability: "5.1015203287353941041218403805889679678903E-45",
+      vector_failure_probability_before_ecc: "1.3059892041562608906551911374307757997799E-42",
       single_coefficient_semantics: "identical_coefficient_model",
       vector_aggregation: "union_bound",
       tail_probability_upper_bound: "0",
-      error_support: { size: 17073, minimum: "-10858", maximum: "10826" },
+      error_support: {
+        size: 17073,
+        minimum: "-1.0858000000000000000000000000000000000000E+4",
+        maximum: "1.0826000000000000000000000000000000000000E+4",
+      },
       distributions: {
-        s: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
-        e: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
-        e1: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
-        r: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
-        e2: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
-        ec1: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
-        ec2: { support_size: 209, support: ["-104", "104"], tail_probability_upper_bound: "0" },
+        s: { support_size: 7, support: ["-3.0000000000000000000000000000000000000000E+0", "3.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        e: { support_size: 7, support: ["-3.0000000000000000000000000000000000000000E+0", "3.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        e1: { support_size: 5, support: ["-2.0000000000000000000000000000000000000000E+0", "2.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        r: { support_size: 7, support: ["-3.0000000000000000000000000000000000000000E+0", "3.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        e2: { support_size: 5, support: ["-2.0000000000000000000000000000000000000000E+0", "2.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        ec1: { support_size: 5, support: ["-2.0000000000000000000000000000000000000000E+0", "2.0000000000000000000000000000000000000000E+0"], tail_probability_upper_bound: "0" },
+        ec2: { support_size: 209, support: ["-1.0400000000000000000000000000000000000000E+2", "1.0400000000000000000000000000000000000000E+2"], tail_probability_upper_bound: "0" },
       },
       warnings: [unionBoundWarning],
       warning_codes: ["dfr_union_bound"],
@@ -706,6 +860,44 @@
     cyclic: dfr.ntru,
     negacyclic: ntruNegacyclicDfr,
     ntru_prime: ntruPrimeDfr,
+  };
+  dfr.requests = {
+    lwe: {
+      type: "lwe",
+      m: 512,
+      n: 256,
+      delta: "832",
+      precisionBits: 512,
+      tailBits: 128,
+      s: { type: "centered_binomial", eta: "3" },
+      e: { type: "centered_binomial", eta: "3" },
+      e1: { type: "centered_binomial", eta: "2" },
+      r: { type: "centered_binomial", eta: "3" },
+      e2: { type: "centered_binomial", eta: "2" },
+      ec1: { type: "kyber_nearest_compression", q: "3329", d: "10" },
+      ec2: { type: "kyber_nearest_compression", q: "3329", d: "4" },
+    },
+    ntru: {
+      cyclic: {
+        type: "ntru",
+        ringType: "cyclic",
+        n: 509,
+        delta: "1024",
+        p0: "3",
+        p1: "0",
+        p2: "1",
+        p3: "0",
+        precisionBits: 512,
+        tailBits: 128,
+        g: { type: "centered_binomial", eta: "1" },
+        f: { type: "centered_binomial", eta: "1" },
+        s: { type: "centered_binomial", eta: "1" },
+        e: { type: "centered_binomial", eta: "1" },
+        m: { type: "centered_binomial", eta: "1" },
+      },
+      negacyclic: { type: "ntru", ringType: "negacyclic", n: 64, delta: "40", p0: "1", p1: "0", p2: "0", p3: "0", precisionBits: 512, tailBits: 128, g: { type: "custom_pmf", pmf: { 0: "0.5", 1: "0.5" } }, s: { type: "custom_pmf", pmf: { 0: "0.5", 1: "0.5" } }, f: { type: "custom_pmf", pmf: { 0: "1" } }, e: { type: "custom_pmf", pmf: { 0: "1" } }, m: { type: "custom_pmf", pmf: { 0: "1" } } },
+      ntru_prime: { type: "ntru", ringType: "ntru_prime", n: 64, delta: "40", p0: "1", p1: "0", p2: "0", p3: "0", precisionBits: 512, tailBits: 128, g: { type: "custom_pmf", pmf: { 0: "0.5", 1: "0.5" } }, s: { type: "custom_pmf", pmf: { 0: "0.5", 1: "0.5" } }, f: { type: "custom_pmf", pmf: { 0: "1" } }, e: { type: "custom_pmf", pmf: { 0: "1" } }, m: { type: "custom_pmf", pmf: { 0: "1" } } },
+    },
   };
 
   window.EASYLATTICE_PREVIEW_FIXTURES = {
