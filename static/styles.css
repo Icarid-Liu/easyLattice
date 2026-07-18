@@ -386,11 +386,19 @@ textarea {
 .primary-button:disabled,
 .secondary-button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 1;
 }
 
+.primary-button:disabled,
 .primary-button:disabled:hover {
-  background: var(--green);
+  background: #587a75;
+  color: #fff;
+}
+
+.secondary-button:disabled {
+  border-color: #c8d1cd;
+  background: #f1f4f2;
+  color: #5f6c68;
 }
 
 .button-icon {
@@ -447,11 +455,19 @@ textarea {
 
 .status-pill.done {
   color: var(--green-dark);
+  border-color: #b9d8d2;
   background: #e8f5f2;
+}
+
+.status-pill.screened {
+  color: var(--blue);
+  border-color: #bfd4df;
+  background: #eef7fb;
 }
 
 .status-pill.warning {
   color: var(--amber);
+  border-color: #e7cf91;
   background: #fff8e6;
 }
 
@@ -619,6 +635,11 @@ dd {
 
 .dfr-results {
   margin-bottom: 18px;
+}
+
+.stale-result {
+  opacity: 0.82;
+  transition: opacity 160ms ease;
 }
 
 .dfr-copy-row {

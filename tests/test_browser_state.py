@@ -392,7 +392,172 @@ class BrowserRequestStateTests(unittest.TestCase):
             " && searchState.snapshot().resultCurrent"
         )
         self.page.evaluate(
+            """(() => {
+              const select = document.querySelector('#language-select');
+              select.value = 'en';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => {
+                  const rows = Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    status: document.querySelector('#status-pill').textContent,
+                    validation: rows['Validation status'],
+                    profile: rows['Estimator profile'],
+                    attempted: rows['Candidates attempted'],
+                    source: rows.Source,
+                    next: rows.Next,
+                    invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
+                    plaintextJson: Boolean(document.querySelector('#alternatives pre, #dfr-results pre')),
+                  };
+                })()"""
+            ),
+            {
+                "status": "Fast screened",
+                "validation": "Fast screened",
+                "profile": "enhanced",
+                "attempted": "0",
+                "source": "Fast security screen",
+                "next": "Bind this recommendation to concrete scheme constraints before use.",
+                "invalidText": False,
+                "plaintextJson": False,
+            },
+        )
+
+        self.page.evaluate(
+            """(() => {
+              const select = document.querySelector('#language-select');
+              select.value = 'zh';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  status: document.querySelector('#status-pill').textContent,
+                  warning: document.querySelector('#warnings').textContent.includes('尚未绑定到具体方案'),
+                  invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
+                }))()"""
+            ),
+            {"status": "已快速筛选", "warning": True, "invalidText": False},
+        )
+
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'en';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+              document.querySelector('#use-estimator').click();
+              document.querySelector('#parameter-form button[type=submit]').click();
+            })()"""
+        )
+        self.page.wait_for(
+            "searchState.snapshot().resultCurrent"
+            " && searchState.snapshot().result.validation.status === 'failed'"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => {
+                  const rows = Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    status: document.querySelector('#status-pill').textContent,
+                    validation: rows['Validation status'],
+                    source: rows.Source,
+                    warning: document.querySelector('#warnings').textContent.includes('runtime or configuration is unavailable'),
+                  };
+                })()"""
+            ),
+            {
+                "status": "Validation failed",
+                "validation": "Validation failed",
+                "source": "Fast security screen",
+                "warning": True,
+            },
+        )
+        self.page.evaluate(
+            """(() => {
+              const select = document.querySelector('#language-select');
+              select.value = 'zh';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  status: document.querySelector('#status-pill').textContent,
+                  warning: document.querySelector('#warnings').textContent.includes('运行环境或配置不可用'),
+                }))()"""
+            ),
+            {"status": "验证失败", "warning": True},
+        )
+
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'en';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+              document.querySelector('#use-estimator').click();
+              document.querySelector('input[name=hardProblem][value="ntru:ring"]').click();
+              const family = document.querySelector('#ring-family');
+              family.value = 'ntru_prime';
+              family.dispatchEvent(new Event('input', { bubbles: true }));
+              family.dispatchEvent(new Event('change', { bubbles: true }));
+              document.querySelector('#parameter-form button[type=submit]').click();
+            })()"""
+        )
+        self.page.wait_for(
+            "searchState.snapshot().resultCurrent"
+            " && searchState.snapshot().result.recommendation.ring.preset === 'sntrup653'"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => {
+                  const instance = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  const security = Object.fromEntries([...document.querySelectorAll('#security-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    preset: instance.Preset,
+                    fixedWeight: instance['Fixed weight'],
+                    ntruType: instance['NTRU type'],
+                    nistCategory: security['NIST category'],
+                    cyclotomic: 'Cyclotomic' in instance,
+                    ntt: 'NTT' in instance,
+                    split: 'Split' in instance,
+                    nttQuality: 'NTT quality' in instance,
+                    invalidText: /\b(undefined|null)\b/.test(document.querySelector('#search-results').innerText),
+                  };
+                })()"""
+            ),
+            {
+                "preset": "sntrup653",
+                "fixedWeight": "288",
+                "ntruType": "circulant",
+                "nistCategory": "1",
+                "cyclotomic": False,
+                "ntt": False,
+                "split": False,
+                "nttQuality": False,
+                "invalidText": False,
+            },
+        )
+
+        self.page.evaluate(
             "document.querySelector('input[name=workspaceMode][value=dfr]').click()"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  single: document.querySelector('#dfr-single').textContent,
+                  vector: document.querySelector('#dfr-vector').textContent,
+                  type: dfrState.snapshot().result.type,
+                }))()"""
+            ),
+            {"single": "-147.14", "vector": "-139.14", "type": "lwe"},
         )
         before_switch = self.page.evaluate("dfrState.snapshot().revision")
         self.assertFalse(
@@ -419,6 +584,66 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "resultType": "ntru",
                 "copyDisabled": False,
             },
+        )
+
+        expected_rings = {
+            "cyclic": ("x^509 - 1", "0", "1"),
+            "negacyclic": ("x^509 + 1", "0", "509"),
+            "ntru_prime": ("x^509 - x - 1", "1", "509"),
+        }
+        for ring_type, (polynomial, worst, profiles) in expected_rings.items():
+            self.page.evaluate(
+                f"""(() => {{
+                  const select = document.querySelector('[name=dfrRingType]');
+                  select.value = '{ring_type}';
+                  select.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                  document.querySelector('#dfr-form button[type=submit]').click();
+                }})()"""
+            )
+            self.page.wait_for(
+                f"dfrState.snapshot().resultCurrent"
+                f" && dfrState.snapshot().result.ring_type === '{ring_type}'"
+            )
+            rendered = self.page.evaluate(
+                """(() => {
+                  const rows = Object.fromEntries([...document.querySelectorAll('#dfr-calculation-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    single: document.querySelector('#dfr-single').textContent,
+                    vector: document.querySelector('#dfr-vector').textContent,
+                    ringType: rows['Polynomial ring'],
+                    polynomial: rows['Ring polynomial'],
+                    worst: rows['Worst coefficient index'],
+                    profiles: rows['Distinct coefficient profiles'],
+                    warning: document.querySelector('#dfr-warnings').textContent,
+                    invalidText: /\b(undefined|null)\b/.test(document.querySelector('#dfr-results').innerText),
+                  };
+                })()"""
+            )
+            self.assertEqual(rendered["single"], "-552.23")
+            self.assertEqual(rendered["vector"], "-543.24")
+            self.assertEqual(rendered["ringType"], ring_type)
+            self.assertEqual(rendered["polynomial"], polynomial)
+            self.assertEqual(rendered["worst"], worst)
+            self.assertEqual(rendered["profiles"], profiles)
+            self.assertIn("union bound", rendered["warning"])
+            self.assertIn("outside this module", rendered["warning"])
+            self.assertFalse(rendered["invalidText"])
+            if ring_type == "ntru_prime":
+                self.assertIn("makes no independence claim", rendered["warning"])
+
+        self.page.evaluate(
+            """(() => {
+              const select = document.querySelector('#language-select');
+              select.value = 'zh';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertTrue(
+            self.page.evaluate(
+                "document.querySelector('#dfr-warnings').textContent.includes('不作独立性假设')"
+            )
         )
 
 
