@@ -10,9 +10,11 @@ This directory is a Docker Space template for the public live backend. Unlike
 
 The Docker Space uses the Hugging Face Docker SDK on port `7860`, installs both
 estimator profiles, and sets a 240 second default estimator timeout. The
-standard profile is `malb/lattice-estimator`; the enhanced profile is
+standard profile is `malb/lattice-estimator`, pinned to revision
+`3e48ef421ec256afddb3e7d2249a77eab6e9ba12`; the enhanced profile is
 `identitymapping/enhanced_lattice-estimator`, pinned to revision
-`876b66173f4354a96ddafc0ce3a79767ec43c6d4` by the Dockerfile.
+`876b66173f4354a96ddafc0ce3a79767ec43c6d4`. Both checkouts are detached at
+their exact revisions by the Dockerfile.
 
 ## Deploy
 
@@ -99,3 +101,11 @@ with your GitHub Pages origin, for example:
 ```text
 https://icarid-liu.github.io
 ```
+
+CORS is not access control: it only limits which browser origins may read
+responses, and it does not authenticate users or stop scripts and other
+non-browser clients from calling the API directly. Do not expose the
+compute-intensive estimator or DFR endpoints as an unrestricted public
+service. Require either a private Space or an authenticated, rate-limited
+gateway in front of those endpoints. Configure `EASYLATTICE_ALLOWED_ORIGINS`
+as an additional browser-origin restriction, not as the security boundary.

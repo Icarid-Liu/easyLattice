@@ -19,7 +19,9 @@ Do not upload only `deploy/huggingface-estimator`; the worker imports
 The container:
 
 - starts from a SageMath image;
-- clones `malb/lattice-estimator` into `/opt/lattice-estimator`;
+- checks out `malb/lattice-estimator` at pinned revision
+  `3e48ef421ec256afddb3e7d2249a77eab6e9ba12` into
+  `/opt/lattice-estimator`;
 - checks out `identitymapping/enhanced_lattice-estimator` at pinned revision
   `876b66173f4354a96ddafc0ce3a79767ec43c6d4` into
   `/opt/enhanced-lattice-estimator`;
@@ -80,7 +82,21 @@ Synchronous debugging endpoint:
 ```bash
 curl -X POST https://YOUR-SPACE.hf.space/estimate \
   -H 'Content-Type: application/json' \
-  -d '{"timeout_seconds": 240, "payload": {...}}'
+  -d '{
+    "timeout_seconds": 240,
+    "payload": {
+      "problem": "lwe",
+      "n": 512,
+      "q": 257,
+      "estimator_profile": "standard",
+      "hard_problem_variant": "lwe",
+      "ring_degree": 512,
+      "distribution": {
+        "estimator": {"type": "centered_binomial", "eta": 1}
+      },
+      "per_attack_timeout": 30
+    }
+  }'
 ```
 
 The public frontend should use `/jobs` plus polling. Avoid long browser

@@ -9,7 +9,10 @@ RUN apt-get update \
 
 COPY . /app
 
-RUN git clone --depth=1 https://github.com/malb/lattice-estimator.git /opt/lattice-estimator
+RUN git init /opt/lattice-estimator \
+    && git -C /opt/lattice-estimator remote add origin https://github.com/malb/lattice-estimator.git \
+    && git -C /opt/lattice-estimator fetch --depth=1 origin 3e48ef421ec256afddb3e7d2249a77eab6e9ba12 \
+    && git -C /opt/lattice-estimator checkout --detach FETCH_HEAD
 RUN git init /opt/enhanced-lattice-estimator \
     && git -C /opt/enhanced-lattice-estimator remote add origin https://github.com/identitymapping/enhanced_lattice-estimator.git \
     && git -C /opt/enhanced-lattice-estimator fetch --depth=1 origin 876b66173f4354a96ddafc0ce3a79767ec43c6d4 \

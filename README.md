@@ -263,8 +263,13 @@ cloned paths as `lattice_estimator_path` and
 `enhanced_lattice_estimator_path`. If the config already exists, add `--force`
 to regenerate it with those paths.
 
-Sage remains optional for fast-screen mode and is required only when
-`useEstimator=true`. Manual startup is also supported:
+Sage remains optional for fast-screen mode. Local estimator mode
+(`useEstimator=true` with no `estimator.remote_url`) requires Sage and the
+source path for the selected profile: the standard path for LWE/LWR/NTRU, or
+the enhanced path for RLWE/MLWE/RLWR/MLWR. Configure both source paths to
+support every variant locally. When `estimator.remote_url` is configured,
+estimator requests are sent to that worker, so the local server does not need
+Sage or either estimator source path. Manual startup is also supported:
 
 ```bash
 python3 -m app.server
@@ -296,14 +301,16 @@ cp config.local.example.json config.local.json
 }
 ```
 
-- `estimator.sage_binary`: `sage` or an absolute Sage executable path;
+- `estimator.sage_binary`: `sage` or an absolute Sage executable path, required
+  only for local estimator mode;
 - `estimator.lattice_estimator_path`: absolute path to
-  `malb/lattice-estimator`, required for standard-profile validation;
+  `malb/lattice-estimator`, required for local standard-profile validation;
 - `estimator.enhanced_lattice_estimator_path`: absolute path to
-  `identitymapping/enhanced_lattice-estimator`, required for structured
+  `identitymapping/enhanced_lattice-estimator`, required for local structured
   RLWE/MLWE/RLWR/MLWR validation;
-- `estimator.default_timeout_seconds`: request-level estimator timeout;
-- `estimator.remote_url`: optional Hugging Face estimator worker URL;
+- `estimator.default_timeout_seconds`: local estimator request timeout;
+- `estimator.remote_url`: optional estimator worker URL; when set, it bypasses
+  local Sage and both local source paths;
 - `estimator.remote_timeout_seconds`: remote-worker timeout, intended for
   180-300 second runs;
 - `estimator.remote_poll_interval_seconds`: remote-job polling interval;
@@ -421,10 +428,12 @@ DFR calculator is not bound to a concrete encryption/signature encoding or an
 error-correction code, and it does not compute rejection-sampling times,
 smoothing-parameter conditions, or complete reduction-loss accounting.
 
-The `matzov` cost option means the classical ADPS16 Matzov-style dual-hybrid
-estimate. The `adps16` option reports the ADPS16 CoreSVP/uSVP estimate. With
-Sage validation enabled, easyLattice calls `lattice-estimator` and rounds bit
-counts downward to avoid overstating a lower bound.
+The `matzov` and `adps16` options select reduction-cost models, not individual
+attack aliases. For LWE-family validation, the selected model is applied to
+each of `usvp`, `dual_hybrid`, and `bdd_hybrid`; the estimator evaluates both
+MATZOV and ADPS16 in classical and quantum modes as described above. With
+estimator validation enabled, easyLattice rounds selected bit counts downward
+to avoid overstating a lower bound.
 
 ## Planned Extension Points
 

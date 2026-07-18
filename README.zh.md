@@ -228,8 +228,11 @@ Sage/lattice-estimator 路径，运行一个小型 smoke test，并在
 `lattice_estimator_path` 和 `enhanced_lattice_estimator_path`。如果配置已存在，请加
 `--force` 重新生成并写入这些路径。
 
-快速筛选模式仍不强制需要 Sage；只有 `useEstimator=true` 时才需要 Sage。也可手动
-启动：
+快速筛选模式仍不需要 Sage。本地 estimator 模式（`useEstimator=true` 且未配置
+`estimator.remote_url`）需要 Sage 和当前 profile 对应的源码路径：LWE/LWR/NTRU
+需要标准路径，RLWE/MLWE/RLWR/MLWR 需要增强路径。若要在本地支持全部变体，应同时
+配置两条源码路径。配置 `estimator.remote_url` 后，estimator 请求会发送给远程
+worker，本地服务不再需要 Sage 或任一 estimator 源码路径。也可手动启动：
 
 ```bash
 python3 -m app.server
@@ -261,14 +264,16 @@ cp config.local.example.json config.local.json
 }
 ```
 
-- `estimator.sage_binary`：`sage` 或 Sage 可执行文件的绝对路径；
+- `estimator.sage_binary`：`sage` 或 Sage 可执行文件的绝对路径；仅本地 estimator
+  模式需要；
 - `estimator.lattice_estimator_path`：`malb/lattice-estimator` 的绝对路径；
-  标准 profile 验证需要该路径；
+  本地标准 profile 验证需要该路径；
 - `estimator.enhanced_lattice_estimator_path`：
-  `identitymapping/enhanced_lattice-estimator` 的绝对路径；对结构化
-  RLWE/MLWE/RLWR/MLWR 验证为必填；
-- `estimator.default_timeout_seconds`：estimator 验证的请求级超时；
-- `estimator.remote_url`：可选的 Hugging Face estimator worker URL；
+  `identitymapping/enhanced_lattice-estimator` 的绝对路径；本地结构化
+  RLWE/MLWE/RLWR/MLWR 验证需要该路径；
+- `estimator.default_timeout_seconds`：本地 estimator 请求超时；
+- `estimator.remote_url`：可选的 estimator worker URL；设置后会绕过本地 Sage 和
+  两条本地源码路径；
 - `estimator.remote_timeout_seconds`：远程 worker 超时，面向 180-300 秒运行；
 - `estimator.remote_poll_interval_seconds`：远程任务轮询间隔；
 - `llm.enabled`：默认关闭；只有需要 LLM 意图解析时设为 `true`；
@@ -379,9 +384,10 @@ python3 -m unittest discover -s tests
 该原型不是生产级参数认证工具。独立 DFR 计算器尚未绑定到具体的加密/签名编码或
 纠错码，也不会计算拒绝采样时间、smoothing 参数条件或完整的规约损失核算。
 
-`matzov` 代价选项表示经典 ADPS16 Matzov-style dual-hybrid 估计；`adps16` 选项
-报告 ADPS16 CoreSVP/uSVP 估计。启用 Sage 验证时，easyLattice 会调用
-`lattice-estimator` 并向下取整安全比特，避免高估下界。
+`matzov` 和 `adps16` 选项选择的是 reduction-cost model，而不是某个攻击的别名。
+对 LWE 族验证，所选模型会分别应用到 `usvp`、`dual_hybrid` 和 `bdd_hybrid`；如前文
+所述，estimator 会在经典和量子模式下评估 MATZOV 与 ADPS16。启用 estimator 验证时，
+easyLattice 会向下取整所选安全比特，避免高估下界。
 
 ## 计划扩展点
 
