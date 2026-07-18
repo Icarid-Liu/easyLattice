@@ -14,6 +14,7 @@ from app.ntru_search import (
 
 
 def estimator_success(bits=140.0, complete=True, commit="ntru123", variant="ring"):
+    ntru_type = "matrix" if variant == "matrix" else "circulant"
     models = {
         model: {
             mode: {
@@ -32,6 +33,7 @@ def estimator_success(bits=140.0, complete=True, commit="ntru123", variant="ring
         "complete": complete,
         "estimator_profile": "standard",
         "hard_problem_variant": variant,
+        "ntru_type": ntru_type,
         "estimator_commit": commit,
         "modes": models["adps16"],
         "models": models,
@@ -64,6 +66,7 @@ def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
         "complete": False,
         "estimator_profile": "standard",
         "hard_problem_variant": "ring",
+        "ntru_type": "circulant",
         "estimator_commit": "partial-ntru",
         "modes": models["adps16"],
         "models": models,
@@ -716,10 +719,23 @@ class NTRUSearchTests(unittest.TestCase):
     def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
         malformed = estimator_success()
         malformed["models"]["matzov"]["classical"]["min_bits"] = float("inf")
+        missing_ntru_type = estimator_success()
+        del missing_ntru_type["ntru_type"]
+        contradictory_ntru_type = estimator_success()
+        contradictory_ntru_type["ntru_type"] = "matrix"
+        contradictory_parameter_type = estimator_success()
+        contradictory_parameter_type["parameters"] = {
+            "estimator_profile": "standard",
+            "hard_problem_variant": "ring",
+            "ntru_type": "matrix",
+        }
         cases = {
             "non_object": "not an estimator response",
             "wrong_profile": estimator_success() | {"estimator_profile": "enhanced"},
             "wrong_variant": estimator_success(variant="matrix"),
+            "missing_ntru_type": missing_ntru_type,
+            "contradictory_ntru_type": contradictory_ntru_type,
+            "contradictory_parameter_type": contradictory_parameter_type,
             "nonfinite_bits": malformed,
         }
 

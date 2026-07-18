@@ -119,7 +119,11 @@ Each payload must set `problem`, `estimator_profile`, and
 `ntru/standard` with `matrix` or `ring`. Missing or mismatched routes return
 `invalid_estimator_route` before Sage starts; the worker never defaults an
 enhanced request to LWE. Responses are emitted as strict JSON after bounded
-recursive metadata sanitization.
+recursive metadata sanitization. NTRU payloads must also use
+`ntru_type=matrix` for `hard_problem_variant=matrix`, or
+`ntru_type=circulant` for supported ring/HPS/HRSS/NTRU Prime variants.
+Unpaired Unicode surrogates in response keys or values are escaped before
+UTF-8 output.
 LWE/LWR and NTRU jobs use `standard`; RLWE/MLWE/RLWR/MLWR jobs use `enhanced`.
 The full application adds this field automatically. Direct worker callers must
 send the correct profile themselves. For example, a plain LWE payload uses:

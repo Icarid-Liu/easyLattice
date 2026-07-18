@@ -1,4 +1,5 @@
 import importlib.util
+from io import BytesIO
 import json
 import os
 import re
@@ -18,7 +19,11 @@ from app.estimator_runner import (
     run_ntru,
     summarize_attacks,
 )
-from app.estimator_contract import EstimatorRouteError, structure_correction_metadata
+from app.estimator_contract import (
+    EstimatorRouteError,
+    ntru_type_for_variant,
+    structure_correction_metadata,
+)
 
 
 FAKE_OO = object()
@@ -188,6 +193,26 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_estimator_route")
         self.assertIn("lwe/enhanced", raised.exception.message)
         self.assertEqual(FakeLWE.calls, [])
+
+    def test_ntru_variant_type_mapping_covers_all_circulant_families(self):
+        self.assertEqual(ntru_type_for_variant("matrix"), "matrix")
+        for variant in ("ring", "hps", "hrss", "ntru_prime"):
+            with self.subTest(variant=variant):
+                self.assertEqual(ntru_type_for_variant(variant), "circulant")
+
+    def test_runner_rejects_contradictory_ntru_type_before_attack_execution(self):
+        payload = {
+            "problem": "ntru",
+            "estimator_profile": "standard",
+            "hard_problem_variant": "ring",
+            "ntru_type": "matrix",
+        }
+
+        with self.assertRaises(EstimatorRouteError) as raised:
+            run_ntru(payload)
+
+        self.assertEqual(raised.exception.code, "invalid_estimator_route")
+        self.assertIn("requires ntru_type=circulant", raised.exception.message)
 
     def test_summaries_distinguish_partial_and_complete_results(self):
         partial = summarize_attacks(
@@ -576,6 +601,7 @@ class EstimatorRunnerTests(unittest.TestCase):
             "error_distribution": distribution,
             "estimator_profile": "standard",
             "hard_problem_variant": "ring",
+            "ntru_type": "circulant",
             "ring_degree": 512,
             "per_attack_timeout": 1,
         }
@@ -633,6 +659,47 @@ class EstimatorSpaceAppTests(unittest.TestCase):
             result = self.space_app.run_estimator_subprocess(payload, 5)
         self.assertEqual(result["code"], "invalid_estimator_route")
         run.assert_not_called()
+
+    def test_worker_rejects_contradictory_ntru_type_before_subprocess(self):
+        payload = {
+            "problem": "ntru",
+            "n": 509,
+            "q": 2048,
+            "secret_distribution": {
+                "estimator": {"type": "centered_binomial", "eta": 2},
+            },
+            "error_distribution": {
+                "estimator": {"type": "centered_binomial", "eta": 2},
+            },
+            "estimator_profile": "standard",
+            "hard_problem_variant": "ring",
+            "ntru_type": "matrix",
+        }
+
+        with self.assertRaises(EstimatorRouteError) as raised:
+            self.space_app.validate_payload(payload)
+        self.assertEqual(raised.exception.code, "invalid_estimator_route")
+
+        with patch.object(self.space_app.subprocess, "run") as run:
+            result = self.space_app.run_estimator_subprocess(payload, 5)
+        self.assertEqual(result["code"], "invalid_estimator_route")
+        run.assert_not_called()
+
+    def test_worker_serialization_replaces_lone_unicode_surrogates(self):
+        handler = object.__new__(self.space_app.EstimatorHandler)
+        handler.wfile = BytesIO()
+        handler.send_response = lambda _status: None
+        handler.write_cors_headers = lambda: None
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+
+        handler.write_json({"valid": "中文", "bad\ud800": "value\udfff"})
+
+        raw = handler.wfile.getvalue()
+        decoded = raw.decode("utf-8", errors="strict")
+        payload = json.loads(decoded)
+        self.assertEqual(payload["valid"], "中文")
+        self.assertEqual(payload["bad\\ud800"], "value\\udfff")
 
     def test_invalid_profile_is_rejected_with_stable_error(self):
         with self.assertRaisesRegex(

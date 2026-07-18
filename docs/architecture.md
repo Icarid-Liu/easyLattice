@@ -59,7 +59,10 @@ dispatch, runner, worker request, and response-normalization boundaries. It
 does not infer a missing variant. Invalid tuples return stable route errors
 before estimator attacks execute. `app.json_safety` recursively bounds remote
 metadata by depth and item count, removes non-finite JSON values, and feeds only
-sanitized copies into validation and API responses.
+sanitized copies into validation and API responses. NTRU route validation also
+binds `matrix` to `ntru_type=matrix` and every supported circulant family to
+`ntru_type=circulant`. String sanitization escapes lone Unicode surrogates so
+`ensure_ascii=false` responses remain strictly UTF-8 encodable.
 
 Routing is fixed: LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use
 `enhanced`. LWE-family runs evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid`

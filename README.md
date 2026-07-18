@@ -120,7 +120,10 @@ RLWE/MLWE/RLWR/MLWR, and `standard` with NTRU `matrix`/`ring`. Missing,
 unknown, or mismatched variants fail closed with `invalid_estimator_route`
 before attacks run. Remote response metadata is recursively bounded and made
 strictly JSON-safe; non-finite diagnostics become `null`, while non-finite
-security fields still fail validation.
+security fields still fail validation. NTRU routes additionally require
+`matrix -> ntru_type=matrix` and all supported circulant variants
+(`ring`, HPS, HRSS, and NTRU Prime) to use `ntru_type=circulant`. Lone Unicode
+surrogates in untrusted metadata are escaped before UTF-8 serialization.
 
 Recommendation responses distinguish selection from validation:
 

@@ -247,6 +247,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
         payload.get("problem"),
         payload.get("estimator_profile"),
         payload.get("hard_problem_variant"),
+        payload.get("ntru_type"),
     )
 
     n = int(payload.get("n", 0))
@@ -257,9 +258,6 @@ def validate_payload(payload: dict[str, Any]) -> None:
         raise ValueError("q must be at least 2 and at most 64 bits")
 
     if problem == "ntru":
-        ntru_type = str(payload.get("ntru_type", "circulant"))
-        if ntru_type not in {"circulant", "matrix"}:
-            raise ValueError("ntru_type must be circulant or matrix")
         require_distribution(payload, "secret_distribution")
         require_distribution(payload, "error_distribution")
     elif "secret_distribution" in payload or "error_distribution" in payload:
@@ -366,6 +364,7 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
             payload.get("problem"),
             payload.get("estimator_profile"),
             payload.get("hard_problem_variant"),
+            payload.get("ntru_type"),
         )
     except EstimatorRouteError as exc:
         return exc.as_result()

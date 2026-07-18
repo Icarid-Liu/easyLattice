@@ -7,6 +7,7 @@ from itertools import combinations_with_replacement
 from typing import Any
 
 from .config import AppConfig, load_config
+from .estimator_contract import ntru_type_for_variant
 from .estimator_process import run_estimator
 from .json_safety import sanitize_json_value as sanitize_json_metadata
 from .parameter_search import (
@@ -749,6 +750,7 @@ def ntru_estimator_provenance(
     return {
         "hard_problem_variant": effective_variant,
         "requested_hard_problem_variant": requested_variant,
+        "ntru_type": ntru_type_for_variant(effective_variant),
         "ring_degree": int(candidate["ring"]["n"]),
     }
 
@@ -844,11 +846,7 @@ def run_ntru_estimator(
         "problem": "ntru",
         "n": candidate["ring"]["n"],
         "q": candidate["modulus"]["q"],
-        "ntru_type": (
-            "matrix"
-            if provenance["hard_problem_variant"] == "matrix"
-            else "circulant"
-        ),
+        "ntru_type": provenance["ntru_type"],
         "secret_distribution": candidate["distribution"]["secret"],
         "error_distribution": candidate["distribution"]["error"],
         **provenance,
@@ -930,6 +928,7 @@ def apply_ntru_estimator_result(
         "attacks": estimator_result.get("models") or estimator_result.get("modes", {}),
         "estimator_commit": estimator_result.get("estimator_commit"),
         "hard_problem_variant": estimator_result.get("hard_problem_variant"),
+        "ntru_type": estimator_result.get("ntru_type"),
         "requested_hard_problem_variant": estimator_result.get(
             "requested_hard_problem_variant"
         ),

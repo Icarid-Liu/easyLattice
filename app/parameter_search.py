@@ -1576,7 +1576,12 @@ def normalize_estimator_response(
             )
         variant = response.get("hard_problem_variant")
         try:
-            validate_estimator_route(category, expected_profile, variant)
+            validate_estimator_route(
+                category,
+                expected_profile,
+                variant,
+                response.get("ntru_type"),
+            )
         except EstimatorRouteError as exc:
             return None, invalid_estimator_response(f"{exc.code}: {exc.message}")
         if variant != expected_variant:
@@ -1613,6 +1618,12 @@ def normalize_estimator_response(
         ):
             return None, invalid_estimator_response(
                 "parameters.hard_problem_variant disagrees with hard_problem_variant"
+            )
+        if category == "ntru" and parameters.get("ntru_type") != response.get(
+            "ntru_type"
+        ):
+            return None, invalid_estimator_response(
+                "parameters.ntru_type disagrees with ntru_type"
             )
     estimator_commit = response.get("estimator_commit")
     if estimator_commit is not None and not isinstance(estimator_commit, str):

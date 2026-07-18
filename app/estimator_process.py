@@ -87,6 +87,7 @@ def run_estimator(
             normalized.get("problem"),
             normalized.get("estimator_profile"),
             normalized.get("hard_problem_variant"),
+            normalized.get("ntru_type"),
         )
     except EstimatorRouteError as exc:
         return exc.as_result()

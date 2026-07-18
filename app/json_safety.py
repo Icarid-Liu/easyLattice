@@ -122,6 +122,10 @@ def safe_diagnostic_string(value: Any) -> str:
 
 
 def _bounded_string(value: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        value = value.encode("utf-8", errors="backslashreplace").decode("utf-8")
     if len(value) > MAX_DIAGNOSTIC_LENGTH:
         return value[:MAX_DIAGNOSTIC_LENGTH] + "<truncated>"
     return value

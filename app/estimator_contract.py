@@ -6,7 +6,14 @@ from typing import Any
 LWE_ATTACKS = ("usvp", "dual_hybrid", "bdd_hybrid")
 STANDARD_LWE_VARIANTS = frozenset({"lwe", "lwr"})
 STRUCTURED_LWE_VARIANTS = frozenset({"rlwe", "mlwe", "rlwr", "mlwr"})
-NTRU_VARIANTS = frozenset({"matrix", "ring"})
+NTRU_TYPE_BY_VARIANT = {
+    "matrix": "matrix",
+    "ring": "circulant",
+    "hps": "circulant",
+    "hrss": "circulant",
+    "ntru_prime": "circulant",
+}
+NTRU_VARIANTS = frozenset(NTRU_TYPE_BY_VARIANT)
 ESTIMATOR_PROFILES = frozenset({"standard", "enhanced"})
 
 
@@ -24,6 +31,7 @@ def validate_estimator_route(
     problem: Any,
     estimator_profile: Any,
     hard_problem_variant: Any,
+    ntru_type: Any = None,
 ) -> tuple[str, str, str]:
     if not isinstance(problem, str) or problem not in {"lwe", "ntru"}:
         raise EstimatorRouteError(
@@ -58,7 +66,40 @@ def validate_estimator_route(
             "invalid_estimator_route",
             f"{problem}/{estimator_profile} requires hard_problem_variant in {allowed_text}.",
         )
+    if problem == "ntru":
+        validate_ntru_type(hard_problem_variant, ntru_type)
     return problem, estimator_profile, hard_problem_variant
+
+
+def ntru_type_for_variant(hard_problem_variant: Any) -> str:
+    if not isinstance(hard_problem_variant, str):
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            "NTRU hard_problem_variant is required.",
+        )
+    try:
+        return NTRU_TYPE_BY_VARIANT[hard_problem_variant]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(NTRU_TYPE_BY_VARIANT))
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            f"NTRU hard_problem_variant must be one of {allowed}.",
+        ) from exc
+
+
+def validate_ntru_type(hard_problem_variant: Any, ntru_type: Any) -> str:
+    expected = ntru_type_for_variant(hard_problem_variant)
+    if not isinstance(ntru_type, str):
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            "ntru_type is required for NTRU estimator payloads and responses.",
+        )
+    if ntru_type != expected:
+        raise EstimatorRouteError(
+            "invalid_estimator_route",
+            f"hard_problem_variant={hard_problem_variant} requires ntru_type={expected}.",
+        )
+    return expected
 
 STRUCTURE_NOT_APPLICABLE = {
     "requested": False,

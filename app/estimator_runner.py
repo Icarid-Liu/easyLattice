@@ -240,6 +240,7 @@ def run(payload: dict) -> dict:
         payload.get("problem"),
         payload.get("estimator_profile"),
         payload.get("hard_problem_variant"),
+        payload.get("ntru_type"),
     )
     verify_estimator_origin()
     if problem == "ntru":
@@ -252,6 +253,7 @@ def run_lwe(payload: dict) -> dict:
         payload.get("problem"),
         payload.get("estimator_profile"),
         payload.get("hard_problem_variant"),
+        payload.get("ntru_type"),
     )
     if problem != "lwe":
         raise EstimatorRouteError(
@@ -342,6 +344,7 @@ def run_ntru(payload: dict) -> dict:
         payload.get("problem"),
         payload.get("estimator_profile"),
         payload.get("hard_problem_variant"),
+        payload.get("ntru_type"),
     )
     if problem != "ntru":
         raise EstimatorRouteError(
@@ -353,6 +356,7 @@ def run_ntru(payload: dict) -> dict:
 
     n = int(payload["n"])
     q = int(payload["q"])
+    ntru_type = payload["ntru_type"]
     ring_degree = int(payload.get("ring_degree", n))
     per_attack_timeout = int(payload.get("per_attack_timeout", 20))
     Xs = estimator_distribution(ND, payload["secret_distribution"], n)
@@ -363,7 +367,7 @@ def run_ntru(payload: dict) -> dict:
         Xs=Xs,
         Xe=Xe,
         m=n,
-        ntru_type=str(payload.get("ntru_type", "circulant")),
+        ntru_type=ntru_type,
         tag=f"NTRU screen n={n}, q={q}",
     ).normalize()
 
@@ -409,6 +413,7 @@ def run_ntru(payload: dict) -> dict:
         "estimator_profile": estimator_profile,
         "estimator_commit": estimator_commit(),
         "hard_problem_variant": hard_problem_variant,
+        "ntru_type": ntru_type,
         "ring_degree": ring_degree,
         "modes": default_modes,
         "models": models,
@@ -416,7 +421,7 @@ def run_ntru(payload: dict) -> dict:
             "n": n,
             "q": q,
             "m": n,
-            "ntru_type": str(payload.get("ntru_type", "circulant")),
+            "ntru_type": ntru_type,
             "estimator_profile": estimator_profile,
             "hard_problem_variant": hard_problem_variant,
             "ring_degree": ring_degree,

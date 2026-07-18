@@ -103,6 +103,9 @@ Estimator 请求和响应必须携带精确路由。允许的组合只有：`sta
 `matrix`/`ring`。缺失、未知或不匹配的 variant 会在攻击运行前以
 `invalid_estimator_route` fail closed。远端响应元数据会经过有界递归清洗并转换为严格
 JSON-safe 形式；非有限诊断值会变为 `null`，而非有限安全字段仍会导致验证失败。
+NTRU 路由还要求 `matrix -> ntru_type=matrix`，所有已支持的 circulant 变体
+（`ring`、HPS、HRSS、NTRU Prime）都使用 `ntru_type=circulant`。不可信元数据中的
+孤立 Unicode surrogate 会在 UTF-8 序列化前转义。
 
 推荐响应会区分参数选择状态与 estimator 验证状态：
 
