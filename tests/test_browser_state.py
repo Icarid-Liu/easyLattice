@@ -446,12 +446,22 @@ class BrowserRequestStateTests(unittest.TestCase):
         self.assertEqual(snapshot["overflowingTextControls"], [], snapshot)
         self.assertEqual(snapshot["overlapFailures"], [], snapshot)
 
-    def test_preview_noncyclic_fixtures_match_backend_contract(self):
+    def test_preview_dfr_fixtures_match_backend_contract(self):
         self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?preview=1")
         self.page.wait_for(
             "document.readyState === 'complete'"
             " && window.EASYLATTICE_PREVIEW_FIXTURES?.dfr?.ntru_rings"
+        )
+
+        cyclic_request = self.page.evaluate(
+            "window.EASYLATTICE_PREVIEW_FIXTURES.dfr.requests.ntru.cyclic"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                "window.EASYLATTICE_PREVIEW_FIXTURES.dfr.ntru_rings.cyclic"
+            ),
+            calculate_decryption_failure(cyclic_request),
         )
 
         for ring_type in ("negacyclic", "ntru_prime"):
