@@ -57,9 +57,11 @@ NIST 类别，estimator 验证仍遵循下文的验证契约。
 | `sntrup1013` | 1013 | 7177 | 448 | 209 | 190 | 4 |
 | `sntrup1277` | 1277 | 7879 | 492 | 270 | 245 | 5 |
 
-安全评估时，HPS、HRSS 和 NTRU Prime 都以 `circulant` NTRU 实例传给标准
-estimator。该 estimator 分类不会取代正确性计算所用的方案环：NTRU Prime 的 DFR
-乘积会按三项多项式 `x^n - x - 1` 取模约化。
+对二次幂 NTRU 进行安全评估时，所选环类型会直接映射到 estimator：选择 `matrix`
+时使用 `ntru_type="matrix"`，选择 `ring` 时使用 `ntru_type="circulant"`。HPS、
+HRSS 和 NTRU Prime 则始终以 `circulant` NTRU 实例传给标准 estimator，即使请求了
+`matrix` 也是如此。该安全 estimator 分类不会取代正确性计算所用的方案环：NTRU
+Prime 的 DFR 乘积会按三项多项式 `x^n - x - 1` 取模约化。
 
 ## Estimator 验证
 

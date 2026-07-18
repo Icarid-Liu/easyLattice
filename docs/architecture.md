@@ -24,7 +24,8 @@ not part of the security calculation.
 5. `app.agent`: orchestration boundary. It always returns the same response
    shape and records whether an LLM was used.
 6. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
-   is loaded only when `useLLM=true` and `llm.enabled=true`.
+   is imported by `app.agent`, but it is instantiated and invoked only when
+   `useLLM=true` and `llm.enabled=true`.
 7. `app.polynomial_ring`: exact polynomial multiplication/reduction primitives
    for cyclic `x^n - 1`, negacyclic `x^n + 1`, and NTRU Prime
    `x^n - x - 1` quotient rings.
@@ -58,7 +59,12 @@ under MATZOV and ADPS16 classical/quantum models. In the enhanced profile,
 `dual_hybrid` uses the fork's structured implementation and `bdd_hybrid`
 receives `deg_ring`, `structure_leverage=true`, and quantum `Grover=true`.
 NTRU calls the standard estimator's NTRU attack dispatcher under the same four
-reduction-model/mode combinations.
+reduction-model/mode combinations. For power-of-two NTRU, the requested
+security variant maps directly to the estimator: `matrix` becomes
+`ntru_type="matrix"`, and `ring` becomes `ntru_type="circulant"`. HPS, HRSS,
+and NTRU Prime force the effective security variant to `ring` and
+`ntru_type="circulant"`, regardless of a requested `matrix` variant. NTRU
+Prime's separate correctness/DFR ring remains `x^n - x - 1`.
 
 ## Default Path
 

@@ -65,10 +65,13 @@ estimator validation still follows the validation contract below.
 | `sntrup1013` | 1013 | 7177 | 448 | 209 | 190 | 4 |
 | `sntrup1277` | 1277 | 7879 | 492 | 270 | 245 | 5 |
 
-For security assessment, HPS, HRSS, and NTRU Prime are all passed to the
-standard estimator as `circulant` NTRU instances. This estimator classification
-does not replace the scheme ring used for correctness: NTRU Prime DFR products
-are reduced modulo the trinomial `x^n - x - 1`.
+For power-of-two NTRU security assessment, the selected ring choice maps
+directly to the estimator: `matrix` uses `ntru_type="matrix"`, while `ring`
+uses `ntru_type="circulant"`. HPS, HRSS, and NTRU Prime are always passed to
+the standard estimator as `circulant` NTRU instances, even if `matrix` was
+requested. This security-estimator classification does not replace the scheme
+ring used for correctness: NTRU Prime DFR products are reduced modulo the
+trinomial `x^n - x - 1`.
 
 ## Estimator Validation
 
