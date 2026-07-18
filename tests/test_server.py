@@ -17,6 +17,7 @@ class ServerTests(unittest.TestCase):
             response = connection.getresponse()
             body = response.read().decode("utf-8")
             self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Cache-Control"), "no-store")
             self.assertLess(body.index('src="app-model.js"'), body.index('src="app.js"'))
         finally:
             connection.close()
@@ -41,8 +42,32 @@ class ServerTests(unittest.TestCase):
                 connection.request("GET", path)
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200, path)
-                self.assertIn(expected_type, response.getheader("Content-Type", ""), path)
+                content_type = response.getheader("Content-Type", "")
+                self.assertIn(expected_type, content_type, path)
+                if path.endswith(".js"):
+                    self.assertEqual(content_type, "text/javascript; charset=utf-8", path)
+                self.assertEqual(response.getheader("Cache-Control"), "no-store", path)
                 response.read()
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+
+    def test_frontend_uses_one_form_invalidation_path_and_shared_state_model(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        try:
+            connection.request("GET", "/app.js")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(body.count("EasyLatticeModel.createRequestState()"), 2)
+            self.assertIn('form.addEventListener("input", markSearchInputsChanged);', body)
+            self.assertIn('dfrForm.addEventListener("input", markDfrInputsChanged);', body)
+            self.assertNotIn('form.addEventListener("change", markSearchInputsChanged);', body)
+            self.assertNotIn('dfrForm.addEventListener("change", markDfrInputsChanged);', body)
         finally:
             connection.close()
             server.shutdown()

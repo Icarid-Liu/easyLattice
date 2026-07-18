@@ -1,7 +1,9 @@
 (function expose(root, factory) {
-  const api = factory();
-  if (typeof module === "object" && module.exports) module.exports = api;
-  if (root) root.EasyLatticeModel = api;
+  if (typeof module === "object" && module.exports) {
+    module.exports = factory();
+  } else if (root) {
+    root.EasyLatticeModel = factory();
+  }
 })(typeof globalThis === "object" ? globalThis : this, function buildModel() {
   const LWE_RINGS = [
     { value: "power2", label: "x^n + 1" },
@@ -48,6 +50,105 @@
     return startedRevision === currentRevision;
   }
 
+  function createRequestState() {
+    let revision = 0;
+    let nextToken = 0;
+    let activeRequest = null;
+    let result = null;
+    let resultRevision = null;
+    let error = null;
+    let errorRevision = null;
+
+    function accepts(request) {
+      return Boolean(
+        request
+        && activeRequest
+        && request.token === activeRequest.token
+        && request.revision === revision
+        && activeRequest.revision === revision
+      );
+    }
+
+    function snapshot() {
+      const resultCurrent = result !== null && resultRevision === revision;
+      const currentError = errorRevision === revision ? error : null;
+      const inFlight = Boolean(activeRequest && activeRequest.revision === revision);
+      return {
+        revision,
+        inFlight,
+        metadata: inFlight ? { ...activeRequest.metadata } : null,
+        result,
+        resultCurrent,
+        error: currentError,
+        stale: !inFlight
+          && currentError === null
+          && !resultCurrent
+          && (revision > 0 || resultRevision !== null || errorRevision !== null),
+        copyEligible: resultCurrent,
+      };
+    }
+
+    function invalidate() {
+      revision = nextRevision(revision);
+      activeRequest = null;
+      return snapshot();
+    }
+
+    function begin(metadata = {}) {
+      const request = Object.freeze({ token: ++nextToken, revision });
+      activeRequest = { ...request, metadata: { ...metadata } };
+      return request;
+    }
+
+    function update(request, metadata) {
+      if (!accepts(request)) return false;
+      activeRequest.metadata = { ...activeRequest.metadata, ...metadata };
+      return true;
+    }
+
+    function acceptResult(request, nextResult) {
+      if (!accepts(request)) return false;
+      result = nextResult;
+      resultRevision = revision;
+      error = null;
+      errorRevision = null;
+      return true;
+    }
+
+    function acceptError(request, nextError) {
+      if (!accepts(request)) return false;
+      error = nextError;
+      errorRevision = revision;
+      return true;
+    }
+
+    function finish(request) {
+      if (!activeRequest || !request || request.token !== activeRequest.token) return false;
+      activeRequest = null;
+      return true;
+    }
+
+    function setResult(nextResult) {
+      result = nextResult;
+      resultRevision = revision;
+      error = null;
+      errorRevision = null;
+      return snapshot();
+    }
+
+    return Object.freeze({
+      invalidate,
+      begin,
+      accepts,
+      update,
+      acceptResult,
+      acceptError,
+      finish,
+      setResult,
+      snapshot,
+    });
+  }
+
   return {
     ringOptions,
     normalizeRingSelection,
@@ -55,5 +156,6 @@
     compactRows,
     nextRevision,
     acceptsResponse,
+    createRequestState,
   };
 });

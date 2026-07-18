@@ -368,6 +368,16 @@ textarea {
   padding: 0 12px;
 }
 
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary-button:disabled:hover {
+  background: var(--green);
+}
+
 .button-icon {
   color: inherit;
   font-size: 18px;
@@ -423,6 +433,11 @@ textarea {
 .status-pill.done {
   color: var(--green-dark);
   background: #e8f5f2;
+}
+
+.status-pill.warning {
+  color: var(--amber);
+  background: #fff8e6;
 }
 
 .status-pill.error {
