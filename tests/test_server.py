@@ -12,7 +12,7 @@ from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
-    def test_partial_post_body_times_out_without_leaking_handler_thread(self):
+    def test_drip_feed_post_body_hits_total_deadline_without_thread_leak(self):
         class RecordingHandler(EasyLatticeHandler):
             timeout_before_response = object()
 
@@ -27,6 +27,18 @@ class ServerTests(unittest.TestCase):
         existing_threads = set(threading.enumerate())
         client = socket.create_connection(server.server_address, timeout=2)
         client.settimeout(2)
+        stop_drip = threading.Event()
+        sent_chunks = []
+
+        def drip_body():
+            while not stop_drip.wait(0.02):
+                try:
+                    client.sendall(b"x")
+                except OSError:
+                    break
+                sent_chunks.append(1)
+
+        feeder = threading.Thread(target=drip_body, daemon=True)
         try:
             request = (
                 b"POST /api/decryption-failure/calculate HTTP/1.1\r\n"
@@ -35,15 +47,15 @@ class ServerTests(unittest.TestCase):
                 b"Content-Length: 128\r\n"
                 b"Connection: close\r\n"
                 b"\r\n"
-                b'{"type":'
             )
             started = time.monotonic()
             with mock.patch.object(
                 server_module,
-                "POST_BODY_READ_TIMEOUT_SECONDS",
-                0.1,
+                "POST_BODY_READ_DEADLINE_SECONDS",
+                0.12,
             ):
                 client.sendall(request)
+                feeder.start()
                 response = bytearray()
                 while True:
                     chunk = client.recv(4096)
@@ -51,6 +63,8 @@ class ServerTests(unittest.TestCase):
                         break
                     response.extend(chunk)
             elapsed = time.monotonic() - started
+            stop_drip.set()
+            feeder.join(timeout=1)
 
             headers, body = bytes(response).split(b"\r\n\r\n", 1)
             self.assertIn(b" 408 ", headers)
@@ -58,8 +72,12 @@ class ServerTests(unittest.TestCase):
                 json.loads(body.decode("utf-8"))["error"],
                 "Request body read timed out.",
             )
+            self.assertGreaterEqual(len(sent_chunks), 3)
+            self.assertGreaterEqual(elapsed, 0.09)
             self.assertLess(elapsed, 1.5)
             self.assertIsNone(RecordingHandler.timeout_before_response)
+            self.assertEqual(RecordingHandler.rbufsize, 0)
+            self.assertFalse(feeder.is_alive())
 
             deadline = time.monotonic() + 1
             handlers = []
@@ -76,7 +94,10 @@ class ServerTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(handlers, [])
         finally:
+            stop_drip.set()
             client.close()
+            if feeder.is_alive():
+                feeder.join(timeout=1)
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)

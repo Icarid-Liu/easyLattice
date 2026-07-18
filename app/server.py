@@ -27,7 +27,8 @@ API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1")))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
 MAX_REQUEST_BODY_BYTES = 1_048_576
-POST_BODY_READ_TIMEOUT_SECONDS = 5.0
+POST_BODY_READ_DEADLINE_SECONDS = 5.0
+POST_BODY_READ_CHUNK_BYTES = 65_536
 
 
 class RequestBodyTooLarge(ValueError):
@@ -127,6 +128,7 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
 
 class EasyLatticeHandler(BaseHTTPRequestHandler):
     server_version = "easyLattice/0.1"
+    rbufsize = 0
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -242,21 +244,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
         length = self.request_content_length()
-        previous_timeout = self.connection.gettimeout()
-        body_timeout = (
-            POST_BODY_READ_TIMEOUT_SECONDS
-            if previous_timeout is None
-            else min(previous_timeout, POST_BODY_READ_TIMEOUT_SECONDS)
-        )
-        try:
-            self.connection.settimeout(body_timeout)
-            body_bytes = self.rfile.read(length)
-        except (socket.timeout, TimeoutError) as exc:
-            raise RequestBodyReadTimeout("Request body read timed out.") from exc
-        finally:
-            self.connection.settimeout(previous_timeout)
-        if len(body_bytes) != length:
-            raise ValueError("Request body ended before Content-Length bytes were received.")
+        body_bytes = self.read_request_body(length)
         try:
             body = body_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -270,6 +258,37 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
         return payload
+
+    def read_request_body(self, length: int) -> bytes:
+        previous_timeout = self.connection.gettimeout()
+        deadline = time.monotonic() + POST_BODY_READ_DEADLINE_SECONDS
+        body = bytearray()
+        try:
+            while len(body) < length:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    raise RequestBodyReadTimeout("Request body read timed out.")
+                read_timeout = (
+                    remaining_time
+                    if previous_timeout is None
+                    else min(previous_timeout, remaining_time)
+                )
+                self.connection.settimeout(read_timeout)
+                chunk = self.connection.recv(
+                    min(length - len(body), POST_BODY_READ_CHUNK_BYTES)
+                )
+                if time.monotonic() >= deadline:
+                    raise RequestBodyReadTimeout("Request body read timed out.")
+                if not chunk:
+                    break
+                body.extend(chunk)
+        except (socket.timeout, TimeoutError) as exc:
+            raise RequestBodyReadTimeout("Request body read timed out.") from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if len(body) != length:
+            raise ValueError("Request body ended before Content-Length bytes were received.")
+        return bytes(body)
 
     def request_content_length(self) -> int:
         values = self.headers.get_all("Content-Length", [])
