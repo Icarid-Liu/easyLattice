@@ -37,6 +37,8 @@ ALLOWED_ORIGINS = [
     for origin in env_value("EASYLATTICE_ALLOWED_ORIGINS", default="*").split(",")
     if origin.strip()
 ]
+ESTIMATOR_PROFILES = {"standard", "enhanced"}
+INVALID_PROFILE_MESSAGE = "estimator_profile must be standard or enhanced."
 
 
 @dataclass
@@ -177,6 +179,10 @@ def validate_payload(payload: dict[str, Any]) -> None:
     if problem not in {"lwe", "ntru"}:
         raise ValueError("problem must be lwe or ntru")
 
+    profile = str(payload.get("estimator_profile", "standard"))
+    if profile not in ESTIMATOR_PROFILES:
+        raise ValueError(INVALID_PROFILE_MESSAGE)
+
     n = int(payload.get("n", 0))
     q = int(payload.get("q", 0))
     if n < 1 or n > 16384:
@@ -264,11 +270,30 @@ def run_job(job: Job) -> None:
 
 def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     sage_binary = os.environ.get("SAGE_BINARY", "sage")
+    profile = str(payload.get("estimator_profile", "standard"))
+    if profile not in ESTIMATOR_PROFILES:
+        return {
+            "ok": False,
+            "code": "invalid_estimator_profile",
+            "message": INVALID_PROFILE_MESSAGE,
+        }
+
+    path_name = (
+        "ENHANCED_LATTICE_ESTIMATOR_PATH"
+        if profile == "enhanced"
+        else "LATTICE_ESTIMATOR_PATH"
+    )
+    estimator_path = os.environ.get(path_name)
+    if not estimator_path:
+        return {
+            "ok": False,
+            "code": f"{profile}_estimator_not_configured",
+            "message": f"{profile} estimator path is not configured.",
+        }
+
     env = os.environ.copy()
-    estimator_path = os.environ.get("LATTICE_ESTIMATOR_PATH")
-    if estimator_path:
-        existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = estimator_path if not existing else f"{estimator_path}{os.pathsep}{existing}"
+    env["PYTHONPATH"] = estimator_path
+    env["PYTHONNOUSERSITE"] = "1"
 
     completed = subprocess.run(
         [sage_binary, "-python", str(RUNNER)],

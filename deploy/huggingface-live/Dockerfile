@@ -10,11 +10,13 @@ RUN apt-get update \
 COPY . /app
 
 RUN git clone --depth=1 https://github.com/malb/lattice-estimator.git /opt/lattice-estimator
+RUN git clone --depth=1 https://github.com/identitymapping/enhanced_lattice-estimator.git /opt/enhanced-lattice-estimator
 
 ENV HOST=0.0.0.0
 ENV PORT=7860
 ENV SAGE_BINARY=sage
 ENV LATTICE_ESTIMATOR_PATH=/opt/lattice-estimator
+ENV ENHANCED_LATTICE_ESTIMATOR_PATH=/opt/enhanced-lattice-estimator
 ENV EASYLATTICE_ESTIMATOR_TIMEOUT=240
 ENV EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60
 ENV EASYLATTICE_ALLOWED_ORIGINS=*
