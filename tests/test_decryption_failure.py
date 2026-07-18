@@ -316,18 +316,111 @@ class DecryptionFailureTests(unittest.TestCase):
             "^n must be a non-negative integer[.]$",
         ):
             calculate_decryption_failure({"type": "ntru", "n": exponent})
+        with mock.patch.object(
+            dfr,
+            "Decimal",
+            side_effect=AssertionError("hostile exponent reached Decimal construction"),
+        ):
+            with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                dfr.safe_nonnegative_integer(
+                    exponent,
+                    "n",
+                    dfr.MAX_NTRU_DIMENSION,
+                    "MAX_NTRU_DIMENSION",
+                )
 
     def test_exact_integer_json_values_remain_supported(self):
         result = calculate_decryption_failure(
             ntru_product_payload("cyclic")
             | {
-                "n": "3",
-                "precisionBits": 512.0,
-                "tailBits": "128",
+                "n": "  +3.0  ",
+                "precisionBits": "5.12e2",
+                "tailBits": Decimal("128.0"),
             }
         )
         self.assertEqual(result["dimensions"]["n"], 3)
         self.assertEqual(result["precision_bits"], 512)
+
+        centered = pmf_from_distribution(
+            {"type": "centered_binomial", "eta": "2.0"},
+            default_dimension=1,
+            tail_bits=128,
+            label="noise",
+        )
+        sparse = pmf_from_distribution(
+            {
+                "type": "sparse_ternary",
+                "plus_weight": " +1e0 ",
+                "minus_weight": Decimal("1.0"),
+                "dimension": "4.0",
+            },
+            default_dimension=4,
+            tail_bits=128,
+            label="secret",
+        )
+        compression = pmf_from_distribution(
+            {
+                "type": "kyber_nearest_compression",
+                "q": "3.329e3",
+                "d": "1e1",
+            },
+            default_dimension=1,
+            tail_bits=128,
+            label="compression",
+        )
+        self.assertEqual(len(centered.probabilities), 5)
+        self.assertEqual(sparse.probabilities[Decimal(0)], Decimal("0.5"))
+        self.assertGreater(len(compression.probabilities), 1)
+
+    def test_uniform_bounds_accept_bounded_scientific_and_fractional_notation(self):
+        scientific = pmf_from_distribution(
+            {
+                "type": "uniform",
+                "lower_bound": "  +1e2 ",
+                "upper_bound": "1.025e2",
+            },
+            default_dimension=1,
+            tail_bits=128,
+            label="uniform",
+        )
+        fractional = pmf_from_distribution(
+            {
+                "type": "uniform",
+                "lower_bound": "1.2",
+                "upper_bound": Decimal("3.8"),
+            },
+            default_dimension=1,
+            tail_bits=128,
+            label="uniform",
+        )
+        self.assertEqual(set(scientific.probabilities), {
+            Decimal(100),
+            Decimal(101),
+            Decimal(102),
+        })
+        self.assertEqual(set(fractional.probabilities), {Decimal(2), Decimal(3)})
+        limit = dfr.MAX_SAFE_INTEGER_PARAMETER
+        self.assertEqual(dfr.floor_int(f"{limit}.9", "upper"), limit)
+        self.assertEqual(dfr.ceiling_int(f"-{limit}.9", "lower"), -limit)
+
+    def test_nonintegral_integer_fields_are_rejected(self):
+        operations = (
+            lambda: calculate_decryption_failure({"type": "ntru", "n": "3.5"}),
+            lambda: dfr.positive_int(3.5, "dimension"),
+            lambda: dfr.nonnegative_int(Decimal("2.1"), "weight"),
+            lambda: pmf_from_distribution(
+                {"type": "centered_binomial", "eta": "2.1"},
+                default_dimension=1,
+                tail_bits=128,
+                label="noise",
+            ),
+        )
+        for operation in operations:
+            with (
+                self.subTest(operation=operation),
+                self.assertRaisesRegex(ValueError, "integer"),
+            ):
+                operation()
 
     def test_integer_driven_distribution_loops_have_preflight_limits(self):
         with (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, getcontext, localcontext
 from fractions import Fraction
@@ -21,10 +22,16 @@ MAX_NTRU_DIMENSION = 4096
 MAX_LWE_DIMENSION = 65_536
 MAX_SAFE_INTEGER_PARAMETER = 2**53 - 1
 MAX_INTEGER_TEXT_LENGTH = 64
+MAX_NUMERIC_EXPONENT_ABS = 1_000
 MAX_COMPRESSION_BITS = 63
 MAX_RING_PROFILE_WORK = 1_000_000
 MAX_PMF_SUPPORT = 50_000
 MAX_PAIR_PRODUCTS = 30_000_000
+
+DECIMAL_NUMBER_PATTERN = re.compile(
+    r"^[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))"
+    r"(?:[eE](?P<exponent>[+-]?[0-9]+))?$"
+)
 
 
 @dataclass(frozen=True)
@@ -960,60 +967,111 @@ def safe_nonnegative_integer(
 ) -> int:
     invalid_message = f"{label} must be a non-negative integer."
     limit_message = f"{label} must not exceed {maximum} ({maximum_name})."
+    value = bounded_decimal_number(
+        raw,
+        maximum,
+        invalid_message,
+        limit_message,
+    )
+    if value < 0 or not decimal_is_integer(value):
+        raise ValueError(invalid_message)
+    return int(value)
+
+
+def bounded_decimal_number(
+    raw: Any,
+    maximum: int,
+    invalid_message: str,
+    limit_message: str,
+) -> Decimal:
     if raw is None or isinstance(raw, bool):
         raise ValueError(invalid_message)
-    if isinstance(raw, int):
-        if raw < 0:
-            raise ValueError(invalid_message)
-        if raw > maximum:
-            raise ValueError(limit_message)
-        return raw
     if isinstance(raw, str):
-        text = raw.strip()
-        if not text or len(text) > MAX_INTEGER_TEXT_LENGTH:
-            raise ValueError(limit_message if len(text) > MAX_INTEGER_TEXT_LENGTH else invalid_message)
-        negative = False
-        if text[0] == "+":
-            text = text[1:]
-        elif text[0] == "-":
-            negative = True
-            text = text[1:]
-        if not text or not text.isascii() or not text.isdecimal():
-            raise ValueError(invalid_message)
-        if negative and any(character != "0" for character in text):
-            raise ValueError(invalid_message)
-        digits = text.lstrip("0") or "0"
-        maximum_text = str(maximum)
-        if len(digits) > len(maximum_text) or (
-            len(digits) == len(maximum_text) and digits > maximum_text
-        ):
+        return bounded_decimal_text(
+            raw,
+            maximum,
+            invalid_message,
+            limit_message,
+        )
+    if isinstance(raw, int):
+        if abs(raw) > maximum:
             raise ValueError(limit_message)
-        return int(digits)
+        return Decimal(raw)
     if isinstance(raw, float):
-        if not math.isfinite(raw) or not raw.is_integer() or raw < 0:
-            raise ValueError(invalid_message)
-        if raw > maximum:
-            raise ValueError(limit_message)
-        return int(raw)
+        if not math.isfinite(raw) or abs(raw) > maximum:
+            raise ValueError(limit_message if math.isfinite(raw) else invalid_message)
+        return bounded_decimal_text(
+            str(raw),
+            maximum,
+            invalid_message,
+            limit_message,
+        )
     if isinstance(raw, Decimal):
-        if not raw.is_finite() or raw < 0:
-            raise ValueError(invalid_message)
-        if raw > maximum:
-            raise ValueError(limit_message)
-        if not decimal_is_integer(raw):
-            raise ValueError(invalid_message)
-        return int(raw)
+        return validated_bounded_decimal(
+            raw,
+            maximum,
+            invalid_message,
+            limit_message,
+        )
     raise ValueError(invalid_message)
 
 
+def bounded_decimal_text(
+    raw: str,
+    maximum: int,
+    invalid_message: str,
+    limit_message: str,
+) -> Decimal:
+    if len(raw) > MAX_INTEGER_TEXT_LENGTH:
+        raise ValueError(limit_message)
+    text = raw.strip()
+    match = DECIMAL_NUMBER_PATTERN.fullmatch(text)
+    if match is None:
+        raise ValueError(invalid_message)
+    exponent = match.group("exponent")
+    if exponent is not None and exponent_magnitude_exceeds_limit(exponent):
+        raise ValueError(invalid_message)
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(invalid_message) from exc
+    return validated_bounded_decimal(
+        value,
+        maximum,
+        invalid_message,
+        limit_message,
+    )
+
+
+def exponent_magnitude_exceeds_limit(exponent: str) -> bool:
+    digits = exponent.lstrip("+-").lstrip("0") or "0"
+    maximum = str(MAX_NUMERIC_EXPONENT_ABS)
+    return len(digits) > len(maximum) or (
+        len(digits) == len(maximum) and digits > maximum
+    )
+
+
+def validated_bounded_decimal(
+    value: Decimal,
+    maximum: int,
+    invalid_message: str,
+    limit_message: str,
+) -> Decimal:
+    if not value.is_finite():
+        raise ValueError(invalid_message)
+    if abs(value) > maximum:
+        raise ValueError(limit_message)
+    if value == 0:
+        _, _, exponent = value.as_tuple()
+        if abs(exponent) > MAX_NUMERIC_EXPONENT_ABS:
+            raise ValueError(limit_message)
+    elif abs(value.adjusted()) > MAX_NUMERIC_EXPONENT_ABS:
+        raise ValueError(limit_message)
+    return value
+
+
 def decimal_is_integer(value: Decimal) -> bool:
-    _, digits, exponent = value.as_tuple()
-    if not any(digits) or exponent >= 0:
-        return True
-    fractional_digits = -exponent
-    if fractional_digits > len(digits):
-        return False
-    return not any(digits[-fractional_digits:])
+    return value == value.to_integral_value()
 
 
 def ceiling_int(raw: Any, label: str) -> int:
@@ -1025,24 +1083,21 @@ def floor_int(raw: Any, label: str) -> int:
 
 
 def bounded_rounding_int(raw: Any, label: str, rounding: str) -> int:
+    invalid_message = f"{label} must be a finite number."
     limit_message = (
         f"{label} magnitude must not exceed {MAX_SAFE_INTEGER_PARAMETER} "
         "(MAX_SAFE_INTEGER_PARAMETER)."
     )
-    if isinstance(raw, bool) or raw is None:
-        raise ValueError(f"{label} must be a finite number.")
-    if isinstance(raw, int):
-        if abs(raw) > MAX_SAFE_INTEGER_PARAMETER:
-            raise ValueError(limit_message)
-        return raw
-    if isinstance(raw, str):
-        text = raw.strip()
-        if len(text) > MAX_INTEGER_TEXT_LENGTH or "e" in text.lower():
-            raise ValueError(limit_message)
-    value = scalar(raw, label)
-    if abs(value) > MAX_SAFE_INTEGER_PARAMETER:
+    value = bounded_decimal_number(
+        raw,
+        MAX_SAFE_INTEGER_PARAMETER + 1,
+        invalid_message,
+        limit_message,
+    )
+    rounded = value.to_integral_value(rounding=rounding)
+    if abs(rounded) > MAX_SAFE_INTEGER_PARAMETER:
         raise ValueError(limit_message)
-    return int(value.to_integral_value(rounding=rounding))
+    return int(rounded)
 
 
 def positive_scalar(raw: Any, label: str) -> Decimal:
