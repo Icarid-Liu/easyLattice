@@ -238,6 +238,8 @@ textarea {
 
 .segmented input {
   position: absolute;
+  width: 1px;
+  min-height: 1px;
   opacity: 0;
   pointer-events: none;
 }

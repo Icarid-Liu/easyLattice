@@ -226,7 +226,142 @@ class BrowserRequestStateTests(unittest.TestCase):
         port = self.server.server_address[1]
         self.page.command("Page.navigate", {"url": f"http://127.0.0.1:{port}/{query}"})
 
+    def set_viewport(self, width: int, height: int, *, mobile: bool):
+        self.page.command(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": 1,
+                "mobile": mobile,
+                "screenWidth": width,
+                "screenHeight": height,
+            },
+        )
+
+    def layout_snapshot(self):
+        return self.page.evaluate(
+            r"""(() => {
+              const tolerance = 2;
+              const visible = (node) => {
+                if (!node) return false;
+                const style = getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && rect.width > 0
+                  && rect.height > 0;
+              };
+              const withinViewport = (node) => {
+                const rect = node.getBoundingClientRect();
+                return rect.left >= -tolerance && rect.right <= innerWidth + tolerance;
+              };
+              const overlaps = (first, second) => {
+                const a = first.getBoundingClientRect();
+                const b = second.getBoundingClientRect();
+                return a.left < b.right - tolerance
+                  && a.right > b.left + tolerance
+                  && a.top < b.bottom - tolerance
+                  && a.bottom > b.top + tolerance;
+              };
+
+              const keySelectors = [
+                '.app-shell',
+                '.control-panel',
+                '.brand-row',
+                '#language-select',
+                '#parameter-form',
+                '#dfr-form',
+                '.workspace',
+                '.top-strip',
+                '#status-pill',
+                '#search-results',
+                '#result-grid',
+                '#details',
+                '#alternatives',
+                '#dfr-results',
+              ];
+              const outOfViewport = keySelectors.filter((selector) => {
+                const node = document.querySelector(selector);
+                return visible(node) && !withinViewport(node);
+              });
+
+              const overflowingTextControls = [
+                ...document.querySelectorAll('button, .segmented span, .problem-options span'),
+              ].filter((node) => visible(node) && (
+                node.scrollWidth > node.clientWidth + tolerance
+                || node.scrollHeight > node.clientHeight + tolerance
+              )).map((node) => node.id || node.textContent.trim());
+              const overflowNodes = [...document.querySelectorAll('*')].filter((node) => {
+                if (!visible(node)) return false;
+                const rect = node.getBoundingClientRect();
+                return rect.left < -tolerance
+                  || rect.right > innerWidth + tolerance
+                  || node.scrollWidth > node.clientWidth + tolerance;
+              }).slice(0, 12).map((node) => ({
+                node: node.id || node.className || node.tagName,
+                left: Math.round(node.getBoundingClientRect().left),
+                right: Math.round(node.getBoundingClientRect().right),
+                clientWidth: node.clientWidth,
+                scrollWidth: node.scrollWidth,
+              }));
+
+              const overlapFailures = [];
+              [
+                ['.brand-row > div:not(.brand-mark)', '#language-select', 'brand/language'],
+                ['.top-strip > div', '#status-pill', 'heading/status'],
+                ['.control-panel', '.workspace', 'control/workspace'],
+              ].forEach(([firstSelector, secondSelector, label]) => {
+                const first = document.querySelector(firstSelector);
+                const second = document.querySelector(secondSelector);
+                if (visible(first) && visible(second) && overlaps(first, second)) {
+                  overlapFailures.push(label);
+                }
+              });
+              [
+                '#result-grid > .metric-panel',
+                '#details > .detail-column',
+                '#candidate-list > .candidate',
+                '#dfr-results .result-grid > .metric-panel',
+                '#dfr-results .details-layout > .detail-column',
+              ].forEach((selector) => {
+                const nodes = [...document.querySelectorAll(selector)].filter(visible);
+                for (let first = 0; first < nodes.length; first += 1) {
+                  for (let second = first + 1; second < nodes.length; second += 1) {
+                    if (overlaps(nodes[first], nodes[second])) {
+                      overlapFailures.push(`${selector}:${first}/${second}`);
+                    }
+                  }
+                }
+              });
+
+              return {
+                innerWidth,
+                innerHeight,
+                documentScrollWidth: document.documentElement.scrollWidth,
+                bodyScrollWidth: document.body.scrollWidth,
+                documentOverflow: document.documentElement.scrollWidth > innerWidth + tolerance,
+                bodyOverflow: document.body.scrollWidth > innerWidth + tolerance,
+                outOfViewport,
+                overflowNodes,
+                overflowingTextControls,
+                overlapFailures,
+              };
+            })()"""
+        )
+
+    def assert_viewport_layout(self, width: int, height: int):
+        snapshot = self.layout_snapshot()
+        self.assertEqual(snapshot["innerWidth"], width, snapshot)
+        self.assertEqual(snapshot["innerHeight"], height, snapshot)
+        self.assertFalse(snapshot["documentOverflow"], snapshot)
+        self.assertFalse(snapshot["bodyOverflow"], snapshot)
+        self.assertEqual(snapshot["outOfViewport"], [], snapshot)
+        self.assertEqual(snapshot["overflowingTextControls"], [], snapshot)
+        self.assertEqual(snapshot["overlapFailures"], [], snapshot)
+
     def test_request_state_interactions(self):
+        self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?request-state-test=1")
         self.page.wait_for(
             "document.readyState === 'complete'"
@@ -408,6 +543,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     validation: rows['Validation status'],
                     profile: rows['Estimator profile'],
                     attempted: rows['Candidates attempted'],
+                    eligible: rows['Candidates eligible'],
                     source: rows.Source,
                     next: rows.Next,
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
@@ -420,12 +556,14 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "validation": "Fast screened",
                 "profile": "enhanced",
                 "attempted": "0",
+                "eligible": "7168",
                 "source": "Fast security screen",
                 "next": "Bind this recommendation to concrete scheme constraints before use.",
                 "invalidText": False,
                 "plaintextJson": False,
             },
         )
+        self.assert_viewport_layout(1440, 1000)
 
         self.page.evaluate(
             """(() => {
@@ -467,6 +605,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                     status: document.querySelector('#status-pill').textContent,
                     validation: rows['Validation status'],
                     source: rows.Source,
+                    eligible: rows['Candidates eligible'],
                     warning: document.querySelector('#warnings').textContent.includes('runtime or configuration is unavailable'),
                   };
                 })()"""
@@ -475,6 +614,7 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "status": "Validation failed",
                 "validation": "Validation failed",
                 "source": "Fast security screen",
+                "eligible": "7168",
                 "warning": True,
             },
         )
@@ -501,18 +641,158 @@ class BrowserRequestStateTests(unittest.TestCase):
               language.value = 'en';
               language.dispatchEvent(new Event('change', { bubbles: true }));
               document.querySelector('#use-estimator').click();
-              document.querySelector('input[name=hardProblem][value="ntru:ring"]').click();
-              const family = document.querySelector('#ring-family');
-              family.value = 'ntru_prime';
-              family.dispatchEvent(new Event('input', { bubbles: true }));
-              family.dispatchEvent(new Event('change', { bubbles: true }));
-              document.querySelector('#parameter-form button[type=submit]').click();
             })()"""
         )
-        self.page.wait_for(
-            "searchState.snapshot().resultCurrent"
-            " && searchState.snapshot().result.recommendation.ring.preset === 'sntrup653'"
+        family_cases = (
+            {
+                "family": "power2",
+                "requested_variant": "matrix",
+                "effective_variant": "matrix",
+                "ntru_type": "matrix",
+                "family_name": "2-power cyclotomic NTRU",
+                "n": 512,
+                "polynomial": "x^512 + 1",
+                "quotient": "Z_7681[x] / (x^512 + 1)",
+                "q": 7681,
+                "bits": 13,
+                "cyclotomic": 1024,
+                "preset": None,
+                "generated": 8,
+            },
+            {
+                "family": "power2",
+                "requested_variant": "ring",
+                "effective_variant": "ring",
+                "ntru_type": "circulant",
+                "family_name": "2-power cyclotomic NTRU",
+                "n": 512,
+                "polynomial": "x^512 + 1",
+                "quotient": "Z_7681[x] / (x^512 + 1)",
+                "q": 7681,
+                "bits": 13,
+                "cyclotomic": 1024,
+                "preset": None,
+                "generated": 8,
+            },
+            {
+                "family": "hps",
+                "requested_variant": "matrix",
+                "effective_variant": "ring",
+                "ntru_type": "circulant",
+                "family_name": "NTRU-HPS style",
+                "n": 592,
+                "polynomial": "x^593 - 1 with one relation removed by the estimator",
+                "quotient": "NTRU-HPS style mod q=2048, public polynomial degree N=593",
+                "q": 2048,
+                "bits": 11,
+                "cyclotomic": None,
+                "preset": None,
+                "generated": 4,
+            },
+            {
+                "family": "hrss",
+                "requested_variant": "matrix",
+                "effective_variant": "ring",
+                "ntru_type": "circulant",
+                "family_name": "NTRU-HRSS style",
+                "n": 672,
+                "polynomial": "x^673 - 1 with one relation removed by the estimator",
+                "quotient": "NTRU-HRSS style mod q=8192, public polynomial degree N=673",
+                "q": 8192,
+                "bits": 13,
+                "cyclotomic": None,
+                "preset": None,
+                "generated": 4,
+            },
+            {
+                "family": "ntru_prime",
+                "requested_variant": "matrix",
+                "effective_variant": "ring",
+                "ntru_type": "circulant",
+                "family_name": "Streamlined NTRU Prime",
+                "n": 653,
+                "polynomial": "x^653 - x - 1",
+                "quotient": "Z_4621[x] / (x^653 - x - 1)",
+                "q": 4621,
+                "bits": 13,
+                "cyclotomic": None,
+                "preset": "sntrup653",
+                "generated": 6,
+            },
         )
+        for expected in family_cases:
+            family = expected["family"]
+            requested_variant = expected["requested_variant"]
+            self.page.evaluate(
+                f"""(() => {{
+                  document.querySelector('input[name=hardProblem][value="ntru:ring"]').click();
+                  const family = document.querySelector('#ring-family');
+                  family.value = 'power2';
+                  family.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  family.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                  document.querySelector(
+                    'input[name=hardProblem][value="ntru:{requested_variant}"]'
+                  ).click();
+                  family.value = '{family}';
+                  family.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  family.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                  document.querySelector('#parameter-form button[type=submit]').click();
+                }})()"""
+            )
+            self.page.wait_for(
+                f"searchState.snapshot().resultCurrent"
+                f" && searchState.snapshot().result.recommendation.ring.family_id === '{family}'"
+                f" && searchState.snapshot().result.request.hard_problem_variant"
+                f" === '{expected['effective_variant']}'"
+            )
+            actual = self.page.evaluate(
+                """(() => {
+                  const result = searchState.snapshot().result;
+                  const candidate = result.recommendation;
+                  const instance = Object.fromEntries([...document.querySelectorAll('#instance-list dt')]
+                    .map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+                  return {
+                    family: candidate.ring.family_id,
+                    familyName: candidate.ring.family,
+                    n: candidate.ring.n,
+                    polynomial: candidate.ring.polynomial,
+                    quotient: candidate.ring.quotient,
+                    q: candidate.modulus.q,
+                    bits: candidate.modulus.bits,
+                    cyclotomic: candidate.ring.cyclotomic_index,
+                    ntruType: candidate.ring.ntru_type,
+                    preset: candidate.ring.preset,
+                    effectiveVariant: result.request.hard_problem_variant,
+                    generated: result.search.generated_candidates,
+                    eligible: result.validation.eligible_candidates,
+                    renderedFamily: instance.Family,
+                    renderedNtruType: instance['NTRU type'],
+                    invalidText: /\b(undefined|null)\b/.test(document.querySelector('#search-results').innerText),
+                  };
+                })()"""
+            )
+            self.assertEqual(
+                actual,
+                {
+                    "family": family,
+                    "familyName": expected["family_name"],
+                    "n": expected["n"],
+                    "polynomial": expected["polynomial"],
+                    "quotient": expected["quotient"],
+                    "q": expected["q"],
+                    "bits": expected["bits"],
+                    "cyclotomic": expected["cyclotomic"],
+                    "ntruType": expected["ntru_type"],
+                    "preset": expected["preset"],
+                    "effectiveVariant": expected["effective_variant"],
+                    "generated": expected["generated"],
+                    "eligible": expected["generated"],
+                    "renderedFamily": expected["family_name"],
+                    "renderedNtruType": expected["ntru_type"],
+                    "invalidText": False,
+                },
+            )
+
         self.assertEqual(
             self.page.evaluate(
                 """(() => {
@@ -645,6 +925,45 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "document.querySelector('#dfr-warnings').textContent.includes('不作独立性假设')"
             )
         )
+
+        self.set_viewport(390, 844, mobile=True)
+        self.page.command("Page.reload", {"ignoreCache": True})
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && window.innerWidth === 390"
+            " && window.innerHeight === 844"
+            " && searchState.snapshot().resultCurrent"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                r"""(() => {
+                  const visible = (selector) => {
+                    const node = document.querySelector(selector);
+                    const rect = node && node.getBoundingClientRect();
+                    return Boolean(rect && rect.width > 0 && rect.height > 0);
+                  };
+                  return {
+                    parameterForm: visible('#parameter-form'),
+                    searchResults: visible('#search-results'),
+                    status: visible('#status-pill'),
+                    brand: visible('.brand-row'),
+                    language: visible('#language-select'),
+                    topStrip: visible('.top-strip'),
+                    invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
+                  };
+                })()"""
+            ),
+            {
+                "parameterForm": True,
+                "searchResults": True,
+                "status": True,
+                "brand": True,
+                "language": True,
+                "topStrip": True,
+                "invalidText": False,
+            },
+        )
+        self.assert_viewport_layout(390, 844)
 
 
 if __name__ == "__main__":
