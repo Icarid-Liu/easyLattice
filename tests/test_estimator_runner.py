@@ -217,6 +217,13 @@ class EstimatorRunnerTests(unittest.TestCase):
             },
         )
 
+    def test_attack_result_rejects_invalid_raw_rop_before_log_conversion(self):
+        for rop in (None, 0, -1, True, False, float("inf"), float("nan"), FAKE_OO):
+            with self.subTest(rop=rop):
+                result = attack_result({"rop": rop})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "invalid_attack_cost")
+
     def test_run_lwe_reports_partial_top_level_contract_and_echoes_parameters(self):
         FakeLWE.failures = {
             (model, "bdd_hybrid")
@@ -649,6 +656,51 @@ class EstimatorSpaceAppTests(unittest.TestCase):
             self.assertIn(str(Path(competing).resolve()), result["message"])
             self.assertIn(str(Path(selected).resolve()), result["message"])
             self.assertFalse(sentinel.exists())
+
+    def test_remote_runner_preserves_post_preflight_origin_mismatch(self):
+        with (
+            TemporaryDirectory() as selected,
+            TemporaryDirectory() as competing,
+            TemporaryDirectory() as scripts,
+        ):
+            for root in (selected, competing):
+                package = Path(root) / "estimator"
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
+
+            runner_executed = Path(scripts) / "runner-executed"
+            sage = Path(scripts) / "sage"
+            sage.write_text(
+                "#!/bin/sh\n"
+                "shift\n"
+                "if [ \"$1\" = \"-c\" ]; then\n"
+                f"  exec {shlex.quote(sys.executable)} \"$@\"\n"
+                "fi\n"
+                f": > {shlex.quote(str(runner_executed))}\n"
+                f"PYTHONPATH={shlex.quote(competing)} "
+                f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            sage.chmod(0o755)
+            environment = {
+                "SAGE_BINARY": str(sage),
+                "ENHANCED_LATTICE_ESTIMATOR_PATH": selected,
+                "EASYLATTICE_ESTIMATOR_ROOT": competing,
+                "PYTHONPATH": competing,
+            }
+
+            with patch.dict(os.environ, environment, clear=True):
+                result = self.space_app.run_estimator_subprocess(
+                    self.payload("enhanced"),
+                    5,
+                )
+            reached_runner = runner_executed.exists()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "estimator_origin_mismatch")
+        self.assertIn(str(Path(competing).resolve()), result["message"])
+        self.assertIn(str(Path(selected).resolve()), result["message"])
+        self.assertTrue(reached_runner)
 
     @staticmethod
     def pinned_enhanced_commits():

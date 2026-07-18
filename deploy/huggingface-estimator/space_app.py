@@ -315,6 +315,14 @@ def estimator_source_root(path: str) -> Path | None:
     return None
 
 
+def decode_json_object(output: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(output.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     sage_binary = os.environ.get("SAGE_BINARY", "sage")
     profile = str(payload.get("estimator_profile", "standard"))
@@ -396,6 +404,9 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
         env=env,
     )
     if completed.returncode != 0:
+        structured_error = decode_json_object(completed.stdout)
+        if structured_error is not None and structured_error.get("ok") is False:
+            return structured_error
         detail = (completed.stderr or completed.stdout).strip().splitlines()[-1:]
         message = detail[0] if detail else f"estimator exited with code {completed.returncode}"
         return {"ok": False, "message": message}

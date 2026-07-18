@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import unittest
@@ -271,7 +272,14 @@ class AgentConfigTests(unittest.TestCase):
                 stderr="",
             )
             inherited_path = os.pathsep.join((competing, "shared"))
-            with patch.dict(os.environ, {"PYTHONPATH": inherited_path}, clear=True), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "PYTHONPATH": inherited_path,
+                    "EASYLATTICE_ESTIMATOR_ROOT": competing,
+                },
+                clear=True,
+            ), patch(
                 "app.estimator_process.shutil.which",
                 return_value="/test/sage",
             ), patch(
@@ -298,6 +306,10 @@ class AgentConfigTests(unittest.TestCase):
         for call in (preflight_call, runner_call):
             self.assertEqual(call.kwargs["env"]["PYTHONPATH"], enhanced)
             self.assertEqual(call.kwargs["env"]["PYTHONNOUSERSITE"], "1")
+            self.assertEqual(
+                call.kwargs["env"]["EASYLATTICE_ESTIMATOR_ROOT"],
+                enhanced,
+            )
             self.assertNotIn(competing, call.kwargs["env"]["PYTHONPATH"])
         self.assertEqual(
             runner_call.kwargs["input"],
@@ -388,6 +400,52 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(mismatch["code"], "estimator_origin_mismatch")
         self.assertIn(str(Path(competing).resolve()), mismatch["message"])
         self.assertEqual(isolated, {"ok": True})
+
+    def test_local_runner_preserves_post_preflight_origin_mismatch(self):
+        with (
+            TemporaryDirectory() as selected,
+            TemporaryDirectory() as competing,
+            TemporaryDirectory() as scripts,
+        ):
+            for root in (selected, competing):
+                package = Path(root) / "estimator"
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
+
+            runner_executed = Path(scripts) / "runner-executed"
+            sage = Path(scripts) / "sage"
+            sage.write_text(
+                "#!/bin/sh\n"
+                "shift\n"
+                "if [ \"$1\" = \"-c\" ]; then\n"
+                f"  exec {shlex.quote(sys.executable)} \"$@\"\n"
+                "fi\n"
+                f": > {shlex.quote(str(runner_executed))}\n"
+                f"PYTHONPATH={shlex.quote(competing)} "
+                f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            sage.chmod(0o755)
+            config = AppConfig(
+                estimator=EstimatorConfig(
+                    sage_binary=str(sage),
+                    lattice_estimator_path=selected,
+                )
+            )
+            inherited = {
+                "EASYLATTICE_ESTIMATOR_ROOT": competing,
+                "PYTHONPATH": competing,
+            }
+
+            with patch.dict(os.environ, inherited, clear=True):
+                result = run_estimator({}, 5, config, "standard")
+            reached_runner = runner_executed.exists()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "estimator_origin_mismatch")
+        self.assertIn(str(Path(competing).resolve()), result["message"])
+        self.assertIn(str(Path(selected).resolve()), result["message"])
+        self.assertTrue(reached_runner)
 
     def test_run_estimator_returns_stable_local_failure_codes(self):
         missing_sage = AppConfig(estimator=EstimatorConfig(sage_binary="missing-sage"))

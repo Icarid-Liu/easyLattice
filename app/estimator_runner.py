@@ -103,7 +103,34 @@ def finite_rop_bits(value) -> bool:
         return False
 
 
+def valid_raw_rop(value) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        if value <= 0:
+            return False
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def attack_result(cost) -> dict:
+    try:
+        raw_rop = cost["rop"]
+    except (KeyError, TypeError):
+        raw_rop = None
+    if not valid_raw_rop(raw_rop):
+        return {
+            "ok": False,
+            "code": "invalid_attack_cost",
+            "message": "attack estimate returned no finite rop",
+            "summary": repr(cost),
+        }
     fields = cost_to_json(cost)
     if not finite_rop_bits(fields.get("rop_bits")):
         return {

@@ -125,6 +125,7 @@ def run_local_estimator(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root_path)
     env["PYTHONNOUSERSITE"] = "1"
+    env["EASYLATTICE_ESTIMATOR_ROOT"] = str(root_path)
     runner = Path(__file__).with_name("estimator_runner.py")
     application_root = Path(__file__).resolve().parents[1]
     try:
@@ -178,6 +179,9 @@ def run_local_estimator(
         }
 
     if completed.returncode != 0:
+        structured_error = decode_json_object(completed.stdout)
+        if structured_error is not None and structured_error.get("ok") is False:
+            return structured_error
         return process_failed(completed)
 
     data = decode_json_object(completed.stdout)
