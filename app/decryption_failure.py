@@ -9,6 +9,7 @@ from math import comb
 from typing import Any
 
 from .compression_noise import balanced_mod, compression_noise_pdf
+from .polynomial_ring import coefficient_profiles, ring_polynomial
 
 
 DEFAULT_PRECISION_BITS = 512
@@ -56,6 +57,11 @@ def calculate_ntru(
     tail_bits: int,
 ) -> dict[str, Any]:
     n = positive_int(raw.get("n"), "n")
+    ring_type = raw.get("ringType", raw.get("ring_type", "cyclic"))
+    if isinstance(ring_type, str):
+        ring_type = ring_type.strip().lower()
+    ring_description = ring_polynomial(n, ring_type)
+    profiles = coefficient_profiles(n, ring_type)
     delta = nonnegative_scalar(raw.get("delta", raw.get("Delta")), "delta")
     coefficients = {
         name: nonnegative_scalar(raw.get(name), name)
@@ -66,25 +72,70 @@ def calculate_ntru(
         for name in ("g", "f", "s", "e", "m")
     }
 
-    error = add_pmfs(
-        scaled_product_convolution(coefficients["p0"], distributions["g"], distributions["s"], n),
-        scaled_product_convolution(coefficients["p1"], distributions["f"], distributions["e"], n),
-        scaled_product_convolution(coefficients["p2"], distributions["f"], distributions["m"], n),
-        scale_pmf(distributions["e"], coefficients["p3"]),
+    product_terms = (
+        scaled_ring_products(
+            coefficients["p0"],
+            distributions["g"],
+            distributions["s"],
+            n,
+            ring_type,
+        ),
+        scaled_ring_products(
+            coefficients["p1"],
+            distributions["f"],
+            distributions["e"],
+            n,
+            ring_type,
+        ),
+        scaled_ring_products(
+            coefficients["p2"],
+            distributions["f"],
+            distributions["m"],
+            n,
+            ring_type,
+        ),
     )
-    return result_payload(
+    direct_error = scale_pmf(distributions["e"], coefficients["p3"])
+    coefficient_errors = tuple(
+        add_pmfs(*(term[index] for term in product_terms), direct_error)
+        for index in range(n)
+    )
+    payload = result_payload(
         kind="ntru",
         formula="p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e",
         dimensions={"n": n},
         delta=delta,
-        error=error,
+        error=coefficient_errors[0],
         vector_dimension=n,
         precision_bits=precision_bits,
         decimal_digits=decimal_digits,
         tail_bits=tail_bits,
         distributions=distributions,
         coefficients=coefficients,
+        coefficient_errors=coefficient_errors,
+        distinct_profiles=len({
+            (profile.positive_terms, profile.negative_terms)
+            for profile in profiles
+        }),
     )
+    payload["ring_type"] = ring_type
+    payload["ring_polynomial"] = ring_description
+    payload["coefficient_dfr"]["profiles"] = [
+        {
+            "positive_terms": profile.positive_terms,
+            "negative_terms": profile.negative_terms,
+        }
+        for profile in profiles
+    ]
+    if ring_type == "ntru_prime":
+        payload["warning_codes"] = list(dict.fromkeys(
+            payload["warning_codes"] + ["ntru_prime_coefficient_marginal"]
+        ))
+        payload["warnings"] = list(dict.fromkeys(payload["warnings"] + [
+            "NTRU Prime ring products use a coefficient-marginal approximation; "
+            "the vector union bound makes no joint independence claim.",
+        ]))
+    return payload
 
 
 def calculate_lwe(
@@ -141,19 +192,46 @@ def result_payload(
     tail_bits: int,
     distributions: dict[str, PMF],
     coefficients: dict[str, Decimal] | None = None,
+    coefficient_errors: tuple[PMF, ...] | None = None,
+    distinct_profiles: int | None = None,
 ) -> dict[str, Any]:
-    single_failure = sum(
-        probability
-        for value, probability in error.probabilities.items()
-        if abs(value) > delta
+    coefficient_specific = coefficient_errors is not None
+    errors = coefficient_errors if coefficient_specific else (error,) * vector_dimension
+    if len(errors) != vector_dimension:
+        raise ValueError("coefficient_errors must match the vector dimension.")
+    failures = [
+        sum(
+            probability
+            for value, probability in item.probabilities.items()
+            if abs(value) > delta
+        )
+        for item in errors
+    ]
+    worst_index = max(range(len(failures)), key=failures.__getitem__)
+    single_failure = failures[worst_index]
+    vector_failure = (
+        min(Decimal(1), sum(failures, Decimal(0)))
+        if coefficient_specific
+        else aggregate_vector_failure(single_failure, vector_dimension)
     )
-    vector_failure = aggregate_vector_failure(single_failure, vector_dimension)
-    warnings = list(error.warnings)
+    reported_error = errors[worst_index]
+    tail_bound = max(item.tail_bound for item in errors)
+    warnings = list(dict.fromkeys(
+        warning
+        for item in errors
+        for warning in item.warnings
+    ))
     aggregation_warning = "Vector DFR uses a union bound and does not assume independent output coefficients."
     if aggregation_warning not in warnings:
         warnings.append(aggregation_warning)
-    if error.tail_bound:
-        warnings.append("Reported probabilities exclude bounded discrete-Gaussian tails.")
+    warning_codes = ["dfr_union_bound"]
+    if tail_bound:
+        tail_warning = "Reported probabilities exclude bounded discrete-Gaussian tails."
+        if tail_warning not in warnings:
+            warnings.append(tail_warning)
+        warning_codes.append("dfr_gaussian_tail_excluded")
+    if any("fixed-weight" in warning for warning in warnings):
+        warning_codes.append("dfr_sparse_fixed_weight_marginal")
 
     payload: dict[str, Any] = {
         "ok": True,
@@ -169,25 +247,38 @@ def result_payload(
         "vector_dfr_log2_before_ecc": log2_text(vector_failure),
         "single_coefficient_failure_probability": decimal_text(single_failure),
         "vector_failure_probability_before_ecc": decimal_text(vector_failure),
+        "single_coefficient_semantics": (
+            "worst_coefficient"
+            if coefficient_specific
+            else "identical_coefficient_model"
+        ),
         "vector_aggregation": "union_bound",
-        "tail_probability_upper_bound": decimal_text(error.tail_bound),
+        "tail_probability_upper_bound": decimal_text(tail_bound),
         "error_support": {
-            "size": len(error.probabilities),
-            "minimum": decimal_text(min(error.probabilities)),
-            "maximum": decimal_text(max(error.probabilities)),
+            "size": len(reported_error.probabilities),
+            "minimum": decimal_text(min(reported_error.probabilities)),
+            "maximum": decimal_text(max(reported_error.probabilities)),
         },
         "distributions": {
             name: pmf_summary(pmf)
             for name, pmf in distributions.items()
         },
         "warnings": warnings,
+        "warning_codes": list(dict.fromkeys(warning_codes)),
         "error_correction": {
             "included": False,
+            "code": "dfr_ecc_external",
             "note": "Apply a scheme-specific error-correction calculation outside this module.",
         },
     }
     if coefficients is not None:
         payload["coefficients"] = {name: decimal_text(value) for name, value in coefficients.items()}
+    if coefficient_specific:
+        payload["coefficient_dfr"] = {
+            "worst_index": worst_index,
+            "distinct_profiles": distinct_profiles,
+            "failure_probabilities": [decimal_text(failure) for failure in failures],
+        }
     return payload
 
 
@@ -368,6 +459,44 @@ def scaled_product_convolution(scale: Decimal, left: PMF, right: PMF, dimension:
     if scale == 0:
         return zero_pmf()
     return scale_pmf(convolve_power(multiply_pmfs(left, right), dimension), scale)
+
+
+def ring_product_coefficient_pmfs(
+    left: PMF,
+    right: PMF,
+    n: int,
+    ring_type: str,
+) -> tuple[PMF, ...]:
+    profiles = coefficient_profiles(n, ring_type)
+    product = multiply_pmfs(left, right)
+    negative_product = scale_pmf(product, Decimal(-1))
+    cache: dict[tuple[int, int], PMF] = {}
+    results = []
+    for profile in profiles:
+        key = (profile.positive_terms, profile.negative_terms)
+        if key not in cache:
+            cache[key] = add_pmfs(
+                convolve_power(product, profile.positive_terms),
+                convolve_power(negative_product, profile.negative_terms),
+            )
+        results.append(cache[key])
+    return tuple(results)
+
+
+def scaled_ring_products(
+    scale: Decimal,
+    left: PMF,
+    right: PMF,
+    n: int,
+    ring_type: str,
+) -> tuple[PMF, ...]:
+    if scale == 0:
+        profiles = coefficient_profiles(n, ring_type)
+        return tuple(zero_pmf() for _ in profiles)
+    return tuple(
+        scale_pmf(pmf, scale)
+        for pmf in ring_product_coefficient_pmfs(left, right, n, ring_type)
+    )
 
 
 def zero_pmf() -> PMF:

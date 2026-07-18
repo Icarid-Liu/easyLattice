@@ -1,3 +1,5 @@
+import itertools
+import json
 import unittest
 from decimal import Decimal, localcontext
 
@@ -7,13 +9,130 @@ from app.decryption_failure import (
     kyber_nearest_compression_pmf,
     normalized_pmf,
     pmf_from_distribution,
+    ring_product_coefficient_pmfs,
+    scaled_ring_products,
 )
 
 
 ZERO = {"type": "custom_pmf", "pmf": {"0": "1"}}
+BERNOULLI = {"type": "custom_pmf", "pmf": {"0": "0.5", "1": "0.5"}}
+
+
+def ntru_product_payload(ring_type):
+    return {
+        "type": "ntru",
+        "ringType": ring_type,
+        "n": 3,
+        "p0": 1,
+        "p1": 0,
+        "p2": 0,
+        "p3": 0,
+        "delta": 1,
+        "g": BERNOULLI,
+        "s": BERNOULLI,
+        "f": ZERO,
+        "e": ZERO,
+        "m": ZERO,
+    }
+
+
+def independent_product_term_signs(n, ring_type, output_index):
+    signs = []
+    for left_degree in range(n):
+        for right_degree in range(n):
+            raw_degree = left_degree + right_degree
+            if raw_degree < n:
+                targets = ((raw_degree, 1),)
+            elif ring_type == "cyclic":
+                targets = ((raw_degree - n, 1),)
+            elif ring_type == "negacyclic":
+                targets = ((raw_degree - n, -1),)
+            elif ring_type == "ntru_prime":
+                targets = ((raw_degree - n, 1), (raw_degree - n + 1, 1))
+            else:
+                raise AssertionError("test reference requires a supported ring")
+            signs.extend(sign for output, sign in targets if output == output_index)
+    return signs
+
+
+def brute_force_bernoulli_product_coefficient(n, ring_type, output_index):
+    probabilities = {}
+    signs = independent_product_term_signs(n, ring_type, output_index)
+    product_probability = Decimal("0.25")
+    zero_probability = Decimal("0.75")
+    for outcomes in itertools.product((0, 1), repeat=len(signs)):
+        value = Decimal(sum(sign * outcome for sign, outcome in zip(signs, outcomes)))
+        probability = Decimal(1)
+        for outcome in outcomes:
+            probability *= product_probability if outcome else zero_probability
+        probabilities[value] = probabilities.get(value, Decimal(0)) + probability
+    return probabilities
 
 
 class DecryptionFailureTests(unittest.TestCase):
+    def test_ring_product_pmfs_and_failures_match_independent_brute_force(self):
+        bernoulli = normalized_pmf({Decimal(0): Decimal(1), Decimal(1): Decimal(1)})
+        for ring_type in ("cyclic", "negacyclic", "ntru_prime"):
+            with self.subTest(ring_type=ring_type):
+                coefficient_pmfs = ring_product_coefficient_pmfs(
+                    bernoulli,
+                    bernoulli,
+                    2,
+                    ring_type,
+                )
+                expected_pmfs = tuple(
+                    brute_force_bernoulli_product_coefficient(2, ring_type, index)
+                    for index in range(2)
+                )
+                self.assertEqual(
+                    tuple(pmf.probabilities for pmf in coefficient_pmfs),
+                    expected_pmfs,
+                )
+
+                result = calculate_decryption_failure(
+                    ntru_product_payload(ring_type) | {"n": 2, "delta": 0}
+                )
+                expected_failures = [
+                    sum(
+                        probability
+                        for value, probability in probabilities.items()
+                        if abs(value) > 0
+                    )
+                    for probabilities in expected_pmfs
+                ]
+                actual_failures = [
+                    Decimal(value)
+                    for value in result["coefficient_dfr"]["failure_probabilities"]
+                ]
+                self.assertEqual(actual_failures, expected_failures)
+                self.assertEqual(
+                    Decimal(result["single_coefficient_failure_probability"]),
+                    max(expected_failures),
+                )
+                self.assertEqual(
+                    Decimal(result["vector_failure_probability_before_ecc"]),
+                    min(Decimal(1), sum(expected_failures, Decimal(0))),
+                )
+
+    def test_ring_products_reuse_profiles_and_zero_scale_is_exact(self):
+        bernoulli = normalized_pmf({Decimal(0): Decimal(1), Decimal(1): Decimal(1)})
+        cyclic = ring_product_coefficient_pmfs(bernoulli, bernoulli, 4, "cyclic")
+        self.assertTrue(all(pmf is cyclic[0] for pmf in cyclic))
+
+        scaled = scaled_ring_products(
+            Decimal(0),
+            bernoulli,
+            bernoulli,
+            3,
+            "negacyclic",
+        )
+        self.assertEqual(
+            tuple(pmf.probabilities for pmf in scaled),
+            ({Decimal(0): Decimal(1)},) * 3,
+        )
+        with self.assertRaisesRegex(ValueError, "n must be at least 2 for ntru_prime"):
+            scaled_ring_products(Decimal(0), bernoulli, bernoulli, 1, "ntru_prime")
+
     def test_lwe_reports_single_and_vector_dfr(self):
         result = calculate_decryption_failure({
             "type": "lwe",
@@ -37,7 +156,10 @@ class DecryptionFailureTests(unittest.TestCase):
         self.assertNotIn("single_coefficient_dfr", result)
         self.assertEqual(result["precision_bits"], 512)
         self.assertEqual(result["success_condition"], "|E| <= Delta")
+        self.assertEqual(result["single_coefficient_semantics"], "identical_coefficient_model")
+        self.assertEqual(result["warning_codes"], ["dfr_union_bound"])
         self.assertFalse(result["error_correction"]["included"])
+        self.assertEqual(result["error_correction"]["code"], "dfr_ecc_external")
 
     def test_ntru_uses_p3_error_term_and_vector_dimension(self):
         result = calculate_decryption_failure({
@@ -57,6 +179,13 @@ class DecryptionFailureTests(unittest.TestCase):
 
         self.assertEqual(Decimal(result["single_coefficient_failure_probability"]), Decimal("0.5"))
         self.assertEqual(Decimal(result["vector_failure_probability_before_ecc"]), Decimal("1"))
+        self.assertEqual(result["ring_type"], "cyclic")
+        self.assertEqual(result["ring_polynomial"], "x^3 - 1")
+        self.assertEqual(result["single_coefficient_semantics"], "worst_coefficient")
+        self.assertEqual(
+            [Decimal(value) for value in result["coefficient_dfr"]["failure_probabilities"]],
+            [Decimal("0.5")] * 3,
+        )
 
     def test_boundary_at_delta_is_successful(self):
         payload = {
@@ -101,6 +230,12 @@ class DecryptionFailureTests(unittest.TestCase):
 
         self.assertEqual(Decimal(result["single_coefficient_failure_probability"]), Decimal("0.5"))
         self.assertTrue(any("fixed-weight" in warning for warning in result["warnings"]))
+        self.assertIn("dfr_sparse_fixed_weight_marginal", result["warning_codes"])
+        self.assertEqual(result["warning_codes"].count("dfr_sparse_fixed_weight_marginal"), 1)
+        self.assertEqual(
+            sum("fixed-weight" in warning for warning in result["warnings"]),
+            1,
+        )
 
     def test_kyber_nearest_compression_is_distinct_and_centered(self):
         with localcontext() as context:
@@ -157,6 +292,74 @@ class DecryptionFailureTests(unittest.TestCase):
         })
 
         self.assertLess(Decimal(result["tail_probability_upper_bound"]), Decimal(2) ** Decimal(-40))
+        self.assertIn("dfr_gaussian_tail_excluded", result["warning_codes"])
+
+    def test_ntru_reports_ring_and_worst_coefficient_metadata(self):
+        result = calculate_decryption_failure(ntru_product_payload("negacyclic"))
+
+        self.assertEqual(result["ring_type"], "negacyclic")
+        self.assertEqual(result["ring_polynomial"], "x^3 + 1")
+        self.assertEqual(result["single_coefficient_semantics"], "worst_coefficient")
+        self.assertEqual(result["coefficient_dfr"]["worst_index"], 2)
+        self.assertEqual(result["coefficient_dfr"]["distinct_profiles"], 3)
+        self.assertEqual(result["error_support"]["size"], 4)
+        self.assertEqual(Decimal(result["error_support"]["minimum"]), Decimal(0))
+        self.assertEqual(Decimal(result["error_support"]["maximum"]), Decimal(3))
+        self.assertEqual(result["coefficient_dfr"]["profiles"], [
+            {"positive_terms": 1, "negative_terms": 2},
+            {"positive_terms": 2, "negative_terms": 1},
+            {"positive_terms": 3, "negative_terms": 0},
+        ])
+
+    def test_ntru_prime_vector_union_sums_marginals_and_warns(self):
+        result = calculate_decryption_failure(ntru_product_payload("ntru_prime"))
+        coefficient_failures = [
+            Decimal(value)
+            for value in result["coefficient_dfr"]["failure_probabilities"]
+        ]
+
+        self.assertEqual(
+            Decimal(result["vector_failure_probability_before_ecc"]),
+            sum(coefficient_failures, Decimal(0)),
+        )
+        self.assertEqual(
+            Decimal(result["single_coefficient_failure_probability"]),
+            max(coefficient_failures),
+        )
+        self.assertEqual(result["coefficient_dfr"]["worst_index"], 1)
+        self.assertIn("ntru_prime_coefficient_marginal", result["warning_codes"])
+        self.assertTrue(any(
+            "no joint independence claim" in warning
+            for warning in result["warnings"]
+        ))
+
+    def test_ntru_accepts_snake_case_ring_and_rejects_invalid_rings(self):
+        snake_case_payload = ntru_product_payload("negacyclic")
+        snake_case_payload["ring_type"] = snake_case_payload.pop("ringType")
+        result = calculate_decryption_failure(snake_case_payload)
+        self.assertEqual(result["ring_type"], "negacyclic")
+
+        with self.assertRaisesRegex(ValueError, "ring_type"):
+            calculate_decryption_failure(ntru_product_payload("ordinary"))
+        with self.assertRaisesRegex(ValueError, "n must be at least 2 for ntru_prime"):
+            calculate_decryption_failure(ntru_product_payload("ntru_prime") | {"n": 1})
+
+    def test_ntru_dfr_numbers_are_decimal_strings_and_json_safe(self):
+        result = calculate_decryption_failure(ntru_product_payload("ntru_prime"))
+        decimal_fields = (
+            "delta",
+            "single_coefficient_dfr_log2",
+            "vector_dfr_log2_before_ecc",
+            "single_coefficient_failure_probability",
+            "vector_failure_probability_before_ecc",
+            "tail_probability_upper_bound",
+        )
+        self.assertTrue(all(isinstance(result[name], str) for name in decimal_fields))
+        self.assertTrue(all(
+            isinstance(value, str)
+            for value in result["coefficient_dfr"]["failure_probabilities"]
+        ))
+        json.dumps(result, allow_nan=False)
 
     def test_custom_pmf_and_noise_distribution_validation(self):
         invalid = {"type": "custom_pmf", "pmf": {"0": "0.2", "1": "0.2"}}
