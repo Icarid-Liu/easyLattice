@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-SUPPORTED_RING_TYPES = {"cyclic", "negacyclic", "ntru_prime"}
+SUPPORTED_RING_TYPES = frozenset({"cyclic", "negacyclic", "ntru_prime"})
 
 
 @dataclass(frozen=True)
@@ -13,10 +13,13 @@ class CoefficientProfile:
 
 
 def validate_ring(n: int, ring_type: str) -> None:
-    if n < 1:
-        raise ValueError("n must be at least 1.")
+    _validate_dimension(n)
+    if not isinstance(ring_type, str):
+        raise ValueError("ring_type must be a string.")
     if ring_type not in SUPPORTED_RING_TYPES:
         raise ValueError("ring_type must be one of cyclic, negacyclic, ntru_prime.")
+    if ring_type == "ntru_prime" and n < 2:
+        raise ValueError("n must be at least 2 for ntru_prime.")
 
 
 def ring_polynomial(n: int, ring_type: str) -> str:
@@ -25,7 +28,9 @@ def ring_polynomial(n: int, ring_type: str) -> str:
         return f"x^{n} - 1"
     if ring_type == "negacyclic":
         return f"x^{n} + 1"
-    return f"x^{n} - x - 1"
+    if ring_type == "ntru_prime":
+        return f"x^{n} - x - 1"
+    raise AssertionError("validated ring_type is not supported")
 
 
 def reduction_targets(
@@ -43,12 +48,13 @@ def reduction_targets(
         return ((output, 1),)
     if ring_type == "negacyclic":
         return ((output, -1),)
-    return ((output, 1), (output + 1, 1))
+    if ring_type == "ntru_prime":
+        return ((output, 1), (output + 1, 1))
+    raise AssertionError("validated ring_type is not supported")
 
 
 def raw_product_multiplicity(raw_degree: int, n: int) -> int:
-    if n < 1:
-        raise ValueError("n must be at least 1.")
+    _validate_dimension(n)
     _validate_raw_degree(raw_degree, n)
     if raw_degree < n:
         return raw_degree + 1
@@ -64,8 +70,10 @@ def coefficient_profiles(n: int, ring_type: str) -> tuple[CoefficientProfile, ..
         for output, sign in reduction_targets(raw_degree, n, ring_type):
             if sign == 1:
                 positive[output] += multiplicity
-            else:
+            elif sign == -1:
                 negative[output] += multiplicity
+            else:
+                raise AssertionError("reduction sign must be 1 or -1")
 
     return tuple(
         CoefficientProfile(positive[index], negative[index])
@@ -73,6 +81,15 @@ def coefficient_profiles(n: int, ring_type: str) -> tuple[CoefficientProfile, ..
     )
 
 
+def _validate_dimension(n: int) -> None:
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ValueError("n must be an integer.")
+    if n < 1:
+        raise ValueError("n must be at least 1.")
+
+
 def _validate_raw_degree(raw_degree: int, n: int) -> None:
+    if isinstance(raw_degree, bool) or not isinstance(raw_degree, int):
+        raise ValueError("raw_degree must be an integer.")
     if raw_degree < 0 or raw_degree > 2 * n - 2:
         raise ValueError("raw_degree must be between 0 and 2*n-2.")

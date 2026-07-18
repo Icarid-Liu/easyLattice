@@ -1,5 +1,7 @@
+import random
 import unittest
 from dataclasses import FrozenInstanceError
+from fractions import Fraction
 
 from app.polynomial_ring import (
     SUPPORTED_RING_TYPES,
@@ -13,27 +15,61 @@ from app.polynomial_ring import (
 
 
 RING_TYPES = ("cyclic", "negacyclic", "ntru_prime")
+MODULUS_LOW_TERMS = {
+    "cyclic": {0: -1},
+    "negacyclic": {0: 1},
+    "ntru_prime": {0: -1, 1: -1},
+}
+
+
+def modulus_coefficients(n, ring_type):
+    coefficients = [0] * (n + 1)
+    coefficients[n] = 1
+    for degree, value in MODULUS_LOW_TERMS[ring_type].items():
+        coefficients[degree] = value
+    return coefficients
+
+
+def integer_polynomial_remainder(polynomial, monic_modulus):
+    if not monic_modulus or monic_modulus[-1] != 1:
+        raise ValueError("test modulus must be monic")
+
+    modulus_degree = len(monic_modulus) - 1
+    remainder = list(polynomial)
+    while len(remainder) > modulus_degree:
+        leading = remainder[-1]
+        shift = len(remainder) - 1 - modulus_degree
+        if leading:
+            for degree, coefficient in enumerate(monic_modulus):
+                remainder[shift + degree] -= leading * coefficient
+        if remainder[-1] != 0:
+            raise AssertionError("long division did not cancel the leading term")
+        remainder.pop()
+
+    return remainder + [0] * (modulus_degree - len(remainder))
 
 
 def reference_targets(raw_degree, n, ring_type):
-    if raw_degree < n:
-        return ((raw_degree, 1),)
-    if ring_type == "cyclic":
-        return ((raw_degree - n, 1),)
-    if ring_type == "negacyclic":
-        return ((raw_degree - n, -1),)
-    return ((raw_degree - n, 1), (raw_degree - n + 1, 1))
+    monomial = [0] * (2 * n - 1)
+    monomial[raw_degree] = 1
+    remainder = integer_polynomial_remainder(
+        monomial,
+        modulus_coefficients(n, ring_type),
+    )
+    return tuple(
+        (degree, coefficient)
+        for degree, coefficient in enumerate(remainder)
+        if coefficient
+    )
 
 
 def reference_product(left, right, ring_type):
     n = len(left)
-    result = [0] * n
+    raw = [0] * (2 * n - 1)
     for left_degree, left_value in enumerate(left):
         for right_degree, right_value in enumerate(right):
-            raw_degree = left_degree + right_degree
-            for output, sign in reference_targets(raw_degree, n, ring_type):
-                result[output] += sign * left_value * right_value
-    return result
+            raw[left_degree + right_degree] += left_value * right_value
+    return integer_polynomial_remainder(raw, modulus_coefficients(n, ring_type))
 
 
 def product_using_targets(left, right, ring_type):
@@ -56,17 +92,28 @@ def reference_profiles(n, ring_type):
     for left_degree in range(n):
         for right_degree in range(n):
             raw_degree = left_degree + right_degree
-            for output, sign in reference_targets(raw_degree, n, ring_type):
-                if sign == 1:
-                    positive[output] += 1
-                else:
-                    negative[output] += 1
+            for output, coefficient in reference_targets(raw_degree, n, ring_type):
+                if coefficient > 0:
+                    positive[output] += coefficient
+                elif coefficient < 0:
+                    negative[output] -= coefficient
     return tuple(zip(positive, negative))
 
 
+def valid_dimensions(ring_type):
+    return range(2 if ring_type == "ntru_prime" else 1, 7)
+
+
 class PolynomialRingTests(unittest.TestCase):
-    def test_supported_ring_types_and_polynomial_names(self):
-        self.assertEqual(SUPPORTED_RING_TYPES, {"cyclic", "negacyclic", "ntru_prime"})
+    def test_supported_ring_types_are_immutable_and_names_are_exact(self):
+        self.assertIsInstance(SUPPORTED_RING_TYPES, frozenset)
+        self.assertEqual(
+            SUPPORTED_RING_TYPES,
+            frozenset({"cyclic", "negacyclic", "ntru_prime"}),
+        )
+        with self.assertRaises(AttributeError):
+            SUPPORTED_RING_TYPES.add("other")
+
         self.assertEqual(ring_polynomial(7, "cyclic"), "x^7 - 1")
         self.assertEqual(ring_polynomial(7, "negacyclic"), "x^7 + 1")
         self.assertEqual(ring_polynomial(7, "ntru_prime"), "x^7 - x - 1")
@@ -77,25 +124,43 @@ class PolynomialRingTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             profile.positive_terms = 3
 
-    def test_reduction_targets_match_reference_for_every_small_degree(self):
-        for n in range(1, 7):
-            for ring_type in RING_TYPES:
+    def test_reduction_targets_match_generic_remainder_for_every_small_degree(self):
+        for ring_type in RING_TYPES:
+            for n in valid_dimensions(ring_type):
                 for raw_degree in range(2 * n - 1):
                     with self.subTest(n=n, ring_type=ring_type, raw_degree=raw_degree):
                         targets = reduction_targets(raw_degree, n, ring_type)
                         self.assertEqual(targets, reference_targets(raw_degree, n, ring_type))
                         self.assertTrue(all(0 <= output < n for output, _ in targets))
 
-    def test_reduction_targets_reconstruct_all_three_products(self):
-        for n in range(1, 7):
-            left = [(-1) ** i * (i + 1) for i in range(n)]
-            right = [((i * i + 2) % 7) - 3 for i in range(n)]
-            for ring_type in RING_TYPES:
-                with self.subTest(n=n, ring_type=ring_type):
-                    self.assertEqual(
-                        product_using_targets(left, right, ring_type),
-                        reference_product(left, right, ring_type),
+    def test_reduction_targets_reconstruct_deterministic_and_random_products(self):
+        random_source = random.Random(20260718)
+        for ring_type in RING_TYPES:
+            for n in valid_dimensions(ring_type):
+                cases = [
+                    (
+                        [(-1) ** i * (i + 1) for i in range(n)],
+                        [((i * i + 2) % 7) - 3 for i in range(n)],
                     )
+                ]
+                cases.extend(
+                    (
+                        [random_source.randint(-5, 5) for _ in range(n)],
+                        [random_source.randint(-5, 5) for _ in range(n)],
+                    )
+                    for _ in range(8)
+                )
+
+                for case_index, (left, right) in enumerate(cases):
+                    with self.subTest(
+                        n=n,
+                        ring_type=ring_type,
+                        case_index=case_index,
+                    ):
+                        self.assertEqual(
+                            product_using_targets(left, right, ring_type),
+                            reference_product(left, right, ring_type),
+                        )
 
     def test_raw_product_multiplicity_counts_coefficient_pairs(self):
         for n in range(1, 7):
@@ -108,9 +173,9 @@ class PolynomialRingTests(unittest.TestCase):
                 with self.subTest(n=n, raw_degree=raw_degree):
                     self.assertEqual(raw_product_multiplicity(raw_degree, n), expected)
 
-    def test_profiles_match_independent_pair_enumeration(self):
-        for n in range(1, 7):
-            for ring_type in RING_TYPES:
+    def test_profiles_match_generic_remainder_pair_enumeration(self):
+        for ring_type in RING_TYPES:
+            for n in valid_dimensions(ring_type):
                 actual = tuple(
                     (profile.positive_terms, profile.negative_terms)
                     for profile in coefficient_profiles(n, ring_type)
@@ -131,42 +196,107 @@ class PolynomialRingTests(unittest.TestCase):
             [(profile.positive_terms, profile.negative_terms) for profile in negacyclic],
             [(1, 3), (2, 2), (3, 1), (4, 0)],
         )
-        self.assertEqual(sum(profile.positive_terms for profile in ntru_prime), 22)
+        self.assertEqual(
+            [(profile.positive_terms, profile.negative_terms) for profile in ntru_prime],
+            [(4, 0), (7, 0), (6, 0), (5, 0)],
+        )
 
-    def test_unknown_ring_type_is_rejected(self):
-        for operation in (
-            lambda: validate_ring(4, "unknown"),
-            lambda: ring_polynomial(4, "unknown"),
-            lambda: reduction_targets(0, 4, "unknown"),
-            lambda: coefficient_profiles(4, "unknown"),
-        ):
-            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "ring_type"):
-                operation()
+    def test_unknown_and_malformed_ring_types_are_rejected(self):
+        for ring_type in ("unknown", "", None, 1, True, Fraction(1, 1), ["cyclic"]):
+            for name, operation in (
+                ("validate_ring", lambda ring_type=ring_type: validate_ring(4, ring_type)),
+                ("ring_polynomial", lambda ring_type=ring_type: ring_polynomial(4, ring_type)),
+                (
+                    "reduction_targets",
+                    lambda ring_type=ring_type: reduction_targets(0, 4, ring_type),
+                ),
+                (
+                    "coefficient_profiles",
+                    lambda ring_type=ring_type: coefficient_profiles(4, ring_type),
+                ),
+            ):
+                with (
+                    self.subTest(name=name, ring_type=ring_type),
+                    self.assertRaisesRegex(ValueError, "^ring_type "),
+                ):
+                    operation()
+
+    def test_non_integer_dimensions_are_rejected(self):
+        for n in (True, False, 1.0, Fraction(1, 1), "1", None):
+            for name, operation in (
+                ("validate_ring", lambda n=n: validate_ring(n, "cyclic")),
+                ("ring_polynomial", lambda n=n: ring_polynomial(n, "cyclic")),
+                ("reduction_targets", lambda n=n: reduction_targets(0, n, "cyclic")),
+                ("raw_product_multiplicity", lambda n=n: raw_product_multiplicity(0, n)),
+                ("coefficient_profiles", lambda n=n: coefficient_profiles(n, "cyclic")),
+            ):
+                with (
+                    self.subTest(name=name, n=n),
+                    self.assertRaisesRegex(ValueError, "^n "),
+                ):
+                    operation()
 
     def test_nonpositive_dimensions_are_rejected(self):
         for n in (0, -1):
-            for operation in (
-                lambda n=n: validate_ring(n, "cyclic"),
-                lambda n=n: ring_polynomial(n, "cyclic"),
-                lambda n=n: reduction_targets(0, n, "cyclic"),
-                lambda n=n: raw_product_multiplicity(0, n),
-                lambda n=n: coefficient_profiles(n, "cyclic"),
+            for name, operation in (
+                ("validate_ring", lambda n=n: validate_ring(n, "cyclic")),
+                ("ring_polynomial", lambda n=n: ring_polynomial(n, "cyclic")),
+                ("reduction_targets", lambda n=n: reduction_targets(0, n, "cyclic")),
+                ("raw_product_multiplicity", lambda n=n: raw_product_multiplicity(0, n)),
+                ("coefficient_profiles", lambda n=n: coefficient_profiles(n, "cyclic")),
             ):
-                with self.subTest(n=n, operation=operation), self.assertRaisesRegex(ValueError, "n"):
+                with (
+                    self.subTest(name=name, n=n),
+                    self.assertRaisesRegex(ValueError, "^n "),
+                ):
                     operation()
 
-    def test_bad_raw_degrees_are_rejected(self):
-        for n in (1, 4):
-            for raw_degree in (-1, 2 * n - 1):
-                for operation in (
-                    lambda raw_degree=raw_degree, n=n: reduction_targets(raw_degree, n, "cyclic"),
-                    lambda raw_degree=raw_degree, n=n: raw_product_multiplicity(raw_degree, n),
+    def test_ntru_prime_requires_dimension_at_least_two(self):
+        for name, operation in (
+            ("validate_ring", lambda: validate_ring(1, "ntru_prime")),
+            ("ring_polynomial", lambda: ring_polynomial(1, "ntru_prime")),
+            ("reduction_targets", lambda: reduction_targets(0, 1, "ntru_prime")),
+            ("coefficient_profiles", lambda: coefficient_profiles(1, "ntru_prime")),
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "^n must be at least 2 for ntru_prime[.]$",
+                ),
+            ):
+                operation()
+
+        self.assertEqual(ring_polynomial(1, "cyclic"), "x^1 - 1")
+        self.assertEqual(ring_polynomial(1, "negacyclic"), "x^1 + 1")
+
+    def test_non_integer_and_out_of_range_raw_degrees_are_rejected(self):
+        invalid_degrees = (
+            True,
+            False,
+            1.0,
+            Fraction(1, 1),
+            "1",
+            None,
+            -1,
+            7,
+        )
+        for raw_degree in invalid_degrees:
+            for name, operation in (
+                (
+                    "reduction_targets",
+                    lambda raw_degree=raw_degree: reduction_targets(raw_degree, 4, "cyclic"),
+                ),
+                (
+                    "raw_product_multiplicity",
+                    lambda raw_degree=raw_degree: raw_product_multiplicity(raw_degree, 4),
+                ),
+            ):
+                with (
+                    self.subTest(name=name, raw_degree=raw_degree),
+                    self.assertRaisesRegex(ValueError, "^raw_degree "),
                 ):
-                    with (
-                        self.subTest(n=n, raw_degree=raw_degree, operation=operation),
-                        self.assertRaisesRegex(ValueError, "raw_degree"),
-                    ):
-                        operation()
+                    operation()
 
 
 if __name__ == "__main__":
