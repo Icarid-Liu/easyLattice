@@ -4,7 +4,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, getcontext, localcontext
+from decimal import Decimal, DecimalException, ROUND_CEILING, ROUND_FLOOR, getcontext, localcontext
 from fractions import Fraction
 from math import comb
 from typing import Any
@@ -21,9 +21,10 @@ MAX_TAIL_BITS = 1024
 MAX_NTRU_DIMENSION = 4096
 MAX_LWE_DIMENSION = 65_536
 MAX_SAFE_INTEGER_PARAMETER = 2**53 - 1
+MAX_SCALAR_ABS = MAX_SAFE_INTEGER_PARAMETER
 # PMF coordinates stay within a safe exact-integer magnitude before grid conversion.
 MAX_PMF_ABS_SUPPORT = MAX_SAFE_INTEGER_PARAMETER
-MAX_INTEGER_TEXT_LENGTH = 64
+MAX_NUMERIC_TEXT_LENGTH = 64
 MAX_NUMERIC_EXPONENT_ABS = 1_000
 MAX_COMPRESSION_BITS = 63
 MAX_RING_PROFILE_WORK = 1_000_000
@@ -62,14 +63,19 @@ def calculate_decryption_failure(raw: dict[str, Any] | None = None) -> dict[str,
     )
 
     decimal_digits = decimal_digits_for_bits(precision_bits)
-    with localcontext() as context:
-        context.prec = decimal_digits
-        kind = str(raw.get("type", "")).strip().lower()
-        if kind == "ntru":
-            return calculate_ntru(raw, precision_bits, decimal_digits, tail_bits)
-        if kind == "lwe":
-            return calculate_lwe(raw, precision_bits, decimal_digits, tail_bits)
-        raise ValueError("type must be one of ntru, lwe.")
+    try:
+        with localcontext() as context:
+            context.prec = decimal_digits
+            kind = str(raw.get("type", "")).strip().lower()
+            if kind == "ntru":
+                return calculate_ntru(raw, precision_bits, decimal_digits, tail_bits)
+            if kind == "lwe":
+                return calculate_lwe(raw, precision_bits, decimal_digits, tail_bits)
+            raise ValueError("type must be one of ntru, lwe.")
+    except DecimalException as exc:
+        raise ValueError(
+            "DFR numeric calculation exceeds the supported Decimal range."
+        ) from exc
 
 
 def calculate_ntru(
@@ -1000,12 +1006,15 @@ def bounded_finite_decimal(
     maximum_name: str,
 ) -> Decimal:
     limit_message = (
-        f"{label} magnitude must not exceed {maximum} ({maximum_name})."
+        f"{label} exceeds supported numeric limits: magnitude must not exceed "
+        f"{maximum} ({maximum_name}), exponent magnitude must not exceed "
+        f"{MAX_NUMERIC_EXPONENT_ABS}, and text length must not exceed "
+        f"{MAX_NUMERIC_TEXT_LENGTH}."
     )
     return bounded_decimal_number(
         raw,
         maximum,
-        f"{label} must be a finite decimal number bounded by {maximum_name}.",
+        f"{label} must be a finite decimal number within supported {maximum_name} limits.",
         limit_message,
     )
 
@@ -1054,7 +1063,7 @@ def bounded_decimal_text(
     invalid_message: str,
     limit_message: str,
 ) -> Decimal:
-    if len(raw) > MAX_INTEGER_TEXT_LENGTH:
+    if len(raw) > MAX_NUMERIC_TEXT_LENGTH:
         raise ValueError(limit_message)
     text = raw.strip()
     match = DECIMAL_NUMBER_PATTERN.fullmatch(text)
@@ -1065,7 +1074,7 @@ def bounded_decimal_text(
         raise ValueError(invalid_message)
     try:
         value = Decimal(text)
-    except (InvalidOperation, ValueError) as exc:
+    except (DecimalException, ValueError) as exc:
         raise ValueError(invalid_message) from exc
     return validated_bounded_decimal(
         value,
@@ -1147,18 +1156,28 @@ def nonnegative_scalar(raw: Any, label: str) -> Decimal:
 
 
 def scalar(raw: Any, label: str) -> Decimal:
-    if raw is None or isinstance(raw, bool):
-        raise ValueError(f"{label} must be a finite number.")
-    text = str(raw).strip()
-    if text == "sqrt(2)":
-        return Decimal(2).sqrt()
-    try:
-        value = Decimal(text)
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{label} must be a finite number or sqrt(2).") from exc
-    if not value.is_finite():
-        raise ValueError(f"{label} must be a finite number.")
-    return value
+    invalid_message = (
+        f"{label} must be a finite number or sqrt(2) within supported numeric limits."
+    )
+    limit_message = (
+        f"{label} exceeds supported numeric limits: magnitude must not exceed "
+        f"{MAX_SCALAR_ABS} (MAX_SCALAR_ABS), exponent magnitude must not exceed "
+        f"{MAX_NUMERIC_EXPONENT_ABS}, and text length must not exceed "
+        f"{MAX_NUMERIC_TEXT_LENGTH}."
+    )
+    if isinstance(raw, str) and raw.strip() == "sqrt(2)":
+        return validated_bounded_decimal(
+            Decimal(2).sqrt(),
+            MAX_SCALAR_ABS,
+            invalid_message,
+            limit_message,
+        )
+    return bounded_decimal_number(
+        raw,
+        MAX_SCALAR_ABS,
+        invalid_message,
+        limit_message,
+    )
 
 
 def decimal_digits_for_bits(bits: int) -> int:

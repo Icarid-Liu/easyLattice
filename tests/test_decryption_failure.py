@@ -1,7 +1,7 @@
 import itertools
 import json
 import unittest
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from unittest import mock
 
 import app.decryption_failure as dfr
@@ -328,6 +328,92 @@ class DecryptionFailureTests(unittest.TestCase):
                     dfr.MAX_NTRU_DIMENSION,
                     "MAX_NTRU_DIMENSION",
                 )
+
+    def test_hostile_scalar_text_is_rejected_across_all_untrusted_decimal_fields(self):
+        huge_positive_exponent = "1e10000000"
+        huge_negative_exponent = "1e-10000000"
+        huge_digits = "9" * 100_000
+        base = ntru_product_payload("cyclic") | {
+            "n": 1,
+            "p0": 0,
+            "delta": 1,
+        }
+
+        def coefficient(value):
+            return base | {"p0": value}
+
+        def delta(value):
+            return base | {"delta": value}
+
+        def gaussian_mean(value):
+            return base | {
+                "e": {"type": "discrete_gaussian", "stddev": "1", "mean": value},
+            }
+
+        def gaussian_stddev(value):
+            return base | {
+                "e": {"type": "discrete_gaussian", "stddev": value, "mean": "0"},
+            }
+
+        def pmf_support(value):
+            return base | {
+                "e": {"type": "custom_pmf", "pmf": {value: "1"}},
+            }
+
+        def pmf_probability(value):
+            return base | {
+                "e": {"type": "custom_pmf", "pmf": {"0": value}},
+            }
+
+        fields = (
+            ("p0", coefficient),
+            ("delta", delta),
+            ("e.mean", gaussian_mean),
+            ("e.stddev", gaussian_stddev),
+            ("e.pmf value", pmf_support),
+            ("e.pmf", pmf_probability),
+        )
+        for label, payload_for in fields:
+            for hostile in (
+                huge_positive_exponent,
+                huge_negative_exponent,
+                huge_digits,
+            ):
+                with (
+                    self.subTest(label=label, hostile=hostile[:24]),
+                    self.assertRaisesRegex(ValueError, label.replace(".", r"\.") + ".*supported"),
+                ):
+                    calculate_decryption_failure(payload_for(hostile))
+
+    def test_bounded_scalar_forms_remain_supported(self):
+        result = calculate_decryption_failure(
+            ntru_product_payload("cyclic")
+            | {
+                "n": 1,
+                "p0": "  +1.25e1  ",
+                "p1": "sqrt(2)",
+                "delta": Decimal("1.5e2"),
+                "g": {"type": "custom_pmf", "pmf": {"-5e-1": "2.5e-1", "1.25": ".75"}},
+                "s": ONE,
+            }
+        )
+
+        self.assertEqual(Decimal(result["coefficients"]["p0"]), Decimal("12.5"))
+        sqrt_two = Decimal(result["coefficients"]["p1"])
+        self.assertLess(abs(sqrt_two * sqrt_two - Decimal(2)), Decimal("1e-25"))
+        self.assertEqual(Decimal(result["delta"]), Decimal("150"))
+
+    def test_decimal_arithmetic_failures_are_normalized_to_value_error(self):
+        for decimal_error in (Overflow(), InvalidOperation()):
+            with (
+                self.subTest(decimal_error=type(decimal_error).__name__),
+                mock.patch.object(dfr, "calculate_ntru", side_effect=decimal_error),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "DFR numeric calculation exceeds the supported Decimal range",
+                ),
+            ):
+                calculate_decryption_failure({"type": "ntru"})
 
     def test_exact_integer_json_values_remain_supported(self):
         result = calculate_decryption_failure(
