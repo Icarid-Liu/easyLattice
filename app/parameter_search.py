@@ -67,6 +67,9 @@ VALIDATION_CONFIG_ERROR_CODES = {
     "estimator_path_invalid",
     "estimator_origin_mismatch",
 }
+ESTIMATOR_MODELS = ("matzov", "adps16")
+ESTIMATOR_MODES = ("classical", "quantum")
+INVALID_ESTIMATOR_RESPONSE_CODE = "invalid_estimator_response"
 
 
 @dataclass(frozen=True)
@@ -119,11 +122,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
     viable = [c for c in candidates if meets_target(c["security"], request)]
     ranked = sorted(viable or candidates, key=lambda c: candidate_rank(c, request))
 
-    profile = (
-        estimator_profile_for(request.hard_problem_category, request.hard_problem_variant)
-        if request.hard_problem_category in {"lwe", "ntru"}
-        else "standard"
-    )
+    profile = estimator_profile_for(request.hard_problem_category, request.hard_problem_variant)
     eligible_candidates: dict[str, dict[str, Any]] = {}
     for candidate in raw_candidates:
         eligible_candidates.setdefault(validation_candidate_key(candidate), candidate)
@@ -155,28 +154,34 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
         estimator_commit = None
         for candidate in validation_pool[:max_validation_attempts]:
             attempts += 1
-            result = run_sage_estimator(
+            raw_result = run_sage_estimator(
                 candidate,
                 request.estimator_timeout,
                 config=config,
                 request=request,
                 profile=profile,
             )
-            estimator_result["validated"].append(result)
-            estimator_commit = estimator_commit or result.get("estimator_commit")
-            if result.get("ok"):
+            result, validation_entry = normalize_estimator_response(
+                raw_result,
+                request=request,
+                expected_profile=profile,
+            )
+            estimator_result["validated"].append(validation_entry)
+            if result is not None:
+                estimator_commit = estimator_commit or result.get("estimator_commit")
                 successful += 1
                 covered_keys.add(validation_candidate_key(candidate))
-                attacks_complete = attacks_complete and bool(result.get("complete"))
+                attacks_complete = attacks_complete and result["complete"]
                 apply_estimator_result(candidate, result, request, profile=profile)
                 validated_candidates.append(candidate)
                 validation_codes.append("validation_applied")
-                if not result.get("complete"):
+                if not result["complete"]:
+                    estimator_result["ok"] = False
                     validation_codes.append("validation_partial_attacks")
             else:
                 estimator_result["ok"] = False
-                code = result.get("code")
-                message = result.get("message", "Sage/lattice-estimator could not estimate this candidate.")
+                code = validation_entry.get("code")
+                message = validation_entry["message"]
                 failure_messages.append(message)
                 candidate["warnings"].append(message)
                 if code in VALIDATION_CONFIG_ERROR_CODES:
@@ -248,6 +253,8 @@ def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> Reque
         raise ValueError("target_security must be between 40 and 512 bits.")
 
     hard_problem_category, hard_problem_variant = parse_hard_problem(raw)
+    if hard_problem_category != "lwe":
+        raise ValueError("LWE parameter search requires hard_problem_category=lwe.")
 
     model = str(raw.get("security_model", raw.get("securityModel", "classical"))).lower()
     if model not in SUPPORTED_SECURITY_MODELS:
@@ -771,23 +778,33 @@ def selected_security_bits(security: dict[str, Any], request: RequestOptions) ->
 
 
 def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: str) -> tuple[float, float]:
-    classical = float(security["classical_bits"])
-    quantum = float(security["quantum_bits"])
+    classical = optional_security_bits(security.get("classical_bits"))
+    quantum = optional_security_bits(security.get("quantum_bits"))
     if red_cost_model == "adps16":
-        adps16 = security.get("adps16_core_svp_bits")
-        adps16_quantum = security.get("adps16_quantum_bits")
+        adps16 = optional_security_bits(security.get("adps16_core_svp_bits"))
+        adps16_quantum = optional_security_bits(security.get("adps16_quantum_bits"))
         if adps16 is not None:
-            classical = float(adps16)
+            classical = adps16
         if adps16_quantum is not None:
-            quantum = float(adps16_quantum)
+            quantum = adps16_quantum
     if red_cost_model == "matzov":
-        matzov = security.get("matzov_bits")
-        matzov_quantum = security.get("matzov_quantum_bits")
+        matzov = optional_security_bits(security.get("matzov_bits"))
+        matzov_quantum = optional_security_bits(security.get("matzov_quantum_bits"))
         if matzov is not None:
-            classical = float(matzov)
+            classical = matzov
         if matzov_quantum is not None:
-            quantum = float(matzov_quantum)
-    return classical, quantum
+            quantum = matzov_quantum
+    return (
+        classical if classical is not None else float("-inf"),
+        quantum if quantum is not None else float("-inf"),
+    )
+
+
+def optional_security_bits(value: Any) -> float | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    bits = float(value)
+    return bits if math.isfinite(bits) else None
 
 
 def security_margin_bits(security: dict[str, Any], request: RequestOptions) -> float:
@@ -1083,7 +1100,7 @@ def ntt_prime_candidates(
         added_for_bits = 0
         for k in range(start_k, stop_k + 1, step):
             q = k * modulus + 1
-            if modulus_bits(q) > max_q_bits:
+            if not min_q_bits <= modulus_bits(q) <= max_q_bits:
                 continue
             if is_prime(q):
                 found.add(q)
@@ -1370,6 +1387,111 @@ def format_factorization(factors: dict[int, int]) -> str:
     return " * ".join(pieces)
 
 
+def invalid_estimator_response(message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": INVALID_ESTIMATOR_RESPONSE_CODE,
+        "message": f"Invalid estimator response: {message}",
+    }
+
+
+def normalize_mode_results(modes: Any, context: str) -> dict[str, dict[str, Any]]:
+    if not isinstance(modes, dict):
+        raise ValueError(f"{context} must be an object")
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for mode, mode_result in modes.items():
+        if not isinstance(mode_result, dict):
+            raise ValueError(f"{context}.{mode} must be an object")
+        if type(mode_result.get("ok")) is not bool:
+            raise ValueError(f"{context}.{mode}.ok must be a boolean")
+        if type(mode_result.get("complete")) is not bool:
+            raise ValueError(f"{context}.{mode}.complete must be a boolean")
+
+        normalized_mode = dict(mode_result)
+        if "min_bits" in mode_result:
+            bits = mode_result["min_bits"]
+            if isinstance(bits, bool) or not isinstance(bits, (int, float)):
+                raise ValueError(f"{context}.{mode}.min_bits must be a finite nonnegative number")
+            bits = float(bits)
+            if not math.isfinite(bits) or bits < 0:
+                raise ValueError(f"{context}.{mode}.min_bits must be a finite nonnegative number")
+            normalized_mode["min_bits"] = bits
+        elif mode_result["ok"]:
+            raise ValueError(f"{context}.{mode}.min_bits is required when ok is true")
+        normalized[str(mode)] = normalized_mode
+    return normalized
+
+
+def normalize_estimator_response(
+    response: Any,
+    request: RequestOptions,
+    expected_profile: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if not isinstance(response, dict):
+        failure = invalid_estimator_response("expected an object")
+        return None, failure
+
+    has_structured_results = "models" in response or "modes" in response
+    if response.get("ok") is False and not has_structured_results:
+        failure = dict(response)
+        message = failure.get("message")
+        if not isinstance(message, str) or not message:
+            message = "Sage/lattice-estimator could not estimate this candidate."
+        failure["message"] = message
+        return None, failure
+
+    if type(response.get("ok")) is not bool:
+        return None, invalid_estimator_response("ok must be a boolean")
+    if type(response.get("complete")) is not bool:
+        return None, invalid_estimator_response("complete must be a boolean")
+    if response.get("estimator_profile") != expected_profile:
+        return None, invalid_estimator_response(
+            f"estimator_profile must be {expected_profile}"
+        )
+    estimator_commit = response.get("estimator_commit")
+    if estimator_commit is not None and not isinstance(estimator_commit, str):
+        return None, invalid_estimator_response("estimator_commit must be a string or null")
+
+    models = response.get("models")
+    modes = response.get("modes")
+    if not isinstance(models, dict):
+        return None, invalid_estimator_response("models must be an object")
+
+    try:
+        normalized_models = {
+            str(model): normalize_mode_results(model_modes, f"models.{model}")
+            for model, model_modes in models.items()
+        }
+        normalized_modes = normalize_mode_results(modes, "modes")
+    except ValueError as exc:
+        return None, invalid_estimator_response(str(exc))
+
+    requested_mode_has_bits = any(
+        normalized_models.get(model, {}).get(request.security_model, {}).get("ok")
+        for model in ESTIMATOR_MODELS
+    )
+    if not requested_mode_has_bits:
+        return None, invalid_estimator_response(
+            f"no finite {request.security_model} security estimate was returned"
+        )
+
+    all_modes_complete = all(
+        normalized_models.get(model, {}).get(mode, {}).get("ok")
+        and normalized_models[model][mode]["complete"]
+        for model in ESTIMATOR_MODELS
+        for mode in ESTIMATOR_MODES
+    )
+    normalized = dict(response)
+    normalized["ok"] = True
+    normalized["complete"] = bool(
+        response["ok"] and response["complete"] and all_modes_complete
+    )
+    normalized["models"] = normalized_models
+    normalized["modes"] = normalized_modes
+    return normalized, response
+
+
 def run_sage_estimator(
     candidate: dict[str, Any],
     timeout: int,
@@ -1411,13 +1533,13 @@ def apply_estimator_result(
     adps16_quantum = estimator_model_bits(estimator_result, "adps16", "quantum")
     matzov_classical = estimator_model_bits(estimator_result, "matzov", "classical")
     matzov_quantum = estimator_model_bits(estimator_result, "matzov", "quantum")
-    classical_bits = adps16_classical or candidate["security"]["classical_bits"]
-    quantum_bits = adps16_quantum or candidate["security"]["quantum_bits"]
+    classical_bits = adps16_classical if adps16_classical is not None else matzov_classical
+    quantum_bits = adps16_quantum if adps16_quantum is not None else matzov_quantum
     candidate["security"] = {
         "source": "sage-lattice-estimator",
         "source_code": f"sage_{resolved_profile}",
-        "classical_bits": floor_bits(float(classical_bits)),
-        "quantum_bits": floor_bits(float(quantum_bits)),
+        "classical_bits": floor_optional_bits(classical_bits),
+        "quantum_bits": floor_optional_bits(quantum_bits),
         "matzov_bits": floor_optional_bits(matzov_classical),
         "matzov_quantum_bits": floor_optional_bits(matzov_quantum),
         "adps16_core_svp_bits": floor_optional_bits(adps16_classical),
@@ -1426,7 +1548,7 @@ def apply_estimator_result(
         "estimator_commit": estimator_result.get("estimator_commit"),
         "notes": [
             "Estimated as an LWE instance with n RLWE samples; use full scheme analysis for production.",
-            "MATZOV and ADPS16 are each evaluated with their classical and quantum cost models.",
+            "Available MATZOV and ADPS16 mode estimates are reported without fast-screen substitution.",
         ],
     }
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
@@ -1442,10 +1564,18 @@ def apply_estimator_result(
 
 
 def estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str) -> float | None:
-    model_modes = estimator_result.get("models", {}).get(model)
-    mode_result = model_modes.get(mode, {}) if isinstance(model_modes, dict) else estimator_result.get("modes", {}).get(mode, {})
-    if mode_result.get("ok") and mode_result.get("min_bits") is not None:
-        return float(mode_result["min_bits"])
+    models = estimator_result.get("models")
+    if not isinstance(models, dict):
+        return None
+    model_modes = models.get(model)
+    if not isinstance(model_modes, dict):
+        return None
+    mode_result = model_modes.get(mode)
+    if not isinstance(mode_result, dict) or mode_result.get("ok") is not True:
+        return None
+    bits = optional_security_bits(mode_result.get("min_bits"))
+    if bits is not None and bits >= 0:
+        return bits
     return None
 
 

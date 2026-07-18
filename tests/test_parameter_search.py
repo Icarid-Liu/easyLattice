@@ -48,6 +48,37 @@ def estimator_success(bits=140.0, complete=True, profile="enhanced", commit="abc
     }
 
 
+def estimator_partial_single_mode(bits=149.0):
+    failed_mode = {
+        "ok": False,
+        "complete": False,
+        "message": "no attack estimate completed",
+        "attacks": {},
+    }
+    models = {
+        model: {
+            mode: dict(failed_mode)
+            for mode in ("classical", "quantum")
+        }
+        for model in ("matzov", "adps16")
+    }
+    models["matzov"]["classical"] = {
+        "ok": True,
+        "complete": True,
+        "min_bits": bits,
+        "best_attack": "usvp",
+        "attacks": {},
+    }
+    return {
+        "ok": False,
+        "complete": False,
+        "estimator_profile": "enhanced",
+        "estimator_commit": "partial123",
+        "modes": models["adps16"],
+        "models": models,
+    }
+
+
 def small_validation_request(**overrides):
     request = {
         "hardProblemCategory": "lwe",
@@ -158,6 +189,19 @@ class ParameterSearchTests(unittest.TestCase):
         for q in primes:
             self.assertEqual((q - 1) % 256, 0)
             self.assertTrue(is_prime(q))
+
+    def test_structured_prime_generation_enforces_minimum_modulus_bits(self):
+        primes = ntt_prime_candidates(
+            512,
+            max_q_bits=10,
+            ntt_scale_power=1,
+            min_q_bits=10,
+            limit=20,
+        )
+
+        self.assertIn(769, primes)
+        self.assertNotIn(257, primes)
+        self.assertTrue(all(modulus_bits(q) == 10 for q in primes))
 
     def test_default_recommendation_has_rlwe_shape(self):
         result = recommend_rlwe({"targetSecurity": 128, "securityModel": "classical"})
@@ -416,6 +460,83 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
         self.assertIn("validation_applied", result["recommendation"]["warning_codes"])
 
+    def test_partial_estimator_models_preserve_finite_mode_results(self):
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value=estimator_partial_single_mode(),
+        ):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertEqual(result["validation"]["attempted_candidates"], 1)
+        self.assertEqual(result["validation"]["successful_candidates"], 1)
+        self.assertEqual(result["validation"]["covered_candidates"], 1)
+        self.assertEqual(result["validation"]["estimator_commit"], "partial123")
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
+        self.assertEqual(result["recommendation"]["security"]["matzov_bits"], 149.0)
+        self.assertIsNone(result["recommendation"]["security"]["adps16_core_svp_bits"])
+        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 149.0)
+        self.assertIn("validation_partial_attacks", result["validation"]["message_codes"])
+        self.assertFalse(result["estimator"]["validated"][0]["ok"])
+
+    def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
+        empty_models = {
+            "ok": True,
+            "complete": True,
+            "estimator_profile": "enhanced",
+            "models": {},
+            "modes": {},
+        }
+        wrong_profile = estimator_success(profile="standard")
+        non_dict_models = estimator_success()
+        non_dict_models["models"] = []
+        non_dict_modes = estimator_success()
+        non_dict_modes["modes"] = []
+        invalid_top_complete = estimator_success()
+        invalid_top_complete["complete"] = "yes"
+        invalid_mode_complete = estimator_success()
+        invalid_mode_complete["models"]["matzov"]["classical"]["complete"] = 1
+        malformed_bits = estimator_success()
+        malformed_bits["models"]["matzov"]["classical"]["min_bits"] = "149"
+        nonfinite_bits = estimator_success()
+        nonfinite_bits["models"]["matzov"]["classical"]["min_bits"] = float("inf")
+        nan_bits = estimator_success()
+        nan_bits["models"]["matzov"]["classical"]["min_bits"] = float("nan")
+        cases = {
+            "non_object": "not an estimator response",
+            "empty_models": empty_models,
+            "wrong_profile": wrong_profile,
+            "non_dict_models": non_dict_models,
+            "non_dict_modes": non_dict_modes,
+            "invalid_top_complete": invalid_top_complete,
+            "invalid_mode_complete": invalid_mode_complete,
+            "malformed_bits": malformed_bits,
+            "nonfinite_bits": nonfinite_bits,
+            "nan_bits": nan_bits,
+        }
+
+        for name, response in cases.items():
+            with self.subTest(name=name):
+                with patch("app.parameter_search.run_estimator", return_value=response):
+                    result = recommend_rlwe(
+                        small_validation_request(validationCount=1, validationAttempts=1),
+                        config=AppConfig(),
+                    )
+
+                self.assertEqual(result["validation"]["status"], "failed")
+                self.assertEqual(result["validation"]["attempted_candidates"], 1)
+                self.assertEqual(result["validation"]["successful_candidates"], 0)
+                self.assertEqual(result["validation"]["covered_candidates"], 0)
+                self.assertIn("Invalid estimator response", result["validation"]["message"])
+                self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+                self.assertEqual(
+                    result["estimator"]["validated"][0]["code"],
+                    "invalid_estimator_response",
+                )
+
     def test_estimator_failure_keeps_fast_screen_and_preserves_unknown_message(self):
         failures = [
             {
@@ -496,6 +617,17 @@ class ParameterSearchTests(unittest.TestCase):
 
         self.assertEqual(request.hard_problem_category, "lwe")
         self.assertEqual(request.hard_problem_variant, "rlwe")
+
+        for category, variant in (("ntru", "ring"), ("sis", "sis")):
+            with self.subTest(category=category):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^LWE parameter search requires hard_problem_category=lwe\\.$",
+                ):
+                    recommend_rlwe({
+                        "hardProblemCategory": category,
+                        "hardProblemVariant": variant,
+                    })
 
         with self.assertRaises(ValueError):
             parse_request({
