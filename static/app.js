@@ -1,3 +1,4 @@
+const EasyLatticeModel = window.EasyLatticeModel;
 const form = document.querySelector("#parameter-form");
 const statusPill = document.querySelector("#status-pill");
 const title = document.querySelector("#summary-title");
@@ -24,9 +25,19 @@ const errorDistributionLabel = document.querySelector("#error-distribution-label
 const languageSelect = document.querySelector("#language-select");
 const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
+const searchSubmit = form.querySelector('button[type="submit"]');
+const dfrSubmit = dfrForm.querySelector('button[type="submit"]');
 
 let lastResult = null;
 let lastDfrResult = null;
+let searchRevision = 0;
+let dfrRevision = 0;
+let searchResultRevision = null;
+let dfrResultRevision = null;
+let searchInFlight = false;
+let dfrInFlight = false;
+let searchRequestRevision = null;
+let dfrRequestRevision = null;
 let publicConfig = null;
 let currentLanguage = supportedLanguage(localStorage.getItem("easyLatticeLanguage") || navigator.language || "en");
 let activeWorkspace = "search";
@@ -404,26 +415,28 @@ const TRANSLATIONS = {
 
 languageSelect.value = currentLanguage;
 applyLanguage();
+syncRingControls();
 syncDistributionOptions();
 updateNttScaleLabel();
 renderDfrDistributionEditors();
 syncDfrForm();
 syncWorkspace();
+updateCopyButtonStates();
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!hasLiveApi() && !PREVIEW_MODE) return;
+  if (searchInFlight || (!hasLiveApi() && !PREVIEW_MODE)) return;
   await requestRecommendation();
 });
 
 dfrForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!hasLiveApi() && !PREVIEW_MODE) return;
+  if (dfrInFlight || (!hasLiveApi() && !PREVIEW_MODE)) return;
   await requestDfr();
 });
 
 copyJson.addEventListener("click", async () => {
-  if (!lastResult) return;
+  if (!isCurrentSearchResult()) return;
   await navigator.clipboard.writeText(JSON.stringify(lastResult.recommendation, null, 2));
   copyJson.textContent = t("copied");
   setTimeout(() => {
@@ -432,7 +445,7 @@ copyJson.addEventListener("click", async () => {
 });
 
 copyDfrJson.addEventListener("click", async () => {
-  if (!lastDfrResult) return;
+  if (!isCurrentDfrResult()) return;
   await navigator.clipboard.writeText(JSON.stringify(lastDfrResult, null, 2));
   copyDfrJson.textContent = t("copied");
   setTimeout(() => {
@@ -441,22 +454,28 @@ copyDfrJson.addEventListener("click", async () => {
 });
 
 nttScale.addEventListener("input", updateNttScaleLabel);
-ringFamily.addEventListener("change", updateNttScaleLabel);
+ringFamily.addEventListener("change", () => {
+  syncRingControls();
+  updateNttScaleLabel();
+});
 languageSelect.addEventListener("change", () => {
   currentLanguage = supportedLanguage(languageSelect.value);
   localStorage.setItem("easyLatticeLanguage", currentLanguage);
   applyLanguage();
+  syncRingControls();
   syncDistributionOptions();
   updateNttScaleLabel();
   renderDfrDistributionEditors();
   syncDfrForm();
   if (publicConfig) renderPublicConfig(publicConfig);
-  if (activeWorkspace === "search" && lastResult) renderResult(lastResult);
-  if (activeWorkspace === "dfr" && lastDfrResult) renderDfrResult(lastDfrResult);
-  if (activeWorkspace === "dfr" && !lastDfrResult) setDfrIdleHeading();
+  syncWorkspace();
 });
 document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
-  input.addEventListener("change", syncDistributionOptions);
+  input.addEventListener("change", () => {
+    syncRingControls();
+    syncDistributionOptions();
+    updateNttScaleLabel();
+  });
 });
 document.querySelectorAll('input[name="workspaceMode"]').forEach((input) => {
   input.addEventListener("change", syncWorkspace);
@@ -469,61 +488,90 @@ dfrDistributionEditors.addEventListener("change", (event) => {
     renderDfrDistributionEditors();
   }
 });
+form.addEventListener("input", markSearchInputsChanged);
+form.addEventListener("change", markSearchInputsChanged);
+dfrForm.addEventListener("input", markDfrInputsChanged);
+dfrForm.addEventListener("change", markDfrInputsChanged);
 
 async function requestRecommendation() {
+  if (searchInFlight) return;
+  const startedRevision = searchRevision;
+  searchInFlight = true;
+  searchRequestRevision = startedRevision;
+  searchSubmit.disabled = true;
   setStatus("loading", t("statusRunning"));
   title.textContent = t("searchingParameters");
   subtitle.textContent = t("generatingSubtitle");
 
-  const data = new FormData(form);
-  const hardProblem = selectedHardProblem(data);
-  const useEstimator = data.get("useEstimator") === "on";
-  if (useEstimator) {
-    subtitle.textContent = t("estimatorSubtitle");
-  }
-  const secretDistribution = data.get("secretDistribution");
-  const errorDistribution = data.get("errorDistribution");
-  const payload = {
-    problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
-    hardProblemCategory: hardProblem.category,
-    hardProblemVariant: hardProblem.variant,
-    ringFamily: data.get("ringFamily"),
-    targetSecurity: Number(data.get("targetSecurity")),
-    securityModel: data.get("securityModel"),
-    redCostModel: data.get("redCostModel"),
-    nttScalePower: Number(data.get("nttScalePower")),
-    minQBits: Number(data.get("minQBits")),
-    maxQBits: Number(data.get("maxQBits")),
-    distribution: secretDistribution,
-    secretDistribution,
-    errorDistribution,
-    useEstimator,
-    estimatorTimeout: useEstimator ? 240 : undefined,
-    intent: String(data.get("intent") || ""),
-    useLLM: data.get("useLLM") === "on",
-  };
-
   try {
+    const data = new FormData(form);
+    const hardProblem = selectedHardProblem(data);
+    const ringSelection = EasyLatticeModel.normalizeRingSelection(
+      hardProblem.category,
+      String(data.get("ringFamily") || "power2"),
+      hardProblem.variant,
+    );
+    const useEstimator = data.get("useEstimator") === "on";
+    if (useEstimator) {
+      subtitle.textContent = t("estimatorSubtitle");
+    }
+    const secretDistribution = data.get("secretDistribution");
+    const errorDistribution = data.get("errorDistribution");
+    const payload = {
+      problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
+      hardProblemCategory: hardProblem.category,
+      hardProblemVariant: ringSelection.variant,
+      ringFamily: ringSelection.family,
+      targetSecurity: Number(data.get("targetSecurity")),
+      securityModel: data.get("securityModel"),
+      redCostModel: data.get("redCostModel"),
+      nttScalePower: Number(data.get("nttScalePower")),
+      minQBits: Number(data.get("minQBits")),
+      maxQBits: Number(data.get("maxQBits")),
+      distribution: secretDistribution,
+      secretDistribution,
+      errorDistribution,
+      useEstimator,
+      estimatorTimeout: useEstimator ? 240 : undefined,
+      intent: String(data.get("intent") || ""),
+      useLLM: data.get("useLLM") === "on",
+    };
+
     const result = PREVIEW_MODE
       ? previewRecommendation(payload)
       : useEstimator
-        ? await requestRecommendationJob(payload)
+        ? await requestRecommendationJob(payload, startedRevision)
         : await postJson("/api/agent/recommend", payload);
+    if (!EasyLatticeModel.acceptsResponse(startedRevision, searchRevision)) return;
     lastResult = result;
+    searchResultRevision = startedRevision;
+    updateCopyButtonStates();
     if (activeWorkspace === "search") {
       renderResult(result);
       setStatus("done", t("statusReady"));
     }
   } catch (error) {
-    if (activeWorkspace === "search") {
+    if (
+      EasyLatticeModel.acceptsResponse(startedRevision, searchRevision)
+      && activeWorkspace === "search"
+    ) {
       setStatus("error", t("statusError"));
       title.textContent = t("requestFailed");
       subtitle.textContent = error.message;
     }
+  } finally {
+    searchInFlight = false;
+    searchRequestRevision = null;
+    searchSubmit.disabled = false;
   }
 }
 
 async function requestDfr() {
+  if (dfrInFlight) return;
+  const startedRevision = dfrRevision;
+  dfrInFlight = true;
+  dfrRequestRevision = startedRevision;
+  dfrSubmit.disabled = true;
   setStatus("loading", t("statusRunning"));
   title.textContent = t("calculatingDfr");
   subtitle.textContent = t("dfrCalculatingSubtitle");
@@ -532,13 +580,27 @@ async function requestDfr() {
     const result = PREVIEW_MODE
       ? previewDfrResult(selectedDfrType())
       : await postJson("/api/decryption-failure/calculate", buildDfrPayload());
+    if (!EasyLatticeModel.acceptsResponse(startedRevision, dfrRevision)) return;
     lastDfrResult = result;
-    renderDfrResult(result);
-    setStatus("done", t("statusReady"));
+    dfrResultRevision = startedRevision;
+    updateCopyButtonStates();
+    if (activeWorkspace === "dfr") {
+      renderDfrResult(result);
+      setStatus("done", t("statusReady"));
+    }
   } catch (error) {
-    setStatus("error", t("statusError"));
-    title.textContent = t("dfrFailed");
-    subtitle.textContent = error.message;
+    if (
+      EasyLatticeModel.acceptsResponse(startedRevision, dfrRevision)
+      && activeWorkspace === "dfr"
+    ) {
+      setStatus("error", t("statusError"));
+      title.textContent = t("dfrFailed");
+      subtitle.textContent = error.message;
+    }
+  } finally {
+    dfrInFlight = false;
+    dfrRequestRevision = null;
+    dfrSubmit.disabled = false;
   }
 }
 
@@ -622,8 +684,11 @@ function setDfrIdleHeading() {
   setStatus("idle", t("statusIdle"));
 }
 
-async function requestRecommendationJob(payload) {
+async function requestRecommendationJob(payload, startedRevision) {
   const submitted = await postJson("/api/agent/jobs", payload, { accepted: true });
+  if (!EasyLatticeModel.acceptsResponse(startedRevision, searchRevision)) {
+    throw new Error("search inputs changed while the estimator was running");
+  }
   const jobId = submitted.job_id;
   if (!jobId) {
     throw new Error("estimator job did not return an id");
@@ -633,6 +698,9 @@ async function requestRecommendationJob(payload) {
   const deadline = Date.now() + timeoutMs;
   let job = submitted;
   while (Date.now() < deadline) {
+    if (!EasyLatticeModel.acceptsResponse(startedRevision, searchRevision)) {
+      throw new Error("search inputs changed while the estimator was running");
+    }
     if (job.status === "succeeded") {
       if (!job.result) throw new Error("estimator job completed without a result");
       return job.result;
@@ -640,7 +708,9 @@ async function requestRecommendationJob(payload) {
     if (job.status === "failed") {
       throw new Error(job.error || "estimator job failed");
     }
-    subtitle.textContent = t("estimatorWaiting", { status: job.status });
+    if (activeWorkspace === "search") {
+      subtitle.textContent = t("estimatorWaiting", { status: job.status });
+    }
     await sleep(2000);
     job = await getJson(`/api/agent/jobs/${jobId}`);
   }
@@ -828,8 +898,79 @@ function securityBitsForReductionModel(security, redCostModel) {
 }
 
 function selectedHardProblem(data = new FormData(form)) {
-  const [category = "lwe", variant = "rlwe"] = String(data.get("hardProblem") || "lwe:rlwe").split(":");
+  const checkedValue = document.querySelector('input[name="hardProblem"]:checked')?.value;
+  const [category = "lwe", variant = "rlwe"] = String(
+    data.get("hardProblem") || checkedValue || "lwe:rlwe",
+  ).split(":");
   return { category, variant };
+}
+
+function syncRingControls() {
+  const hardProblem = selectedHardProblem();
+  const options = EasyLatticeModel.ringOptions(hardProblem.category);
+  const previousFamily = ringFamily.value;
+  ringFamily.replaceChildren(
+    ...options.map(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }),
+  );
+  ringFamily.value = options.some(({ value }) => value === previousFamily)
+    ? previousFamily
+    : options[0].value;
+
+  const normalized = EasyLatticeModel.normalizeRingSelection(
+    hardProblem.category,
+    ringFamily.value,
+    hardProblem.variant,
+  );
+  const matrixInput = document.querySelector('input[name="hardProblem"][value="ntru:matrix"]');
+  const ringInput = document.querySelector('input[name="hardProblem"][value="ntru:ring"]');
+  matrixInput.disabled = hardProblem.category === "ntru" && !normalized.matrixAllowed;
+  if (hardProblem.category === "ntru" && normalized.variant === "ring") {
+    ringInput.checked = true;
+  }
+}
+
+function isCurrentSearchResult() {
+  return Boolean(lastResult) && searchResultRevision === searchRevision;
+}
+
+function isCurrentDfrResult() {
+  return Boolean(lastDfrResult) && dfrResultRevision === dfrRevision;
+}
+
+function isCurrentSearchRequest() {
+  return searchInFlight
+    && EasyLatticeModel.acceptsResponse(searchRequestRevision, searchRevision);
+}
+
+function isCurrentDfrRequest() {
+  return dfrInFlight
+    && EasyLatticeModel.acceptsResponse(dfrRequestRevision, dfrRevision);
+}
+
+function updateCopyButtonStates() {
+  copyJson.disabled = !isCurrentSearchResult();
+  copyDfrJson.disabled = !isCurrentDfrResult();
+}
+
+function markSearchInputsChanged() {
+  searchRevision = EasyLatticeModel.nextRevision(searchRevision);
+  updateCopyButtonStates();
+  if (activeWorkspace === "search") {
+    setStatus("warning", t("statusInputsChanged"));
+  }
+}
+
+function markDfrInputsChanged() {
+  dfrRevision = EasyLatticeModel.nextRevision(dfrRevision);
+  updateCopyButtonStates();
+  if (activeWorkspace === "dfr") {
+    setStatus("warning", t("statusInputsChanged"));
+  }
 }
 
 function syncDistributionOptions() {
@@ -851,17 +992,34 @@ function syncWorkspace() {
   dfrForm.classList.toggle("hidden", !dfrActive);
   searchResults.classList.toggle("hidden", dfrActive);
   dfrResults.classList.toggle("hidden", !dfrActive || !lastDfrResult);
+  updateCopyButtonStates();
 
   if (dfrActive) {
     if (lastDfrResult) {
       renderDfrResult(lastDfrResult);
-    } else {
+    } else if (!isCurrentDfrRequest() && dfrRevision === 0) {
       setDfrIdleHeading();
+    }
+    if (isCurrentDfrRequest()) {
+      setStatus("loading", t("statusRunning"));
+    } else if (isCurrentDfrResult()) {
+      setStatus("done", t("statusReady"));
+    } else if (lastDfrResult || dfrRevision > 0) {
+      setStatus("warning", t("statusInputsChanged"));
     }
     return;
   }
   if (lastResult) {
     renderResult(lastResult);
+  }
+  if (isCurrentSearchRequest()) {
+    setStatus("loading", t("statusRunning"));
+  } else if (isCurrentSearchResult()) {
+    setStatus("done", t("statusReady"));
+  } else if (lastResult || searchRevision > 0) {
+    setStatus("warning", t("statusInputsChanged"));
+  } else {
+    setStatus("idle", t("statusIdle"));
   }
 }
 
@@ -870,8 +1028,10 @@ function syncDfrForm() {
   dfrNtruFields.classList.toggle("hidden", type !== "ntru");
   dfrLweFields.classList.toggle("hidden", type !== "lwe");
   renderDfrDistributionEditors(PREVIEW_MODE && renderedDfrType !== null && renderedDfrType !== type);
-  if (PREVIEW_MODE) {
+  if (PREVIEW_MODE && (!lastDfrResult || lastDfrResult.type !== type)) {
     lastDfrResult = previewDfrResult(type);
+    dfrResultRevision = dfrRevision;
+    updateCopyButtonStates();
     if (activeWorkspace === "dfr") renderDfrResult(lastDfrResult);
     return;
   }
@@ -1015,6 +1175,7 @@ function buildDfrPayload() {
   };
   if (type === "ntru") {
     Object.assign(payload, {
+      ringType: data.get("dfrRingType"),
       n: Number(data.get("dfrNtruN")),
       delta: String(data.get("dfrNtruDelta") || ""),
       p0: String(data.get("dfrP0") || ""),

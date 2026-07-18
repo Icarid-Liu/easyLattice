@@ -126,7 +126,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self.serve_file(STATIC_ROOT / "index.html")
             return
-        if parsed.path in ("/app.js", "/preview-data.js", "/styles.css"):
+        if parsed.path in ("/app-model.js", "/app.js", "/preview-data.js", "/styles.css"):
             self.serve_file(STATIC_ROOT / parsed.path.lstrip("/"))
             return
         if parsed.path.startswith("/static/"):
@@ -220,11 +220,15 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def serve_file(self, path: Path) -> None:
         resolved = path.resolve()
-        if not str(resolved).startswith(str(STATIC_ROOT.resolve())) or not resolved.is_file():
+        if not resolved.is_relative_to(STATIC_ROOT.resolve()) or not resolved.is_file():
             self.write_error(HTTPStatus.NOT_FOUND, "Not found")
             return
 
-        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        content_type = (
+            "text/javascript; charset=utf-8"
+            if resolved.suffix == ".js"
+            else mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        )
         data = resolved.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.write_cors_headers()

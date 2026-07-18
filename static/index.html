@@ -169,6 +169,14 @@
 
           <div id="dfr-ntru-fields" class="dfr-input-group hidden">
             <div class="dfr-field-grid">
+              <label>
+                <span data-i18n="dfrRingType">Polynomial ring</span>
+                <select name="dfrRingType">
+                  <option value="cyclic">x^n - 1</option>
+                  <option value="negacyclic">x^n + 1</option>
+                  <option value="ntru_prime">x^n - x - 1</option>
+                </select>
+              </label>
               <label><span data-i18n="ringDimensionN">Ring dimension n</span><input name="dfrNtruN" type="number" min="1" step="1" value="509" /></label>
               <label><span>Delta</span><input name="dfrNtruDelta" type="text" value="1024" /></label>
               <label><span>p0</span><input name="dfrP0" type="text" value="3" /></label>
@@ -273,7 +281,7 @@
         <section id="alternatives" class="alternatives hidden">
           <div class="section-heading">
             <h3 data-i18n="alternativeCandidates">Alternative candidates</h3>
-            <button id="copy-json" type="button" class="secondary-button" data-i18n="copyJson">Copy JSON</button>
+            <button id="copy-json" type="button" class="secondary-button" data-i18n="copyJson" disabled>Copy JSON</button>
           </div>
           <div id="candidate-list" class="candidate-list"></div>
         </section>
@@ -316,7 +324,7 @@
 
           <div class="section-heading dfr-copy-row">
             <h3 data-i18n="decryptionFailure">Decryption failure</h3>
-            <button id="copy-dfr-json" type="button" class="secondary-button" data-i18n="copyJson">Copy JSON</button>
+            <button id="copy-dfr-json" type="button" class="secondary-button" data-i18n="copyJson" disabled>Copy JSON</button>
           </div>
         </section>
 
@@ -324,6 +332,7 @@
     </div>
 
     <script src="preview-data.js"></script>
+    <script src="app-model.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
