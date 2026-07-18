@@ -70,6 +70,7 @@ VALIDATION_CONFIG_ERROR_CODES = {
 ESTIMATOR_MODELS = ("matzov", "adps16")
 ESTIMATOR_MODES = ("classical", "quantum")
 INVALID_ESTIMATOR_RESPONSE_CODE = "invalid_estimator_response"
+MAX_SECURITY_BITS = 1_000_000.0
 
 
 @dataclass(frozen=True)
@@ -184,7 +185,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
                 message = validation_entry["message"]
                 failure_messages.append(message)
                 candidate["warnings"].append(message)
-                if code in VALIDATION_CONFIG_ERROR_CODES:
+                if isinstance(code, str) and code in VALIDATION_CONFIG_ERROR_CODES:
                     validation_codes.append("validation_config_missing")
                 else:
                     raw_unknown_messages.append(message)
@@ -725,7 +726,9 @@ def fast_security_estimate(n: int, q: int, sigma: float, sparse_penalty_bits: fl
         "classical_bits": classical,
         "quantum_bits": quantum,
         "matzov_bits": classical,
+        "matzov_quantum_bits": quantum,
         "adps16_core_svp_bits": classical,
+        "adps16_quantum_bits": quantum,
         "attacks": {
             "matzov_proxy_screen": {
                 "bkz_beta": beta,
@@ -778,33 +781,31 @@ def selected_security_bits(security: dict[str, Any], request: RequestOptions) ->
 
 
 def security_bits_for_reduction_model(security: dict[str, Any], red_cost_model: str) -> tuple[float, float]:
-    classical = optional_security_bits(security.get("classical_bits"))
-    quantum = optional_security_bits(security.get("quantum_bits"))
     if red_cost_model == "adps16":
-        adps16 = optional_security_bits(security.get("adps16_core_svp_bits"))
-        adps16_quantum = optional_security_bits(security.get("adps16_quantum_bits"))
-        if adps16 is not None:
-            classical = adps16
-        if adps16_quantum is not None:
-            quantum = adps16_quantum
-    if red_cost_model == "matzov":
-        matzov = optional_security_bits(security.get("matzov_bits"))
-        matzov_quantum = optional_security_bits(security.get("matzov_quantum_bits"))
-        if matzov is not None:
-            classical = matzov
-        if matzov_quantum is not None:
-            quantum = matzov_quantum
+        classical = parse_security_bits(security.get("adps16_core_svp_bits"))
+        quantum = parse_security_bits(security.get("adps16_quantum_bits"))
+    elif red_cost_model == "matzov":
+        classical = parse_security_bits(security.get("matzov_bits"))
+        quantum = parse_security_bits(security.get("matzov_quantum_bits"))
+    else:
+        classical = parse_security_bits(security.get("classical_bits"))
+        quantum = parse_security_bits(security.get("quantum_bits"))
     return (
         classical if classical is not None else float("-inf"),
         quantum if quantum is not None else float("-inf"),
     )
 
 
-def optional_security_bits(value: Any) -> float | None:
+def parse_security_bits(value: Any) -> float | None:
     if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    bits = float(value)
-    return bits if math.isfinite(bits) else None
+    try:
+        bits = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(bits) or bits < 0 or bits > MAX_SECURITY_BITS:
+        return None
+    return bits
 
 
 def security_margin_bits(security: dict[str, Any], request: RequestOptions) -> float:
@@ -1410,12 +1411,12 @@ def normalize_mode_results(modes: Any, context: str) -> dict[str, dict[str, Any]
 
         normalized_mode = dict(mode_result)
         if "min_bits" in mode_result:
-            bits = mode_result["min_bits"]
-            if isinstance(bits, bool) or not isinstance(bits, (int, float)):
-                raise ValueError(f"{context}.{mode}.min_bits must be a finite nonnegative number")
-            bits = float(bits)
-            if not math.isfinite(bits) or bits < 0:
-                raise ValueError(f"{context}.{mode}.min_bits must be a finite nonnegative number")
+            bits = parse_security_bits(mode_result["min_bits"])
+            if bits is None:
+                raise ValueError(
+                    f"{context}.{mode}.min_bits must be between 0 and "
+                    f"{int(MAX_SECURITY_BITS)}"
+                )
             normalized_mode["min_bits"] = bits
         elif mode_result["ok"]:
             raise ValueError(f"{context}.{mode}.min_bits is required when ok is true")
@@ -1431,6 +1432,10 @@ def normalize_estimator_response(
     if not isinstance(response, dict):
         failure = invalid_estimator_response("expected an object")
         return None, failure
+
+    machine_code = response.get("code")
+    if machine_code is not None and not isinstance(machine_code, str):
+        return None, invalid_estimator_response("code must be a string or null")
 
     has_structured_results = "models" in response or "modes" in response
     if response.get("ok") is False and not has_structured_results:
@@ -1467,13 +1472,13 @@ def normalize_estimator_response(
     except ValueError as exc:
         return None, invalid_estimator_response(str(exc))
 
-    requested_mode_has_bits = any(
-        normalized_models.get(model, {}).get(request.security_model, {}).get("ok")
-        for model in ESTIMATOR_MODELS
+    selected_mode = normalized_models.get(request.red_cost_model, {}).get(
+        request.security_model,
+        {},
     )
-    if not requested_mode_has_bits:
+    if selected_mode.get("ok") is not True:
         return None, invalid_estimator_response(
-            f"no finite {request.security_model} security estimate was returned"
+            f"no finite {request.red_cost_model}/{request.security_model} security estimate was returned"
         )
 
     all_modes_complete = all(
@@ -1573,15 +1578,17 @@ def estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str
     mode_result = model_modes.get(mode)
     if not isinstance(mode_result, dict) or mode_result.get("ok") is not True:
         return None
-    bits = optional_security_bits(mode_result.get("min_bits"))
-    if bits is not None and bits >= 0:
-        return bits
-    return None
+    return parse_security_bits(mode_result.get("min_bits"))
 
 
 def floor_bits(value: float, digits: int = 1) -> float:
+    bits = parse_security_bits(value)
+    if bits is None:
+        raise ValueError(
+            f"security bits must be between 0 and {int(MAX_SECURITY_BITS)}"
+        )
     scale = 10**digits
-    return math.floor(float(value) * scale) / scale
+    return math.floor(bits * scale) / scale
 
 
 def floor_optional_bits(value: float | None, digits: int = 1) -> float | None:

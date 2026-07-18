@@ -48,7 +48,7 @@ def estimator_success(bits=140.0, complete=True, profile="enhanced", commit="abc
     }
 
 
-def estimator_partial_single_mode(bits=149.0):
+def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
     failed_mode = {
         "ok": False,
         "complete": False,
@@ -62,7 +62,7 @@ def estimator_partial_single_mode(bits=149.0):
         }
         for model in ("matzov", "adps16")
     }
-    models["matzov"]["classical"] = {
+    models[model][mode] = {
         "ok": True,
         "complete": True,
         "min_bits": bits,
@@ -223,6 +223,23 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(result["validation"]["status"], "not_requested")
         self.assertEqual(result["validation"]["profile"], "enhanced")
         self.assertEqual(result["next_step_code"], "bind_scheme_constraints")
+
+    def test_fast_screen_quantum_bits_honor_selected_reduction_model(self):
+        for red_cost_model in ("matzov", "adps16"):
+            with self.subTest(red_cost_model=red_cost_model):
+                result = recommend_rlwe(
+                    small_validation_request(
+                        useEstimator=False,
+                        securityModel="quantum",
+                        redCostModel=red_cost_model,
+                    )
+                )
+                candidate = result["recommendation"]
+
+                self.assertEqual(
+                    candidate["selection"]["selected_security_bits"],
+                    candidate["security"]["quantum_bits"],
+                )
 
     def test_ntt_unfriendly_mode_does_not_require_n_q_divisibility(self):
         primes = ntt_prime_candidates(512, 12, ntt_scale_power=6, min_q_bits=2, limit=8)
@@ -482,6 +499,34 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertIn("validation_partial_attacks", result["validation"]["message_codes"])
         self.assertFalse(result["estimator"]["validated"][0]["ok"])
 
+    def test_partial_estimator_requires_requested_reduction_model(self):
+        for available_model, requested_model in (
+            ("adps16", "matzov"),
+            ("matzov", "adps16"),
+        ):
+            with self.subTest(available_model=available_model, requested_model=requested_model):
+                with patch(
+                    "app.parameter_search.run_estimator",
+                    return_value=estimator_partial_single_mode(model=available_model),
+                ):
+                    result = recommend_rlwe(
+                        small_validation_request(
+                            redCostModel=requested_model,
+                            validationCount=1,
+                            validationAttempts=1,
+                        ),
+                        config=AppConfig(),
+                    )
+
+                self.assertEqual(result["validation"]["status"], "failed")
+                self.assertEqual(result["validation"]["successful_candidates"], 0)
+                self.assertEqual(result["validation"]["covered_candidates"], 0)
+                self.assertIn(
+                    f"{requested_model}/classical",
+                    result["validation"]["message"],
+                )
+                self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+
     def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
         empty_models = {
             "ok": True,
@@ -505,8 +550,22 @@ class ParameterSearchTests(unittest.TestCase):
         nonfinite_bits["models"]["matzov"]["classical"]["min_bits"] = float("inf")
         nan_bits = estimator_success()
         nan_bits["models"]["matzov"]["classical"]["min_bits"] = float("nan")
+        huge_integer_bits = estimator_success()
+        huge_integer_bits["models"]["matzov"]["classical"]["min_bits"] = 10**10000
+        near_float_max_bits = estimator_success()
+        near_float_max_bits["models"]["matzov"]["classical"]["min_bits"] = 1e308
         cases = {
             "non_object": "not an estimator response",
+            "list_code": {
+                "ok": False,
+                "code": ["sage_not_found"],
+                "message": "malformed machine code",
+            },
+            "object_code": {
+                "ok": False,
+                "code": {"kind": "sage_not_found"},
+                "message": "malformed machine code",
+            },
             "empty_models": empty_models,
             "wrong_profile": wrong_profile,
             "non_dict_models": non_dict_models,
@@ -516,6 +575,8 @@ class ParameterSearchTests(unittest.TestCase):
             "malformed_bits": malformed_bits,
             "nonfinite_bits": nonfinite_bits,
             "nan_bits": nan_bits,
+            "huge_integer_bits": huge_integer_bits,
+            "near_float_max_bits": near_float_max_bits,
         }
 
         for name, response in cases.items():
