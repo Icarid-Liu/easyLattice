@@ -27,8 +27,10 @@ API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1")))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
 MAX_REQUEST_BODY_BYTES = 1_048_576
+REQUEST_HEADER_READ_DEADLINE_SECONDS = 5.0
 POST_BODY_READ_DEADLINE_SECONDS = 5.0
 POST_BODY_READ_CHUNK_BYTES = 65_536
+REQUEST_READ_CHUNK_BYTES = 8_192
 
 
 class RequestBodyTooLarge(ValueError):
@@ -37,6 +39,103 @@ class RequestBodyTooLarge(ValueError):
 
 class RequestBodyReadTimeout(TimeoutError):
     pass
+
+
+class RequestHeaderReadTimeout(Exception):
+    pass
+
+
+class DeadlineSocketReader:
+    def __init__(self, connection: socket.socket):
+        self.connection = connection
+        self.buffer = bytearray()
+        self.deadline: float | None = None
+        self.timeout_type: type[Exception] = TimeoutError
+        self.timeout_message = "Request read timed out."
+        self.eof = False
+        self.closed = False
+
+    def begin_deadline(
+        self,
+        seconds: float,
+        timeout_type: type[Exception],
+        message: str,
+    ) -> None:
+        self.deadline = time.monotonic() + seconds
+        self.timeout_type = timeout_type
+        self.timeout_message = message
+
+    def clear_deadline(self) -> None:
+        self.deadline = None
+
+    def readline(self, limit: int = -1) -> bytes:
+        if self.closed or limit == 0:
+            return b""
+        while True:
+            search_end = len(self.buffer) if limit < 0 else min(len(self.buffer), limit)
+            newline = self.buffer.find(b"\n", 0, search_end)
+            if newline >= 0:
+                return self.consume(newline + 1)
+            if limit >= 0 and len(self.buffer) >= limit:
+                return self.consume(limit)
+            if self.eof:
+                return self.consume(search_end)
+            read_size = REQUEST_READ_CHUNK_BYTES
+            if limit >= 0:
+                read_size = min(read_size, limit - len(self.buffer))
+            chunk = self.recv(read_size)
+            if not chunk:
+                self.eof = True
+            else:
+                self.buffer.extend(chunk)
+
+    def read_exact(self, size: int) -> bytes:
+        if self.closed:
+            return b""
+        while len(self.buffer) < size and not self.eof:
+            chunk = self.recv(
+                min(size - len(self.buffer), POST_BODY_READ_CHUNK_BYTES)
+            )
+            if not chunk:
+                self.eof = True
+            else:
+                self.buffer.extend(chunk)
+        return self.consume(min(size, len(self.buffer)))
+
+    def recv(self, size: int) -> bytes:
+        if self.deadline is None:
+            raise RuntimeError("Request read deadline is not active.")
+        remaining_time = self.deadline - time.monotonic()
+        if remaining_time <= 0:
+            self.raise_timeout()
+        previous_timeout = self.connection.gettimeout()
+        read_timeout = (
+            remaining_time
+            if previous_timeout is None
+            else min(previous_timeout, remaining_time)
+        )
+        try:
+            self.connection.settimeout(read_timeout)
+            chunk = self.connection.recv(size)
+        except (socket.timeout, TimeoutError) as exc:
+            raise self.timeout_type(self.timeout_message) from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if time.monotonic() >= self.deadline:
+            self.raise_timeout()
+        return chunk
+
+    def consume(self, size: int) -> bytes:
+        data = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return data
+
+    def raise_timeout(self) -> None:
+        raise self.timeout_type(self.timeout_message)
+
+    def close(self) -> None:
+        self.closed = True
+        self.buffer.clear()
 
 
 @dataclass
@@ -129,6 +228,35 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
 class EasyLatticeHandler(BaseHTTPRequestHandler):
     server_version = "easyLattice/0.1"
     rbufsize = 0
+
+    def setup(self) -> None:
+        super().setup()
+        self.rfile.close()
+        self.request_reader = DeadlineSocketReader(self.connection)
+        self.rfile = self.request_reader
+
+    def handle_one_request(self) -> None:
+        self.requestline = ""
+        self.request_version = self.default_request_version
+        self.command = None
+        self.request_reader.begin_deadline(
+            REQUEST_HEADER_READ_DEADLINE_SECONDS,
+            RequestHeaderReadTimeout,
+            "Request headers read timed out.",
+        )
+        try:
+            super().handle_one_request()
+        except RequestHeaderReadTimeout as exc:
+            self.request_reader.clear_deadline()
+            self.write_request_timeout(str(exc))
+        finally:
+            self.request_reader.clear_deadline()
+
+    def parse_request(self) -> bool:
+        try:
+            return super().parse_request()
+        finally:
+            self.request_reader.clear_deadline()
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -260,35 +388,18 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         return payload
 
     def read_request_body(self, length: int) -> bytes:
-        previous_timeout = self.connection.gettimeout()
-        deadline = time.monotonic() + POST_BODY_READ_DEADLINE_SECONDS
-        body = bytearray()
+        self.request_reader.begin_deadline(
+            POST_BODY_READ_DEADLINE_SECONDS,
+            RequestBodyReadTimeout,
+            "Request body read timed out.",
+        )
         try:
-            while len(body) < length:
-                remaining_time = deadline - time.monotonic()
-                if remaining_time <= 0:
-                    raise RequestBodyReadTimeout("Request body read timed out.")
-                read_timeout = (
-                    remaining_time
-                    if previous_timeout is None
-                    else min(previous_timeout, remaining_time)
-                )
-                self.connection.settimeout(read_timeout)
-                chunk = self.connection.recv(
-                    min(length - len(body), POST_BODY_READ_CHUNK_BYTES)
-                )
-                if time.monotonic() >= deadline:
-                    raise RequestBodyReadTimeout("Request body read timed out.")
-                if not chunk:
-                    break
-                body.extend(chunk)
-        except (socket.timeout, TimeoutError) as exc:
-            raise RequestBodyReadTimeout("Request body read timed out.") from exc
+            body = self.request_reader.read_exact(length)
         finally:
-            self.connection.settimeout(previous_timeout)
+            self.request_reader.clear_deadline()
         if len(body) != length:
             raise ValueError("Request body ended before Content-Length bytes were received.")
-        return bytes(body)
+        return body
 
     def request_content_length(self) -> int:
         values = self.headers.get_all("Content-Length", [])

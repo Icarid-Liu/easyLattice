@@ -12,6 +12,22 @@ from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
+    def assert_no_new_handler_threads(self, existing_threads):
+        deadline = time.monotonic() + 1
+        handlers = []
+        while time.monotonic() < deadline:
+            handlers = [
+                item
+                for item in threading.enumerate()
+                if item not in existing_threads
+                and "process_request_thread" in item.name
+                and item.is_alive()
+            ]
+            if not handlers:
+                break
+            time.sleep(0.01)
+        self.assertEqual(handlers, [])
+
     def test_drip_feed_post_body_hits_total_deadline_without_thread_leak(self):
         class RecordingHandler(EasyLatticeHandler):
             timeout_before_response = object()
@@ -79,25 +95,133 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(RecordingHandler.rbufsize, 0)
             self.assertFalse(feeder.is_alive())
 
-            deadline = time.monotonic() + 1
-            handlers = []
-            while time.monotonic() < deadline:
-                handlers = [
-                    item
-                    for item in threading.enumerate()
-                    if item not in existing_threads
-                    and "process_request_thread" in item.name
-                    and item.is_alive()
-                ]
-                if not handlers:
-                    break
-                time.sleep(0.01)
-            self.assertEqual(handlers, [])
+            self.assert_no_new_handler_threads(existing_threads)
         finally:
             stop_drip.set()
             client.close()
             if feeder.is_alive():
                 feeder.join(timeout=1)
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_drip_feed_incomplete_headers_hits_total_deadline(self):
+        class RecordingHandler(EasyLatticeHandler):
+            timeout_before_response = object()
+
+            def write_request_timeout(self, message):
+                type(self).timeout_before_response = self.connection.gettimeout()
+                super().write_request_timeout(message)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        existing_threads = set(threading.enumerate())
+        client = socket.create_connection(server.server_address, timeout=2)
+        client.settimeout(2)
+        stop_drip = threading.Event()
+        sent_chunks = []
+
+        def drip_header():
+            while not stop_drip.wait(0.02):
+                try:
+                    client.sendall(b"x")
+                except OSError:
+                    break
+                sent_chunks.append(1)
+
+        feeder = threading.Thread(target=drip_header, daemon=True)
+        try:
+            incomplete_headers = (
+                b"POST /api/decryption-failure/calculate HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"X-Drip: "
+            )
+            started = time.monotonic()
+            with mock.patch.object(
+                server_module,
+                "REQUEST_HEADER_READ_DEADLINE_SECONDS",
+                0.12,
+            ):
+                client.sendall(incomplete_headers)
+                feeder.start()
+                response = bytearray()
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            elapsed = time.monotonic() - started
+            stop_drip.set()
+            feeder.join(timeout=1)
+
+            headers, body = bytes(response).split(b"\r\n\r\n", 1)
+            self.assertIn(b" 408 ", headers)
+            self.assertEqual(
+                json.loads(body.decode("utf-8"))["error"],
+                "Request headers read timed out.",
+            )
+            self.assertGreaterEqual(len(sent_chunks), 3)
+            self.assertGreaterEqual(elapsed, 0.09)
+            self.assertLess(elapsed, 1.5)
+            self.assertIsNone(RecordingHandler.timeout_before_response)
+            self.assertFalse(feeder.is_alive())
+            self.assert_no_new_handler_threads(existing_threads)
+        finally:
+            stop_drip.set()
+            client.close()
+            if feeder.is_alive():
+                feeder.join(timeout=1)
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_valid_post_and_get_reuse_keep_alive_connection(self):
+        class KeepAliveHandler(EasyLatticeHandler):
+            protocol_version = "HTTP/1.1"
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=2)
+        try:
+            with (
+                mock.patch.object(
+                    server_module,
+                    "REQUEST_HEADER_READ_DEADLINE_SECONDS",
+                    0.5,
+                ),
+                mock.patch.object(
+                    server_module,
+                    "POST_BODY_READ_DEADLINE_SECONDS",
+                    0.5,
+                ),
+                mock.patch(
+                    "app.server.recommend_with_agent",
+                    return_value={"ok": True},
+                ),
+            ):
+                connection.request(
+                    "POST",
+                    "/api/rlwe/recommend",
+                    body=b'{"targetSecurityBits": 128}',
+                    headers={"Content-Type": "application/json"},
+                )
+                post_response = connection.getresponse()
+                post_payload = json.loads(post_response.read().decode("utf-8"))
+                reused_socket = connection.sock
+
+                connection.request("GET", "/api/health")
+                get_response = connection.getresponse()
+                get_payload = json.loads(get_response.read().decode("utf-8"))
+
+            self.assertEqual(post_response.status, 200)
+            self.assertTrue(post_payload["ok"])
+            self.assertIs(connection.sock, reused_socket)
+            self.assertEqual(get_response.status, 200)
+            self.assertTrue(get_payload["ok"])
+        finally:
+            connection.close()
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
