@@ -8,9 +8,11 @@ This directory is a Docker Space template for the public live backend. Unlike
 - public configuration at `GET /api/config/public`;
 - the same browser UI served by the Space itself.
 
-The Docker Space uses the Hugging Face Docker SDK on port `7860`, installs
-Sage/lattice-estimator, and sets a 240 second default estimator timeout with a
-300 second request cap.
+The Docker Space uses the Hugging Face Docker SDK on port `7860`, installs both
+estimator profiles, and sets a 240 second default estimator timeout. The
+standard profile is `malb/lattice-estimator`; the enhanced profile is
+`identitymapping/enhanced_lattice-estimator`, pinned to revision
+`876b66173f4354a96ddafc0ce3a79767ec43c6d4` by the Dockerfile.
 
 ## Deploy
 
@@ -60,10 +62,36 @@ HOST=0.0.0.0
 PORT=7860
 SAGE_BINARY=sage
 LATTICE_ESTIMATOR_PATH=/opt/lattice-estimator
+ENHANCED_LATTICE_ESTIMATOR_PATH=/opt/enhanced-lattice-estimator
 EASYLATTICE_ESTIMATOR_TIMEOUT=240
 EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60
 EASYLATTICE_ALLOWED_ORIGINS=*
 ```
+
+## Estimator Profiles
+
+The live API chooses a subprocess profile from the request variant and adds
+`estimator_profile` to the internal worker payload:
+
+```json
+{
+  "estimator_profile": "enhanced",
+  "hard_problem_variant": "rlwr",
+  "ring_degree": 512
+}
+```
+
+LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use `enhanced`. Structured
+LWE-family payloads evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid`; the
+enhanced fork supplies the ring correction for `dual_hybrid`, and `bdd_hybrid`
+receives the ring degree and structure-leverage arguments. MATZOV and ADPS16
+are run in classical and quantum modes.
+
+Both repositories expose the same top-level Python import name, `estimator`.
+The server therefore launches the selected profile in a separate Sage process
+with an isolated `PYTHONPATH` and verifies the imported package origin. Setting
+both paths is required to support all variants; combining both repositories in
+one Python import path is unsupported.
 
 For production, replace `EASYLATTICE_ALLOWED_ORIGINS=*` in the Space settings
 with your GitHub Pages origin, for example:

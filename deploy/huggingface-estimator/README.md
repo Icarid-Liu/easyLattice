@@ -20,6 +20,9 @@ The container:
 
 - starts from a SageMath image;
 - clones `malb/lattice-estimator` into `/opt/lattice-estimator`;
+- checks out `identitymapping/enhanced_lattice-estimator` at pinned revision
+  `876b66173f4354a96ddafc0ce3a79767ec43c6d4` into
+  `/opt/enhanced-lattice-estimator`;
 - exposes a small JSON API on port `7860`;
 - defaults to a 240 second timeout and clamps requests to 300 seconds.
 
@@ -30,6 +33,9 @@ EASYLATTICE_ESTIMATOR_TIMEOUT_SECONDS=240
 EASYLATTICE_ESTIMATOR_MAX_TIMEOUT_SECONDS=300
 EASYLATTICE_ESTIMATOR_WORKERS=1
 EASYLATTICE_ALLOWED_ORIGINS=https://your-github-pages-domain.example
+SAGE_BINARY=sage
+LATTICE_ESTIMATOR_PATH=/opt/lattice-estimator
+ENHANCED_LATTICE_ESTIMATOR_PATH=/opt/enhanced-lattice-estimator
 ```
 
 Use `EASYLATTICE_ALLOWED_ORIGINS=*` only for early testing.
@@ -52,6 +58,9 @@ curl -X POST https://YOUR-SPACE.hf.space/jobs \
     "payload": {
       "n": 512,
       "q": 257,
+      "estimator_profile": "enhanced",
+      "hard_problem_variant": "rlwe",
+      "ring_degree": 512,
       "distribution": {
         "estimator": {"type": "centered_binomial", "eta": 1}
       },
@@ -77,6 +86,32 @@ curl -X POST https://YOUR-SPACE.hf.space/estimate \
 The public frontend should use `/jobs` plus polling. Avoid long browser
 requests to `/estimate`; a proxy or browser may time out before Sage does.
 
+## Estimator Profiles
+
+Each payload may set `estimator_profile` to `standard` or `enhanced`.
+LWE/LWR and NTRU jobs use `standard`; RLWE/MLWE/RLWR/MLWR jobs use `enhanced`.
+The full application adds this field automatically. Direct worker callers must
+send the correct profile themselves. For example, a plain LWE payload uses:
+
+```json
+{
+  "estimator_profile": "standard",
+  "hard_problem_variant": "lwe"
+}
+```
+
+The two estimator repositories both provide a top-level package named
+`estimator`. The worker never imports both into one process. It selects
+`LATTICE_ESTIMATOR_PATH` or `ENHANCED_LATTICE_ESTIMATOR_PATH`, starts a separate
+Sage subprocess with only that source root on `PYTHONPATH`, disables the user
+site, and verifies the imported package origin before running the estimate.
+
+For enhanced structured LWE payloads, all of `usvp`, `dual_hybrid`, and
+`bdd_hybrid` run in the enhanced profile. The fork supplies the structured
+`dual_hybrid` correction; `bdd_hybrid` additionally receives the ring degree
+and structure-leverage arguments. MATZOV and ADPS16 are evaluated in classical
+and quantum modes. NTRU payloads use the standard profile.
+
 ## Safety Defaults
 
 The worker does not accept arbitrary Python or shell commands. It only forwards
@@ -87,6 +122,7 @@ Current limits:
 - `n <= 16384`;
 - `q` at most 64 bits;
 - `problem` is `lwe` or `ntru`;
+- `estimator_profile` is `standard` or `enhanced`;
 - NTRU `ntru_type` is `circulant` or `matrix`;
 - timeout is clamped by `EASYLATTICE_ESTIMATOR_MAX_TIMEOUT_SECONDS`;
 - jobs are in-memory and expire after one hour by default.

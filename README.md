@@ -48,6 +48,61 @@ The same agent API also includes an initial NTRU selector:
   cost models. A quantum NTRU target therefore requires Sage estimation rather
   than the classical-only fast reference screen.
 
+Streamlined NTRU Prime is available through the following six fixed presets.
+The security selector uses the listed reference bits and NIST category, while
+estimator validation still follows the validation contract below.
+
+| Preset | n | q | Fixed weight | Classical bits | Quantum bits | NIST category |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sntrup653` | 653 | 4621 | 288 | 129 | 117 | 1 |
+| `sntrup761` | 761 | 4591 | 286 | 153 | 139 | 2 |
+| `sntrup857` | 857 | 5167 | 322 | 175 | 159 | 3 |
+| `sntrup953` | 953 | 6343 | 396 | 196 | 178 | 4 |
+| `sntrup1013` | 1013 | 7177 | 448 | 209 | 190 | 4 |
+| `sntrup1277` | 1277 | 7879 | 492 | 270 | 245 | 5 |
+
+For security assessment, HPS, HRSS, and NTRU Prime are all passed to the
+standard estimator as `circulant` NTRU instances. This estimator classification
+does not replace the scheme ring used for correctness: NTRU Prime DFR products
+are reduced modulo the trinomial `x^n - x - 1`.
+
+## Estimator Validation
+
+easyLattice uses two estimator profiles:
+
+- LWE and LWR use the standard
+  [`malb/lattice-estimator`](https://github.com/malb/lattice-estimator) profile.
+- RLWE, MLWE, RLWR, and MLWR use the
+  [`identitymapping/enhanced_lattice-estimator`](https://github.com/identitymapping/enhanced_lattice-estimator)
+  profile. All three attacks run in that profile; `dual_hybrid` uses the fork's
+  structured correction, while `bdd_hybrid` receives `deg_ring` and
+  `structure_leverage=true`, plus `Grover=true` in quantum mode.
+- NTRU uses the standard estimator profile and its NTRU estimator.
+
+Every LWE-family validation evaluates `usvp`, `dual_hybrid`, and `bdd_hybrid`.
+Both profiles evaluate MATZOV and ADPS16 in classical and quantum modes:
+`MATZOV()`, `MATZOV(nn="quantum")`, `ADPS16()`, and
+`ADPS16(mode="quantum")`. The enhanced profile also runs `usvp`, but no
+ring-specific arguments are added to that attack. NTRU validation calls the
+standard estimator's complete NTRU attack dispatcher under the same four
+reduction-model/mode combinations.
+
+The two repositories both expose a top-level Python package named `estimator`.
+easyLattice therefore launches each profile in a separate Sage subprocess,
+sets an isolated `PYTHONPATH`, disables the user site, and verifies the imported
+package origin before estimating. Do not put both repositories into one Python
+import path and expect profile selection to be reliable.
+
+Recommendation responses distinguish selection from validation:
+
+| Status | Meaning |
+| --- | --- |
+| `validated` | Every eligible candidate was successfully covered and every required attack/model/mode result was complete. |
+| `partial` | At least one estimate succeeded, but candidate coverage or required attack results were incomplete. |
+| `failed` | Validation was requested, but no candidate produced a usable estimate. |
+| `not_requested` | Estimator validation was not requested; values come from the deterministic screen/reference data. |
+| `target_unmet` | Selection status, not validation status: the returned best available candidate is below the requested security target. |
+
 ## Search Model
 
 Requested security is a lower bound. The selector first chooses the
@@ -99,6 +154,12 @@ Open `http://127.0.0.1:8000`. The setup script creates `config.local.json`,
 detects local Sage/lattice-estimator paths where possible, and keeps optional
 LLM settings local. Manual startup is also supported with `python3 -m app.server`.
 
+While a newer search or DFR request is pending, or after any relevant input is
+changed, the browser marks the previous result stale and hides or disables its
+actionable output, including JSON copying. Only the response carrying the
+current request token can become active, so a slower older request cannot
+overwrite a newer result.
+
 The following representative prototype settings are examples only; use the
 local server for live output. They are not parameter certifications.
 
@@ -137,11 +198,20 @@ following pre-error-correction coefficient models:
 - NTRU: `p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e`;
 - LWE: `((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2`.
 
-The success boundary is `|E| <= Delta`. DFR is reported as `log2(DFR)` for a
-single coefficient and for the vector union bound. Explicit raw-probability
-fields remain in the API and copied JSON for external ECC calculations. The
-default working precision is 512 bits, and discrete Gaussians use a
-configurable 128-bit tail bound.
+The success boundary is `|E| <= Delta`; failure mass is summed only where
+`|E| > Delta`. DFR is reported as `log2(DFR)`. For ring-aware NTRU models, the
+single-coefficient value is the worst coefficient marginal. For the LWE model,
+all output coefficients use the same coefficient model. The vector value is
+the capped sum of coefficient failure probabilities, i.e. a union bound. It
+does not assume that output coefficients are independent. Explicit raw-
+probability fields remain in the API and copied JSON for external ECC
+calculations. The default working precision is 512 bits, and discrete
+Gaussians use a configurable 128-bit tail bound.
+
+NTRU products support cyclic reduction modulo `x^n - 1`, negacyclic reduction
+modulo `x^n + 1`, and NTRU Prime trinomial reduction modulo `x^n - x - 1`.
+The NTRU Prime result reports coefficient-marginal approximation warnings; its
+vector aggregation remains a union bound and makes no joint-independence claim.
 
 Inputs support common `lattice-estimator` distribution families, LWR floor
 compression, Kyber nearest-integer compression, and a custom finite PMF JSON
@@ -202,9 +272,22 @@ cp config.local.example.json config.local.json
 
 `config.local.json` is ignored by git. Relevant settings include:
 
+```json
+{
+  "estimator": {
+    "sage_binary": "sage",
+    "lattice_estimator_path": "/path/to/malb/lattice-estimator",
+    "enhanced_lattice_estimator_path": "/path/to/identitymapping/enhanced-lattice-estimator"
+  }
+}
+```
+
 - `estimator.sage_binary`: `sage` or an absolute Sage executable path;
-- `estimator.lattice_estimator_path`: absolute path to `malb/lattice-estimator`
-  when Sage cannot already import `estimator`;
+- `estimator.lattice_estimator_path`: absolute path to
+  `malb/lattice-estimator`, required for standard-profile validation;
+- `estimator.enhanced_lattice_estimator_path`: absolute path to
+  `identitymapping/enhanced_lattice-estimator`, required for structured
+  RLWE/MLWE/RLWR/MLWR validation;
 - `estimator.default_timeout_seconds`: request-level estimator timeout;
 - `estimator.remote_url`: optional Hugging Face estimator worker URL;
 - `estimator.remote_timeout_seconds`: remote-worker timeout, intended for
@@ -221,6 +304,7 @@ Equivalent environment variables:
 ```bash
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
+ENHANCED_LATTICE_ESTIMATOR_PATH=/path/to/enhanced-lattice-estimator \
 python3 -m app.server
 ```
 
