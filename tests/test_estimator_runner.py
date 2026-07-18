@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -10,11 +11,28 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from app.estimator_runner import run_lwe, run_lwe_attack, run_ntru, summarize_attacks
+from app.estimator_runner import (
+    attack_result,
+    run_lwe,
+    run_lwe_attack,
+    run_ntru,
+    summarize_attacks,
+)
+
+
+FAKE_OO = object()
+
+
+def fake_cost_to_json(cost):
+    fields = {}
+    if "rop" in cost:
+        fields["rop_bits"] = None if cost["rop"] is FAKE_OO else cost["rop"]
+    return fields
 
 
 class FakeLWE:
     calls = []
+    costs = {}
     failures = set()
 
     class Parameters:
@@ -29,6 +47,8 @@ class FakeLWE:
         cls.calls.append((name, kwargs))
         if (kwargs["red_cost_model"], name) in cls.failures:
             raise RuntimeError(f"{name} failed")
+        if name in cls.costs:
+            return cls.costs[name]
         return {"rop": 140.0 - len(cls.calls)}
 
     @classmethod
@@ -85,6 +105,7 @@ def load_space_app():
 class EstimatorRunnerTests(unittest.TestCase):
     def setUp(self):
         FakeLWE.calls.clear()
+        FakeLWE.costs.clear()
         FakeLWE.failures.clear()
 
     def test_baseline_attacks_receive_exact_arguments(self):
@@ -185,6 +206,17 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertFalse(failed["ok"])
         self.assertFalse(failed["complete"])
 
+    def test_attack_result_rejects_missing_rop(self):
+        self.assertEqual(
+            attack_result({}),
+            {
+                "ok": False,
+                "code": "invalid_attack_cost",
+                "message": "attack estimate returned no finite rop",
+                "summary": "{}",
+            },
+        )
+
     def test_run_lwe_reports_partial_top_level_contract_and_echoes_parameters(self):
         FakeLWE.failures = {
             (model, "bdd_hybrid")
@@ -252,6 +284,31 @@ class EstimatorRunnerTests(unittest.TestCase):
             for mode in family.values():
                 self.assertTrue(mode["complete"])
 
+    def test_run_lwe_rejects_oo_and_non_finite_attack_costs(self):
+        FakeLWE.costs.update(
+            {
+                "usvp": {"rop": FAKE_OO},
+                "dual_hybrid": {"rop": float("inf")},
+                "bdd_hybrid": {"rop": 128.0},
+            }
+        )
+
+        result = self.run_fake_lwe()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["complete"])
+        for family in result["models"].values():
+            for mode in family.values():
+                self.assertTrue(mode["ok"])
+                self.assertFalse(mode["complete"])
+                self.assertTrue(mode["attacks"]["bdd_hybrid"]["ok"])
+                for attack in ("usvp", "dual_hybrid"):
+                    self.assertFalse(mode["attacks"][attack]["ok"])
+                    self.assertEqual(
+                        mode["attacks"][attack]["code"],
+                        "invalid_attack_cost",
+                    )
+
     def test_run_ntru_marks_omitted_attacks_as_partial_failures(self):
         FakeNTRU.estimates = {"usvp": {"rop": 132.0}}
 
@@ -277,6 +334,64 @@ class EstimatorRunnerTests(unittest.TestCase):
                             "message": "estimator omitted attack result",
                         },
                     )
+
+    def test_run_ntru_rejects_none_oo_and_non_finite_attack_costs(self):
+        FakeNTRU.estimates = {
+            "usvp": {"rop": 132.0},
+            "dsd": {"rop": None},
+            "bdd": {"rop": FAKE_OO},
+            "bdd_hybrid": {"rop": float("inf")},
+            "bdd_mitm_hybrid": {"rop": float("nan")},
+        }
+
+        result = self.run_fake_ntru()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["complete"])
+        for family in result["models"].values():
+            for mode in family.values():
+                self.assertTrue(mode["ok"])
+                self.assertFalse(mode["complete"])
+                self.assertTrue(mode["attacks"]["usvp"]["ok"])
+                for attack in ("dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid"):
+                    self.assertFalse(mode["attacks"][attack]["ok"])
+                    self.assertEqual(
+                        mode["attacks"][attack]["code"],
+                        "invalid_attack_cost",
+                    )
+
+    def test_runner_process_rejects_competing_estimator_origin(self):
+        runner = Path(__file__).resolve().parents[1] / "app" / "estimator_runner.py"
+        with TemporaryDirectory() as selected, TemporaryDirectory() as competing:
+            for root in (selected, competing):
+                package = Path(root) / "estimator"
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "EASYLATTICE_ESTIMATOR_ROOT": selected,
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONPATH": competing,
+                }
+            )
+            completed = subprocess.run(
+                [sys.executable, str(runner)],
+                input="{}",
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "estimator_origin_mismatch")
+        self.assertIn(str(Path(competing).resolve()), result["message"])
+        self.assertIn(str(Path(selected).resolve()), result["message"])
 
     def run_fake_lwe(self):
         estimator_module = types.ModuleType("estimator")
@@ -308,7 +423,7 @@ class EstimatorRunnerTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"estimator": estimator_module}),
             patch("app.estimator_runner.reduction_model_variants", return_value=models),
-            patch("app.estimator_runner.cost_to_json", side_effect=lambda cost: {"rop_bits": cost["rop"]}),
+            patch("app.estimator_runner.cost_to_json", side_effect=fake_cost_to_json),
             patch("app.estimator_runner.estimator_commit", return_value="abc1234"),
         ):
             return run_lwe(payload)
@@ -345,7 +460,7 @@ class EstimatorRunnerTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"estimator": estimator_module}),
             patch("app.estimator_runner.reduction_model_variants", return_value=models),
-            patch("app.estimator_runner.cost_to_json", side_effect=lambda cost: {"rop_bits": cost["rop"]}),
+            patch("app.estimator_runner.cost_to_json", side_effect=fake_cost_to_json),
             patch("app.estimator_runner.estimator_commit", return_value="abc1234"),
         ):
             return run_ntru(payload)
@@ -480,6 +595,10 @@ class EstimatorSpaceAppTests(unittest.TestCase):
                             environment = call.kwargs["env"]
                             self.assertEqual(environment["PYTHONPATH"], expected)
                             self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
+                            self.assertEqual(
+                                environment["EASYLATTICE_ESTIMATOR_ROOT"],
+                                expected,
+                            )
 
     def test_origin_preflight_blocks_competing_estimator_in_actual_subprocess(self):
         with (

@@ -348,6 +348,7 @@ def run_estimator_subprocess(payload: dict[str, Any], timeout_seconds: int) -> d
     env = os.environ.copy()
     env["PYTHONPATH"] = str(estimator_path)
     env["PYTHONNOUSERSITE"] = "1"
+    env["EASYLATTICE_ESTIMATOR_ROOT"] = str(estimator_path)
 
     preflight = subprocess.run(
         [

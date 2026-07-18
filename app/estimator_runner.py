@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -17,6 +19,10 @@ NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
 
 
 class AttackTimeout(Exception):
+    pass
+
+
+class EstimatorOriginMismatch(Exception):
     pass
 
 
@@ -58,9 +64,13 @@ def estimator_commit() -> str | None:
 def log2_or_none(value):
     from sage.all import log, oo
 
-    if value == oo:
+    if value is None or value == oo:
         return None
-    return float(log(value, 2))
+    try:
+        result = float(log(value, 2))
+    except Exception:
+        return None
+    return result if math.isfinite(result) else None
 
 
 def cost_to_json(cost) -> dict:
@@ -84,6 +94,48 @@ def cost_to_json(cost) -> dict:
     return fields
 
 
+def finite_rop_bits(value) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def attack_result(cost) -> dict:
+    fields = cost_to_json(cost)
+    if not finite_rop_bits(fields.get("rop_bits")):
+        return {
+            "ok": False,
+            "code": "invalid_attack_cost",
+            "message": "attack estimate returned no finite rop",
+            "summary": fields.get("summary", repr(cost)),
+        }
+    return {"ok": True, **fields}
+
+
+def verify_estimator_origin() -> None:
+    configured_root = os.environ.get("EASYLATTICE_ESTIMATOR_ROOT")
+    if not configured_root:
+        return
+    expected_root = Path(configured_root).expanduser().resolve()
+    try:
+        import estimator
+
+        origin = Path(estimator.__file__).resolve()
+        actual_root = origin.parent.parent if origin.parent.name == "estimator" else origin.parent
+        actual_root = actual_root.resolve()
+    except Exception as exc:
+        raise EstimatorOriginMismatch(
+            f"Could not import the selected estimator: {type(exc).__name__}: {exc}"
+        ) from exc
+    if actual_root != expected_root:
+        raise EstimatorOriginMismatch(
+            f"Estimator imported from {actual_root}, expected {expected_root}."
+        )
+
+
 def reduction_model_variants() -> dict[str, dict[str, object]]:
     from estimator.reduction import ADPS16, MATZOV
 
@@ -103,7 +155,7 @@ def summarize_attacks(attacks: dict[str, dict]) -> dict:
     successful = {
         name: result
         for name, result in attacks.items()
-        if result.get("ok") and result.get("rop_bits") is not None
+        if result.get("ok") and finite_rop_bits(result.get("rop_bits"))
     }
     if not successful:
         return {
@@ -142,6 +194,7 @@ def run_lwe_attack(LWE, params, name: str, model, mode: str, profile: str, ring_
 
 
 def run(payload: dict) -> dict:
+    verify_estimator_origin()
     if payload.get("problem") == "ntru":
         return run_ntru(payload)
     return run_lwe(payload)
@@ -187,7 +240,7 @@ def run_lwe(payload: dict) -> dict:
                             estimator_profile,
                             ring_degree,
                         )
-                    attacks[name] = {"ok": True, **cost_to_json(cost)}
+                    attacks[name] = attack_result(cost)
                 except AttackTimeout as exc:
                     attacks[name] = {"ok": False, "message": str(exc)}
                 except Exception as exc:
@@ -258,10 +311,7 @@ def run_ntru(payload: dict) -> dict:
                     )
                 attacks = {}
                 for name, cost in estimates.items():
-                    if cost.get("rop") is None:
-                        attacks[name] = {"ok": False, "message": "missing cost"}
-                    else:
-                        attacks[name] = {"ok": True, **cost_to_json(cost)}
+                    attacks[name] = attack_result(cost)
                 for name in NTRU_ATTACKS:
                     attacks.setdefault(
                         name,
@@ -339,6 +389,18 @@ def main() -> int:
         payload = json.loads(sys.stdin.read())
         print(json.dumps(run(payload), ensure_ascii=False))
         return 0
+    except EstimatorOriginMismatch as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "code": "estimator_origin_mismatch",
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
     except Exception as exc:
         print(json.dumps({"ok": False, "message": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False))
         return 1
