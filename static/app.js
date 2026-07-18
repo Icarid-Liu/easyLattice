@@ -110,6 +110,7 @@ const RESULT_CODE_KEYS = {
   validation_config_missing: "warningValidationConfigMissing",
   validation_partial_attacks: "warningValidationPartialAttacks",
   quantum_estimate_unavailable: "warningQuantumEstimateUnavailable",
+  preview_fixture_notice: "warningPreviewFixtureNotice",
   ntru_prime_coefficient_marginal: "warningNtruPrimeMarginal",
   dfr_union_bound: "dfrWarningUnionBound",
   dfr_gaussian_tail_excluded: "dfrWarningTail",
@@ -136,6 +137,16 @@ const SECURITY_LEGACY_MESSAGE_CODES = {
   "Sage/lattice-estimator rough validation was applied to this recommendation.": "validation_applied",
   "Sage/lattice-estimator NTRU validation was applied to this recommendation.": "validation_applied",
   "No quantum security estimate is available for this NTRU candidate.": "quantum_estimate_unavailable",
+  "This is a static preview fixture. Run the local service for live security and DFR calculations.": "preview_fixture_notice",
+  "Preview data is illustrative only.": "preview_fixture_notice",
+};
+const LEGACY_ERROR_KEYS = {
+  "search inputs changed while the estimator was running": "errorSearchInputsChanged",
+  "estimator job did not return an id": "errorEstimatorJobMissingId",
+  "estimator job completed without a result": "errorEstimatorJobMissingResult",
+  "estimator job failed": "errorEstimatorJobFailed",
+  "estimator job polling timed out": "errorEstimatorPollingTimedOut",
+  "request failed": "errorRequestFailed",
 };
 const DFR_LEGACY_MESSAGE_CODES = {
   "Vector DFR uses a union bound and does not assume independent output coefficients.": "dfr_union_bound",
@@ -183,6 +194,16 @@ const TRANSLATIONS = {
     generatingSubtitle: "Generating NTT-friendly moduli and screening security estimates.",
     estimatorSubtitle: "Running lattice-estimator validation. This can take several minutes.",
     estimatorWaiting: "Estimator job {status}. Waiting for Sage/lattice-estimator.",
+    estimatorStatusQueued: "Queued",
+    estimatorStatusRunning: "Running",
+    estimatorStatusSucceeded: "Completed",
+    estimatorStatusFailed: "Failed",
+    errorSearchInputsChanged: "Search inputs changed while the estimator was running.",
+    errorEstimatorJobMissingId: "The estimator job did not return an ID.",
+    errorEstimatorJobMissingResult: "The estimator job completed without a result.",
+    errorEstimatorJobFailed: "The estimator job failed.",
+    errorEstimatorPollingTimedOut: "Estimator job polling timed out.",
+    errorRequestFailed: "Request failed",
     requestFailed: "Request failed",
     recommendedInstance: "Recommended lattice instance ({n}, {q})",
     summaryStats: "{source} · {count} candidates · {ms} ms",
@@ -243,7 +264,12 @@ const TRANSLATIONS = {
     sparseTernary: "Sparse Ternary",
     compressionP: "p={value}",
     distributionText: "{name}, sigma={stddev}, support [{support}]",
-    alternativeSummary: "{model}: {bits} bits · margin +{margin}",
+    alternativeSummary: "{model}: {bits} · {margin}",
+    securityLevelUnclassified: "Unclassified",
+    securityLevelBelowNistI: "Below NIST-I",
+    securityLevelNistI: "NIST-I",
+    securityLevelNistIII: "NIST-III",
+    securityLevelNistV: "NIST-V",
     configAgent: "agent: deterministic default",
     configLlmReady: "llm: ready · {provider} / {model}",
     configLlmAuthMissing: "llm: auth missing · {provider} / {model}",
@@ -323,6 +349,7 @@ const TRANSLATIONS = {
     warningValidationConfigMissing: "Estimator validation was requested, but its runtime or configuration is unavailable; the displayed security remains a fast screen.",
     warningValidationPartialAttacks: "Estimator validation covered only part of the requested attack models or candidate set.",
     warningQuantumEstimateUnavailable: "No quantum security estimate is available for this NTRU candidate.",
+    warningPreviewFixtureNotice: "This is static preview data; run the local service for live security and DFR calculations.",
     warningNtruPrimeMarginal: "NTRU Prime products use coefficient-marginal estimates; the vector result uses a union bound and makes no independence claim.",
     nextBindSchemeConstraints: "Bind this recommendation to concrete scheme constraints before use.",
     dfrWarningUnionBound: "Vector DFR uses a union bound and does not assume independent output coefficients.",
@@ -368,6 +395,16 @@ const TRANSLATIONS = {
     generatingSubtitle: "正在生成适合 NTT 的模数并筛选安全估计。",
     estimatorSubtitle: "正在运行 lattice-estimator 验证，可能需要几分钟。",
     estimatorWaiting: "Estimator 任务 {status}，等待 Sage/lattice-estimator。",
+    estimatorStatusQueued: "排队中",
+    estimatorStatusRunning: "运行中",
+    estimatorStatusSucceeded: "已完成",
+    estimatorStatusFailed: "失败",
+    errorSearchInputsChanged: "Estimator 运行期间搜索输入已更改。",
+    errorEstimatorJobMissingId: "Estimator 任务未返回 ID。",
+    errorEstimatorJobMissingResult: "Estimator 任务已完成，但没有返回结果。",
+    errorEstimatorJobFailed: "Estimator 任务失败。",
+    errorEstimatorPollingTimedOut: "Estimator 任务轮询超时。",
+    errorRequestFailed: "请求失败",
     requestFailed: "请求失败",
     recommendedInstance: "推荐格实例 ({n}, {q})",
     summaryStats: "{source} · {count} 个候选 · {ms} ms",
@@ -428,7 +465,12 @@ const TRANSLATIONS = {
     sparseTernary: "稀疏三元分布",
     compressionP: "p={value}",
     distributionText: "{name}, sigma={stddev}, support [{support}]",
-    alternativeSummary: "{model}: {bits} bits · 余量 +{margin}",
+    alternativeSummary: "{model}：{bits} · {margin}",
+    securityLevelUnclassified: "未分类",
+    securityLevelBelowNistI: "低于 NIST-I",
+    securityLevelNistI: "NIST-I",
+    securityLevelNistIII: "NIST-III",
+    securityLevelNistV: "NIST-V",
     configAgent: "agent：确定性默认模式",
     configLlmReady: "llm：已就绪 · {provider} / {model}",
     configLlmAuthMissing: "llm：缺少认证 · {provider} / {model}",
@@ -508,6 +550,7 @@ const TRANSLATIONS = {
     warningValidationConfigMissing: "已请求 estimator 验证，但运行环境或配置不可用；当前显示的安全性仍来自快速筛选。",
     warningValidationPartialAttacks: "Estimator 仅验证了部分攻击模型或候选集。",
     warningQuantumEstimateUnavailable: "该 NTRU 候选没有可用的量子安全估计。",
+    warningPreviewFixtureNotice: "静态预览数据仅用于演示；请运行本地服务以获取实时安全性和 DFR 计算。",
     warningNtruPrimeMarginal: "NTRU Prime 乘积采用系数边缘估计；向量结果使用 union bound，不作独立性假设。",
     nextBindSchemeConstraints: "使用前请将该推荐绑定到具体方案约束。",
     dfrWarningUnionBound: "向量 DFR 使用 union bound，不假定输出系数相互独立。",
@@ -587,8 +630,12 @@ document.querySelectorAll('input[name="workspaceMode"]').forEach((input) => {
   input.addEventListener("change", syncWorkspace);
 });
 document.querySelectorAll('input[name="dfrType"]').forEach((input) => {
-  input.addEventListener("change", syncDfrForm);
+  input.addEventListener("change", () => {
+    syncPreviewDfrDimension();
+    syncDfrForm();
+  });
 });
+dfrForm.elements.namedItem("dfrRingType")?.addEventListener("change", syncPreviewDfrDimension);
 dfrDistributionEditors.addEventListener("change", (event) => {
   if (event.target.matches("[data-dfr-distribution-type]")) {
     renderDfrDistributionEditors();
@@ -647,6 +694,7 @@ async function requestRecommendation() {
     searchState.acceptError(request, {
       titleKey: "requestFailed",
       message: error.message,
+      messageKey: error.translationKey,
     });
   } finally {
     if (searchState.finish(request)) {
@@ -671,6 +719,7 @@ async function requestDfr() {
     dfrState.acceptError(request, {
       titleKey: "dfrFailed",
       message: error.message,
+      messageKey: error.translationKey,
     });
   } finally {
     if (dfrState.finish(request)) {
@@ -792,11 +841,11 @@ function setDfrIdleHeading() {
 async function requestRecommendationJob(payload, request) {
   const submitted = await postJson("/api/agent/jobs", payload, { accepted: true });
   if (!searchState.accepts(request)) {
-    throw new Error("search inputs changed while the estimator was running");
+    throw localizedError("errorSearchInputsChanged");
   }
   const jobId = submitted.job_id;
   if (!jobId) {
-    throw new Error("estimator job did not return an id");
+    throw localizedError("errorEstimatorJobMissingId");
   }
 
   const timeoutMs = (Number(payload.estimatorTimeout) || 240) * 1000 + 30000;
@@ -804,25 +853,25 @@ async function requestRecommendationJob(payload, request) {
   let job = submitted;
   while (Date.now() < deadline) {
     if (!searchState.accepts(request)) {
-      throw new Error("search inputs changed while the estimator was running");
+      throw localizedError("errorSearchInputsChanged");
     }
     if (job.status === "succeeded") {
-      if (!job.result) throw new Error("estimator job completed without a result");
+      if (!job.result) throw localizedError("errorEstimatorJobMissingResult");
       return job.result;
     }
     if (job.status === "failed") {
-      throw new Error(job.error || "estimator job failed");
+      throw errorWithFallback(job.error, "errorEstimatorJobFailed");
     }
     if (searchState.update(request, {
       subtitleKey: "estimatorWaiting",
-      subtitleValues: { status: job.status },
+      subtitleValues: { statusCode: job.status },
     }) && activeWorkspace === "search") {
       renderSearchState();
     }
     await sleep(2000);
     job = await getJson(`/api/agent/jobs/${jobId}`);
   }
-  throw new Error("estimator job polling timed out");
+  throw localizedError("errorEstimatorPollingTimedOut");
 }
 
 async function postJson(path, payload, options = {}) {
@@ -833,7 +882,7 @@ async function postJson(path, payload, options = {}) {
   });
   const result = await response.json();
   if (!response.ok && !(options.accepted && response.status === 202)) {
-    throw new Error(result.error || "request failed");
+    throw errorWithFallback(result.error, "errorRequestFailed");
   }
   return result;
 }
@@ -842,9 +891,22 @@ async function getJson(path) {
   const response = await fetch(apiUrl(path), { headers: apiHeaders() });
   const result = await response.json();
   if (!response.ok) {
-    throw new Error(result.error || "request failed");
+    throw errorWithFallback(result.error, "errorRequestFailed");
   }
   return result;
+}
+
+function localizedError(translationKey) {
+  const error = new Error(t(translationKey));
+  error.translationKey = translationKey;
+  return error;
+}
+
+function errorWithFallback(message, fallbackKey) {
+  if (message == null || message === "") return localizedError(fallbackKey);
+  const error = new Error(String(message));
+  error.translationKey = LEGACY_ERROR_KEYS[error.message];
+  return error;
 }
 
 function renderResult(result) {
@@ -878,7 +940,7 @@ function renderResult(result) {
   setText("#modulus-q", modulus.q == null ? "-" : String(modulus.q));
   setText("#modulus-bits", formatBits(modulus.bits));
   setText("#selected-bits", formatBits(selection.selected_security_bits));
-  setText("#security-level", selection.security_level || t("notAvailable"));
+  setText("#security-level", securityLevelText(selection.security_level) || t("notAvailable"));
   setText("#security-margin", formatMargin(selection.margin_bits));
   setMeter("#classic-meter", displayedSecurity.classical, target);
   setMeter("#quantum-meter", displayedSecurity.quantum, target);
@@ -920,7 +982,7 @@ function renderResult(result) {
     [t("referenceQuantumSecurity"), formatOptionalBits(security.reference_quantum_bits)],
     [t("target"), formatSecurityTarget(request)],
     [t("reductionModel"), redCostModel],
-    [t("securityLevel"), selection.security_level],
+    [t("securityLevel"), securityLevelText(selection.security_level)],
     [t("nistCategory"), security.nist_category],
     [t("marginLabel"), formatOptionalBits(selection.margin_bits)],
     [t("validationStatus"), validationStatusText(validation.status)],
@@ -1008,9 +1070,9 @@ function renderAlternatives(items) {
     ) {
       const summary = document.createElement("span");
       summary.textContent = t("alternativeSummary", {
-        model: selection.security_model,
-        bits: selection.selected_security_bits,
-        margin: selection.margin_bits,
+        model: securityModelText(selection.security_model),
+        bits: t("bits", { value: selection.selected_security_bits }),
+        margin: t("margin", { value: selection.margin_bits }),
       });
       node.appendChild(summary);
     }
@@ -1089,6 +1151,47 @@ function validationStatusText(status) {
     validated: "statusReady",
   };
   return status == null ? null : t(keys[status] || status);
+}
+
+function securityModelText(model) {
+  const keys = { classical: "classical", quantum: "quantum" };
+  return model == null ? null : t(keys[model] || model);
+}
+
+function securityLevelText(level) {
+  const keys = {
+    unclassified: "securityLevelUnclassified",
+    "below NIST-I": "securityLevelBelowNistI",
+    "NIST-I": "securityLevelNistI",
+    "NIST-III": "securityLevelNistIII",
+    "NIST-V": "securityLevelNistV",
+  };
+  return level == null ? null : t(keys[level] || level);
+}
+
+function estimatorJobStatusText(status) {
+  const keys = {
+    queued: "estimatorStatusQueued",
+    running: "estimatorStatusRunning",
+    succeeded: "estimatorStatusSucceeded",
+    failed: "estimatorStatusFailed",
+  };
+  return status == null ? null : t(keys[status] || status);
+}
+
+function localizeErrorMessage(message) {
+  const key = LEGACY_ERROR_KEYS[message];
+  return key ? t(key) : message || "";
+}
+
+function requestStateSubtitle(error) {
+  return error.messageKey ? t(error.messageKey) : localizeErrorMessage(error.message);
+}
+
+function requestMetadataSubtitle(metadata) {
+  const values = { ...(metadata.subtitleValues || {}) };
+  if (values.statusCode != null) values.status = estimatorJobStatusText(values.statusCode);
+  return t(metadata.subtitleKey || "generatingSubtitle", values);
 }
 
 function localizeSource(code, fallback) {
@@ -1270,13 +1373,13 @@ function renderSearchState() {
   if (state.inFlight) {
     const metadata = state.metadata || {};
     title.textContent = t("searchingParameters");
-    subtitle.textContent = t(metadata.subtitleKey || "generatingSubtitle", metadata.subtitleValues || {});
+    subtitle.textContent = requestMetadataSubtitle(metadata);
     setStatus("loading", t("statusRunning"));
     return;
   }
   if (state.error) {
     title.textContent = t(state.error.titleKey);
-    subtitle.textContent = state.error.message;
+    subtitle.textContent = requestStateSubtitle(state.error);
     setStatus("error", t("statusError"));
     return;
   }
@@ -1310,7 +1413,7 @@ function renderDfrState() {
   }
   if (state.error) {
     title.textContent = t(state.error.titleKey);
-    subtitle.textContent = state.error.message;
+    subtitle.textContent = requestStateSubtitle(state.error);
     setStatus("error", t("statusError"));
     return;
   }
@@ -1337,6 +1440,14 @@ function syncDfrForm() {
     updateRequestControls();
   }
   if (activeWorkspace === "dfr") renderDfrState();
+}
+
+function syncPreviewDfrDimension() {
+  if (!PREVIEW_MODE || selectedDfrType() !== "ntru") return;
+  const fixture = previewDfrResult("ntru", selectedDfrRingType());
+  const dimension = fixture?.dimensions?.n;
+  const field = dfrForm.elements.namedItem("dfrNtruN");
+  if (field && dimension != null) field.value = String(dimension);
 }
 
 function selectedDfrType() {

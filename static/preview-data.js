@@ -62,13 +62,57 @@
       adps16_quantum_bits: 117.6,
     },
     warnings: [warning],
-    warning_codes: ["screen_scheme_not_bound"],
+    warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
     visual_scores: {
       security: { score: 0.253 },
       compactness: { score: 0.682 },
       performance: { score: 0.5 },
     },
   };
+
+  const lweAlternativeCandidates = [
+    {
+      ring: {
+        family_id: "power2",
+        family: "2-power cyclotomic",
+        n: 512,
+        cyclotomic_index: 1024,
+        polynomial: "x^512 + 1",
+        quotient: "Z_769[x] / (x^512 + 1)",
+      },
+      modulus: {
+        q: 769,
+        bits: 10,
+        q_minus_1_factorization: "2^8 * 3",
+        ntt_condition: "256 | q - 1; 512 does not divide q - 1",
+        ntt_quality: "2_layers_remaining",
+        ntt_layers_remaining: 2,
+        polynomial_factorization: "x^512 + 1 splits into 128 quartic factors over F_q",
+      },
+      distribution: {
+        name: "Xs=ST(l0=1, l1=0), Xe=CBD(1)",
+        secret: distribution("ST(l0=1, l1=0)", "0.707106781", [-1, 1]),
+        error: distribution("CBD(1)", "0.707106781", [-1, 1]),
+      },
+      security: {
+        source: "fast-screen",
+        source_code: "fast_screen",
+        classical_bits: 129.9,
+        quantum_bits: 117.9,
+        matzov_bits: 129.9,
+        matzov_quantum_bits: 117.9,
+        adps16_core_svp_bits: 129.9,
+        adps16_quantum_bits: 117.9,
+      },
+      warnings: [warning],
+      warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
+      visual_scores: {
+        security: { score: 0.254 },
+        compactness: { score: 0.625 },
+        performance: { score: 0.5 },
+      },
+    },
+  ];
 
   const ntruSecurity = (classical, quantum = null, nistCategory = null) => ({
     source: "ntru-reference-screen",
@@ -89,7 +133,7 @@
     distribution: distributionProfile,
     security,
     warnings: [warning],
-    warning_codes: ["screen_scheme_not_bound"],
+    warning_codes: ["screen_scheme_not_bound", "preview_fixture_notice"],
     visual_scores: {
       security: { score: 0.262 },
       compactness: { score: 0.591 },
@@ -103,122 +147,177 @@
     ntt_layers_remaining: null,
     polynomial_factorization: null,
   };
+  const power2NtruCandidate = (q, factorization, profileName, stddev, support, bits) => ntruFixture(
+    {
+      family_id: "power2",
+      family: "2-power cyclotomic NTRU",
+      n: 512,
+      cyclotomic_index: 1024,
+      polynomial: "x^512 + 1",
+      quotient: `Z_${q}[x] / (x^512 + 1)`,
+      ntru_type: "circulant",
+      preset: null,
+    },
+    {
+      q,
+      bits: Math.floor(Math.log2(q)) + 1,
+      q_minus_1_factorization: factorization,
+      ntt_condition: "512 | q - 1; one layer below full split",
+      ntt_friendly: true,
+      ntt_quality: "selected_scale",
+      ntt_layers_remaining: null,
+      polynomial_factorization: null,
+    },
+    {
+      name: profileName,
+      fixed_weight: null,
+      secret: distribution(profileName, stddev, support),
+      error: distribution(profileName, stddev, support),
+    },
+    ntruSecurity(bits),
+  );
+  const hpsCandidate = (publicN, bits, errorStddev) => {
+    const n = publicN - 1;
+    return ntruFixture(
+      {
+        family_id: "hps",
+        family: "NTRU-HPS style",
+        n,
+        cyclotomic_index: null,
+        polynomial: `x^${publicN} - 1 with one relation removed by the estimator`,
+        quotient: `NTRU-HPS style mod q=2048, public polynomial degree N=${publicN}`,
+        ntru_type: "circulant",
+        preset: null,
+      },
+      { q: 2048, bits: 11, q_minus_1_factorization: "23 * 89", ...inapplicableNtt },
+      {
+        name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)",
+        fixed_weight: null,
+        secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
+        error: distribution("SparseTernary(p=127, m=127)", errorStddev, [-1, 1]),
+      },
+      ntruSecurity(bits),
+    );
+  };
+  const hrssCandidate = (publicN, bits) => {
+    const n = publicN - 1;
+    return ntruFixture(
+      {
+        family_id: "hrss",
+        family: "NTRU-HRSS style",
+        n,
+        cyclotomic_index: null,
+        polynomial: `x^${publicN} - 1 with one relation removed by the estimator`,
+        quotient: `NTRU-HRSS style mod q=8192, public polynomial degree N=${publicN}`,
+        ntru_type: "circulant",
+        preset: null,
+      },
+      { q: 8192, bits: 13, q_minus_1_factorization: "8191", ...inapplicableNtt },
+      {
+        name: "UniformMod(3)",
+        fixed_weight: null,
+        secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
+        error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
+      },
+      ntruSecurity(bits),
+    );
+  };
+  const ntruPrimeCandidate = (
+    preset,
+    n,
+    q,
+    factorization,
+    signWeight,
+    fixedWeight,
+    stddev,
+    classical,
+    quantum,
+    category,
+  ) => ntruFixture(
+    {
+      family_id: "ntru_prime",
+      family: "Streamlined NTRU Prime",
+      n,
+      cyclotomic_index: null,
+      polynomial: `x^${n} - x - 1`,
+      quotient: `Z_${q}[x] / (x^${n} - x - 1)`,
+      ntru_type: "circulant",
+      preset,
+    },
+    {
+      q,
+      bits: Math.floor(Math.log2(q)) + 1,
+      q_minus_1_factorization: factorization,
+      ...inapplicableNtt,
+    },
+    {
+      name: `Xs=SparseTernary(p=${signWeight}, m=${signWeight}), Xe=UniformMod(3)`,
+      fixed_weight: fixedWeight,
+      secret: distribution(`SparseTernary(p=${signWeight}, m=${signWeight})`, stddev, [-1, 1]),
+      error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
+    },
+    ntruSecurity(classical, quantum, category),
+  );
   const ntruPreviewFamilies = {
     power2: {
       generatedCandidates: 5,
       eligibleCandidates: 4,
-      candidate: ntruFixture(
-        {
-          family_id: "power2",
-          family: "2-power cyclotomic NTRU",
-          n: 512,
-          cyclotomic_index: 1024,
-          polynomial: "x^512 + 1",
-          quotient: "Z_7681[x] / (x^512 + 1)",
-          ntru_type: "circulant",
-          preset: null,
-        },
-        {
-          q: 7681,
-          bits: 13,
-          q_minus_1_factorization: "2^9 * 3 * 5",
-          ntt_condition: "512 | q - 1; one layer below full split",
-          ntt_friendly: true,
-          ntt_quality: "selected_scale",
-          ntt_layers_remaining: null,
-          polynomial_factorization: null,
-        },
-        {
-          name: "ST(l0=2, l1=0) + CBD(5) + CBD(8)",
-          fixed_weight: null,
-          secret: distribution("ST(l0=2, l1=0) + CBD(5) + CBD(8)", "2.62202212", [-14, 14]),
-          error: distribution("ST(l0=2, l1=0) + CBD(5) + CBD(8)", "2.62202212", [-14, 14]),
-        },
-        ntruSecurity(131.4),
+      candidate: power2NtruCandidate(
+        7681,
+        "2^9 * 3 * 5",
+        "ST(l0=2, l1=0) + CBD(5) + CBD(8)",
+        "2.62202212",
+        [-14, 14],
+        131.4,
       ),
+      alternatives: [
+        power2NtruCandidate(10753, "2^9 * 3 * 7", "CBD(2) + CBD(8) + CBD(8)", "3", [-18, 18], 130.2),
+        power2NtruCandidate(11777, "2^9 * 23", "CBD(2) + CBD(8) + CBD(8)", "3", [-18, 18], 128.4),
+      ],
     },
     hps: {
       generatedCandidates: 4,
       eligibleCandidates: 4,
-      candidate: ntruFixture(
-        {
-          family_id: "hps",
-          family: "NTRU-HPS style",
-          n: 592,
-          cyclotomic_index: null,
-          polynomial: "x^593 - 1 with one relation removed by the estimator",
-          quotient: "NTRU-HPS style mod q=2048, public polynomial degree N=593",
-          ntru_type: "circulant",
-          preset: null,
-        },
-        { q: 2048, bits: 11, q_minus_1_factorization: "23 * 89", ...inapplicableNtt },
-        {
-          name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)",
-          fixed_weight: null,
-          secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-          error: distribution("SparseTernary(p=127, m=127)", "0.655022178", [-1, 1]),
-        },
-        ntruSecurity(128.6),
-      ),
+      candidate: hpsCandidate(593, 128.6, "0.655022178"),
+      alternatives: [
+        hpsCandidate(599, 129.9, "0.65172783"),
+        hpsCandidate(607, 131.8, "0.647411704"),
+      ],
     },
     hrss: {
       generatedCandidates: 4,
       eligibleCandidates: 4,
-      candidate: ntruFixture(
-        {
-          family_id: "hrss",
-          family: "NTRU-HRSS style",
-          n: 672,
-          cyclotomic_index: null,
-          polynomial: "x^673 - 1 with one relation removed by the estimator",
-          quotient: "NTRU-HRSS style mod q=8192, public polynomial degree N=673",
-          ntru_type: "circulant",
-          preset: null,
-        },
-        { q: 8192, bits: 13, q_minus_1_factorization: "8191", ...inapplicableNtt },
-        {
-          name: "UniformMod(3)",
-          fixed_weight: null,
-          secret: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-          error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-        },
-        ntruSecurity(130.8),
-      ),
+      candidate: hrssCandidate(673, 130.8),
+      alternatives: [hrssCandidate(677, 131.6), hrssCandidate(683, 133.1)],
     },
     ntru_prime: {
       generatedCandidates: 6,
       eligibleCandidates: 6,
-      candidate: ntruFixture(
-        {
-          family_id: "ntru_prime",
-          family: "Streamlined NTRU Prime",
-          n: 653,
-          cyclotomic_index: null,
-          polynomial: "x^653 - x - 1",
-          quotient: "Z_4621[x] / (x^653 - x - 1)",
-          ntru_type: "circulant",
-          preset: "sntrup653",
-        },
-        {
-          q: 4621,
-          bits: 13,
-          q_minus_1_factorization: "2^2 * 3 * 5 * 7 * 11",
-          ...inapplicableNtt,
-        },
-        {
-          name: "Xs=SparseTernary(p=144, m=144), Xe=UniformMod(3)",
-          fixed_weight: 288,
-          secret: distribution("SparseTernary(p=144, m=144)", "0.664109439", [-1, 1]),
-          error: distribution("UniformMod(3)", "0.816496581", [-1, 1]),
-        },
-        ntruSecurity(129, 117, 1),
+      candidate: ntruPrimeCandidate(
+        "sntrup653", 653, 4621, "2^2 * 3 * 5 * 7 * 11", 144, 288, "0.664109439", 129, 117, 1,
       ),
+      alternatives: [
+        ntruPrimeCandidate(
+          "sntrup761", 761, 4591, "2 * 3^3 * 5 * 17", 143, 286, "0.613042648", 153, 139, 2,
+        ),
+        ntruPrimeCandidate(
+          "sntrup857", 857, 5167, "2 * 3^2 * 7 * 41", 161, 322, "0.612967608", 175, 159, 3,
+        ),
+      ],
     },
   };
   const LWE_CANDIDATE_POOL = {
     generatedCandidates: 7168,
     eligibleCandidates: 7168,
   };
+
+  function securityLevelForBits(bits) {
+    if (bits === null || bits === undefined) return "unclassified";
+    if (bits < 128) return "below NIST-I";
+    if (bits < 192) return "NIST-I";
+    if (bits < 256) return "NIST-III";
+    return "NIST-V";
+  }
 
   function withSelection(candidate, payload) {
     const selected = payload.securityModel === "quantum"
@@ -234,23 +333,7 @@
       margin_bits: hasEstimate ? Math.round((selected - target) * 10) / 10 : null,
       meets_target: meetsTarget,
       status: meetsTarget ? "target_met" : "target_unmet",
-      security_level: hasEstimate ? "NIST-I" : "unclassified",
-    };
-    return candidate;
-  }
-
-  function makeAlternative(base, q, bits, selected, payload) {
-    const candidate = clone(base);
-    candidate.modulus.q = q;
-    candidate.modulus.bits = bits;
-    candidate.selection = {
-      target_security: Number(payload.targetSecurity) || 128,
-      security_model: payload.securityModel || "classical",
-      selected_security_bits: selected,
-      margin_bits: Math.round((selected - (Number(payload.targetSecurity) || 128)) * 10) / 10,
-      meets_target: selected >= (Number(payload.targetSecurity) || 128),
-      status: selected >= (Number(payload.targetSecurity) || 128) ? "target_met" : "target_unmet",
-      security_level: "NIST-I",
+      security_level: securityLevelForBits(selected),
     };
     return candidate;
   }
@@ -279,9 +362,14 @@
       security_model: payload.securityModel || "classical",
       red_cost_model: payload.redCostModel || "matzov",
     };
-    const alternatives = isNtru
-      ? [makeAlternative(candidate, candidate.modulus.q, candidate.modulus.bits, 139.1, payload), makeAlternative(candidate, candidate.modulus.q, candidate.modulus.bits, 132.8, payload)]
-      : [makeAlternative(lweCandidate, 769, 10, 129.9, payload), makeAlternative(lweCandidate, 7681, 13, 144.6, payload)];
+    const alternativeFixtures = isNtru ? familyFixture.alternatives : lweAlternativeCandidates;
+    const alternatives = alternativeFixtures.map((fixture) => {
+      const alternative = withSelection(clone(fixture), payload);
+      if (isNtru && family === "power2") {
+        alternative.ring.ntru_type = effectiveVariant === "matrix" ? "matrix" : "circulant";
+      }
+      return alternative;
+    });
     const profile = isNtru || ["lwe", "lwr"].includes(request.hard_problem_variant)
       ? "standard"
       : "enhanced";
@@ -356,11 +444,11 @@
       tail_probability_upper_bound: "0",
       error_support: { size: 3435, minimum: "-2036", maximum: "2036" },
       distributions: {
-        g: { support_size: 3, support: ["-1", "1"] },
-        f: { support_size: 3, support: ["-1", "1"] },
-        s: { support_size: 3, support: ["-1", "1"] },
-        e: { support_size: 3, support: ["-1", "1"] },
-        m: { support_size: 3, support: ["-1", "1"] },
+        g: { support_size: 3, support: ["-1", "1"], tail_probability_upper_bound: "0" },
+        f: { support_size: 3, support: ["-1", "1"], tail_probability_upper_bound: "0" },
+        s: { support_size: 3, support: ["-1", "1"], tail_probability_upper_bound: "0" },
+        e: { support_size: 3, support: ["-1", "1"], tail_probability_upper_bound: "0" },
+        m: { support_size: 3, support: ["-1", "1"], tail_probability_upper_bound: "0" },
       },
       coefficients: { p0: "3", p1: "0", p2: "1", p3: "0" },
       ring_type: "cyclic",
@@ -395,13 +483,13 @@
       tail_probability_upper_bound: "0",
       error_support: { size: 17073, minimum: "-10858", maximum: "10826" },
       distributions: {
-        s: { support_size: 7, support: ["-3", "3"] },
-        e: { support_size: 7, support: ["-3", "3"] },
-        e1: { support_size: 5, support: ["-2", "2"] },
-        r: { support_size: 7, support: ["-3", "3"] },
-        e2: { support_size: 5, support: ["-2", "2"] },
-        ec1: { support_size: 5, support: ["-2", "2"] },
-        ec2: { support_size: 209, support: ["-104", "104"] },
+        s: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
+        e: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
+        e1: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
+        r: { support_size: 7, support: ["-3", "3"], tail_probability_upper_bound: "0" },
+        e2: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
+        ec1: { support_size: 5, support: ["-2", "2"], tail_probability_upper_bound: "0" },
+        ec2: { support_size: 209, support: ["-104", "104"], tail_probability_upper_bound: "0" },
       },
       warnings: [unionBoundWarning],
       warning_codes: ["dfr_union_bound"],

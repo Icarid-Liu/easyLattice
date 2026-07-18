@@ -404,6 +404,189 @@ class BrowserRequestStateTests(unittest.TestCase):
                 )
                 self.assertEqual(preview, backend)
 
+        distribution_summaries = self.page.evaluate(
+            """(() => {
+              const fixtures = window.EASYLATTICE_PREVIEW_FIXTURES.dfr;
+              return {
+                cyclic: fixtures.ntru.distributions,
+                lwe: fixtures.lwe.distributions,
+              };
+            })()"""
+        )
+        for fixture_name, summaries in distribution_summaries.items():
+            with self.subTest(fixture=fixture_name):
+                self.assertTrue(summaries)
+                for name, summary in summaries.items():
+                    self.assertIn(
+                        "tail_probability_upper_bound",
+                        summary,
+                        f"{fixture_name}.{name}",
+                    )
+                    self.assertEqual(summary["tail_probability_upper_bound"], "0")
+
+    def test_preview_candidate_contracts_are_internally_consistent(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("?preview=1")
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && typeof window.EASYLATTICE_PREVIEW_FIXTURES?.recommendation === 'function'"
+        )
+
+        cases = (
+            ("lwe", "power2", 7168, 7168),
+            ("ntru", "power2", 5, 4),
+            ("ntru", "hps", 4, 4),
+            ("ntru", "hrss", 4, 4),
+            ("ntru", "ntru_prime", 6, 6),
+        )
+        expected_alternatives = {
+            ("lwe", "power2"): [(512, 769, 129.9, 117.9)],
+            ("ntru", "power2"): [
+                (512, 10753, 130.2, None),
+                (512, 11777, 128.4, None),
+            ],
+            ("ntru", "hps"): [
+                (598, 2048, 129.9, None),
+                (606, 2048, 131.8, None),
+            ],
+            ("ntru", "hrss"): [
+                (676, 8192, 131.6, None),
+                (682, 8192, 133.1, None),
+            ],
+            ("ntru", "ntru_prime"): [
+                (761, 4591, 153, 139),
+                (857, 5167, 175, 159),
+            ],
+        }
+        for category, family, generated, eligible in cases:
+            for security_model in ("classical", "quantum"):
+                with self.subTest(
+                    category=category,
+                    family=family,
+                    security_model=security_model,
+                ):
+                    result = self.page.evaluate(
+                        f"""(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({{
+                          hardProblemCategory: '{category}',
+                          hardProblemVariant: '{'ring' if category == 'ntru' else 'rlwe'}',
+                          ringFamily: '{family}',
+                          targetSecurity: 128,
+                          securityModel: '{security_model}',
+                          redCostModel: 'matzov',
+                          useEstimator: false,
+                        }}))()"""
+                    )
+                    self.assertEqual(result["search"]["generated_candidates"], generated)
+                    self.assertEqual(result["validation"]["eligible_candidates"], eligible)
+                    self.assertTrue(result["alternatives"])
+                    self.assertEqual(
+                        [
+                            (
+                                candidate["ring"]["n"],
+                                candidate["modulus"]["q"],
+                                candidate["security"]["matzov_bits"],
+                                candidate["security"]["matzov_quantum_bits"],
+                            )
+                            for candidate in result["alternatives"]
+                        ],
+                        expected_alternatives[(category, family)],
+                    )
+                    self.assertEqual(
+                        len({
+                            (
+                                candidate["ring"]["n"],
+                                candidate["modulus"]["q"],
+                                candidate["distribution"]["name"],
+                            )
+                            for candidate in [
+                                result["recommendation"],
+                                *result["alternatives"],
+                            ]
+                        }),
+                        len(result["alternatives"]) + 1,
+                    )
+                    for candidate in [result["recommendation"], *result["alternatives"]]:
+                        q = candidate["modulus"]["q"]
+                        selected = candidate["selection"]["selected_security_bits"]
+                        expected_selected = candidate["security"][
+                            "matzov_quantum_bits"
+                            if security_model == "quantum"
+                            else "matzov_bits"
+                        ]
+                        expected_level = (
+                            "unclassified"
+                            if selected is None
+                            else "below NIST-I"
+                            if selected < 128
+                            else "NIST-I"
+                            if selected < 192
+                            else "NIST-III"
+                            if selected < 256
+                            else "NIST-V"
+                        )
+                        self.assertEqual(candidate["modulus"]["bits"], (q - 1).bit_length())
+                        self.assertIn(str(q), candidate["ring"]["quotient"])
+                        self.assertEqual(candidate["ring"]["family_id"], family)
+                        self.assertEqual(selected, expected_selected)
+                        self.assertEqual(candidate["selection"]["security_level"], expected_level)
+                        self.assertEqual(
+                            candidate["selection"]["status"],
+                            "target_met"
+                            if selected is not None and selected >= 128
+                            else "target_unmet",
+                        )
+
+        quantum_lwe = self.page.evaluate(
+            """(() => window.EASYLATTICE_PREVIEW_FIXTURES.recommendation({
+              hardProblemCategory: 'lwe',
+              hardProblemVariant: 'rlwe',
+              ringFamily: 'power2',
+              targetSecurity: 128,
+              securityModel: 'quantum',
+              redCostModel: 'matzov',
+              useEstimator: false,
+            }).recommendation)()"""
+        )
+        self.assertEqual(quantum_lwe["selection"]["selected_security_bits"], 117.6)
+        self.assertEqual(quantum_lwe["selection"]["security_level"], "below NIST-I")
+
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('input[name=securityModel][value=quantum]').click();
+              document.querySelector('#parameter-form button[type=submit]').click();
+            })()"""
+        )
+        self.page.wait_for(
+            "searchState.snapshot().resultCurrent"
+            " && searchState.snapshot().result.recommendation.selection.security_model"
+            " === 'quantum'"
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  level: document.querySelector('#security-level').textContent,
+                  status: document.querySelector('#status-pill').textContent,
+                }))()"""
+            ),
+            {"level": "Below NIST-I", "status": "Target unmet"},
+        )
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'zh';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  level: document.querySelector('#security-level').textContent,
+                  status: document.querySelector('#status-pill').textContent,
+                }))()"""
+            ),
+            {"level": "低于 NIST-I", "status": "未达到目标"},
+        )
+
     def test_request_state_interactions(self):
         self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?request-state-test=1")
@@ -564,6 +747,19 @@ class BrowserRequestStateTests(unittest.TestCase):
             )
             self.page.wait_for("!searchState.snapshot().inFlight")
 
+        self.page.evaluate(
+            "document.querySelector('#parameter-form button[type=submit]').click()"
+        )
+        self.page.wait_for("window.__requests.length === 6 && searchState.snapshot().inFlight")
+        self.page.evaluate("window.__requests[5].resolveResult({}, 503)")
+        self.page.wait_for("!searchState.snapshot().inFlight && searchState.snapshot().error")
+        self.assertEqual(
+            self.page.evaluate(
+                "document.querySelector('#summary-subtitle').textContent"
+            ),
+            "请求失败",
+        )
+
         self.navigate("?preview=1")
         self.page.wait_for(
             "document.readyState === 'complete'"
@@ -594,6 +790,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                     source: rows.Source,
                     next: rows.Next,
                     nttQuality: instance['NTT quality'],
+                    alternativeText: document.querySelector('#candidate-list').textContent,
+                    previewWarning: document.querySelector('#warnings').textContent,
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
                     plaintextJson: Boolean(document.querySelector('#alternatives pre, #dfr-results pre')),
                   };
@@ -609,6 +807,17 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "source": "Fast security screen",
                 "next": "Bind this recommendation to concrete scheme constraints before use.",
                 "nttQuality": "2_layers_remaining, remaining layers 2",
+                "alternativeText": (
+                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
+                    "Classical: 129.9 bits · margin +1.9 bits"
+                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                ),
+                "previewWarning": (
+                    "This fast screen is not bound to a concrete scheme; scheme-level "
+                    "correctness and security constraints remain unchecked."
+                    "This is static preview data; run the local service for live security "
+                    "and DFR calculations."
+                ),
                 "invalidText": False,
                 "plaintextJson": False,
             },
@@ -630,6 +839,15 @@ class BrowserRequestStateTests(unittest.TestCase):
                   return {
                     status: document.querySelector('#status-pill').textContent,
                     warning: document.querySelector('#warnings').textContent.includes('尚未绑定到具体方案'),
+                    previewWarning: document.querySelector('#warnings').textContent
+                      .includes('静态预览数据仅用于演示'),
+                    englishWarning: /This is|Preview data/.test(
+                      document.querySelector('#warnings').textContent
+                    ),
+                    alternativeText: document.querySelector('#candidate-list').textContent,
+                    estimatorStatuses: ['queued', 'running', 'succeeded', 'failed']
+                      .map(estimatorJobStatusText),
+                    fallbackError: localizeErrorMessage('request failed'),
                     nttQuality: rows['NTT 质量'],
                     invalidText: /\b(undefined|null)\b/.test(document.body.innerText),
                   };
@@ -638,6 +856,15 @@ class BrowserRequestStateTests(unittest.TestCase):
             {
                 "status": "已快速筛选",
                 "warning": True,
+                "previewWarning": True,
+                "englishWarning": False,
+                "alternativeText": (
+                    "n=512, q=769, Xs=ST(l0=1, l1=0), Xe=CBD(1)"
+                    "经典：129.9 比特 · 余量 +1.9 比特"
+                    "2_layers_remaining · 256 | q - 1; 512 does not divide q - 1"
+                ),
+                "estimatorStatuses": ["排队中", "运行中", "已完成", "失败"],
+                "fallbackError": "请求失败",
                 "nttQuality": "2_layers_remaining，剩余层数：2",
                 "invalidText": False,
             },
@@ -833,6 +1060,16 @@ class BrowserRequestStateTests(unittest.TestCase):
                     effectiveVariant: result.request.hard_problem_variant,
                     generated: result.search.generated_candidates,
                     eligible: result.validation.eligible_candidates,
+                    alternativesUseFamily: result.alternatives.every(
+                      (alternative) => alternative.ring.family_id === candidate.ring.family_id
+                    ),
+                    alternativeSelectionsMatch: result.alternatives.every((alternative) => {
+                      const selection = alternative.selection;
+                      const expected = selection.security_model === 'quantum'
+                        ? alternative.security.matzov_quantum_bits
+                        : alternative.security.matzov_bits;
+                      return selection.selected_security_bits === expected;
+                    }),
                     renderedFamily: instance.Family,
                     renderedNtruType: instance['NTRU type'],
                     invalidText: /\b(undefined|null)\b/.test(document.querySelector('#search-results').innerText),
@@ -855,6 +1092,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                     "effectiveVariant": expected["effective_variant"],
                     "generated": expected["generated"],
                     "eligible": expected["eligible"],
+                    "alternativesUseFamily": True,
+                    "alternativeSelectionsMatch": True,
                     "renderedFamily": expected["family_name"],
                     "renderedNtruType": expected["ntru_type"],
                     "invalidText": False,
@@ -1017,6 +1256,8 @@ class BrowserRequestStateTests(unittest.TestCase):
                     worst: rows['Worst coefficient index'],
                     profiles: rows['Distinct coefficient profiles'],
                     dimension: result.dimensions.n,
+                    formDimension: Number(document.querySelector('[name=dfrNtruN]').value),
+                    requestDimension: buildDfrPayload().n,
                     worstIndex: result.coefficient_dfr.worst_index,
                     failureProbabilities: result.coefficient_dfr.failure_probabilities,
                     singleProbability: result.single_coefficient_failure_probability,
@@ -1034,6 +1275,8 @@ class BrowserRequestStateTests(unittest.TestCase):
             self.assertEqual(rendered["worst"], worst)
             self.assertEqual(rendered["profiles"], profiles)
             self.assertEqual(rendered["dimension"], dimension)
+            self.assertEqual(rendered["formDimension"], dimension)
+            self.assertEqual(rendered["requestDimension"], dimension)
             self.assertEqual(rendered["precision"], "512 bits (167 decimal digits)")
             failure_strings = rendered["failureProbabilities"]
             ring_failures[ring_type] = failure_strings
