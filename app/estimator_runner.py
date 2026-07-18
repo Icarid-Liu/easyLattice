@@ -13,6 +13,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.compression_noise import compression_noise_estimator_distribution
+from app.estimator_contract import (
+    LWE_ATTACKS,
+    structure_correction_metadata,
+    structure_correction_satisfied,
+)
 
 
 NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
@@ -184,17 +189,25 @@ def summarize_attacks(attacks: dict[str, dict]) -> dict:
         for name, result in attacks.items()
         if result.get("ok") and finite_rop_bits(result.get("rop_bits"))
     }
-    if not successful:
+    covered = {
+        name: result
+        for name, result in successful.items()
+        if structure_correction_satisfied(result)
+    }
+    if not covered:
         return {
             "ok": False,
             "complete": False,
-            "message": "no attack estimate completed",
+            "message": "no covered attack estimate completed",
             "attacks": attacks,
         }
-    best_attack, best_result = min(successful.items(), key=lambda item: item[1]["rop_bits"])
+    best_attack, best_result = min(covered.items(), key=lambda item: item[1]["rop_bits"])
     return {
         "ok": True,
-        "complete": len(successful) == len(attacks),
+        "complete": (
+            len(successful) == len(attacks)
+            and all(structure_correction_satisfied(result) for result in attacks.values())
+        ),
         "min_bits": best_result["rop_bits"],
         "best_attack": best_attack,
         "attacks": attacks,
@@ -255,7 +268,12 @@ def run_lwe(payload: dict) -> dict:
         models[model_name] = {}
         for mode, model in modes.items():
             attacks = {}
-            for name in ("usvp", "dual_hybrid", "bdd_hybrid"):
+            for name in LWE_ATTACKS:
+                correction = structure_correction_metadata(
+                    name,
+                    estimator_profile,
+                    hard_problem_variant,
+                )
                 try:
                     with time_limit(per_attack_timeout):
                         cost = run_lwe_attack(
@@ -272,6 +290,7 @@ def run_lwe(payload: dict) -> dict:
                     attacks[name] = {"ok": False, "message": str(exc)}
                 except Exception as exc:
                     attacks[name] = {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+                attacks[name]["structure_correction"] = correction
             models[model_name][mode] = summarize_attacks(attacks)
 
     default_modes = models["adps16"]

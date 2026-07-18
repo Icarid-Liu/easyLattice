@@ -71,9 +71,11 @@ easyLattice 使用两个 estimator profile：
   [`malb/lattice-estimator`](https://github.com/malb/lattice-estimator) profile；
 - RLWE、MLWE、RLWR 和 MLWR 使用
   [`identitymapping/enhanced_lattice-estimator`](https://github.com/identitymapping/enhanced_lattice-estimator)
-  profile。三种攻击都会在该 profile 中运行；`dual_hybrid` 使用 fork 对结构化问题
-  的修正，`bdd_hybrid` 会收到 `deg_ring`、`structure_leverage=true`，量子模式下还会
-  收到 `Grover=true`；
+  profile。三种攻击都会在该 profile 中运行。在固定的 estimator revision 中，只有
+  `bdd_hybrid` 提供显式环结构修正，并会收到 `deg_ring`、
+  `structure_leverage=true`，量子模式下还会收到 `Grover=true`。增强版
+  `dual_hybrid` 仍会报告 fork 的计算结果，但它不含显式环结构修正，也不会被标记为
+  已做该修正；
 - NTRU 使用标准 estimator profile 及其中的 NTRU estimator。
 
 每次 LWE 族验证都会评估 `usvp`、`dual_hybrid` 和 `bdd_hybrid`。两个 profile 都会
@@ -81,6 +83,15 @@ easyLattice 使用两个 estimator profile：
 `MATZOV(nn="quantum")`、`ADPS16()` 和 `ADPS16(mode="quantum")`。增强 profile
 也会运行 `usvp`，但不会为该攻击额外传入环结构参数。NTRU 验证会在同样四种规约
 模型/模式组合下，调用标准 estimator 的完整 NTRU 攻击分派器。
+
+每个 LWE 攻击结果都包含 JSON-safe 的 `structure_correction` 对象，并稳定提供
+`requested`、`available`、`applied`、`code` 和 `message` 字段。对结构化增强请求，
+`dual_hybrid` 会标记为已请求修正但不可用且未应用，`bdd_hybrid` 会标记为已应用，
+`usvp` 则标记为不适用。未修正的 dual 结果会保留供检查，但不参与安全比特最小值。
+由于一个已请求攻击缺少必需修正，即使所有攻击都返回有限代价，固定 revision 下的
+结构化验证仍为 `partial`，且 `dual_hybrid` 不能单独认证安全目标。稳定代码分别为
+`structure_correction_not_applicable`、`structure_correction_unavailable` 和
+`structure_correction_applied`。
 
 两个仓库都提供名为 `estimator` 的顶层 Python 包。easyLattice 因此为每个 profile
 启动独立 Sage 子进程，设置隔离的 `PYTHONPATH`、禁用 user site，并在估计前验证
@@ -387,7 +398,8 @@ python3 -m unittest discover -s tests
 `matzov` 和 `adps16` 选项选择的是 reduction-cost model，而不是某个攻击的别名。
 对 LWE 族验证，所选模型会分别应用到 `usvp`、`dual_hybrid` 和 `bdd_hybrid`；如前文
 所述，estimator 会在经典和量子模式下评估 MATZOV 与 ADPS16。启用 estimator 验证时，
-easyLattice 会向下取整所选安全比特，避免高估下界。
+easyLattice 只使用已覆盖所请求结构修正的攻击参与排名，并向下取整所选安全比特，
+避免高估下界。
 
 ## 计划扩展点
 

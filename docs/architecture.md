@@ -18,30 +18,32 @@ not part of the security calculation.
    selects the standard or enhanced source tree, launches Sage with an isolated
    `PYTHONPATH` and disabled user site, and verifies the imported `estimator`
    package origin before running `app.estimator_runner`.
-4. `app.security_result`: shared selection and validation result contract,
+4. `app.estimator_contract`: shared per-attack structure-correction metadata
+   and coverage rules used by the estimator runner and response validator.
+5. `app.security_result`: shared selection and validation result contract,
    including modulus-bit accounting, `target_met`/`target_unmet`, and
    `validated`/`partial`/`failed`/`not_requested` states.
-5. `app.agent`: orchestration boundary. It always returns the same response
+6. `app.agent`: orchestration boundary. It always returns the same response
    shape and records whether an LLM was used.
-6. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
+7. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
    is imported by `app.agent`, but it is instantiated and invoked only when
    `useLLM=true` and `llm.enabled=true`.
-7. `app.polynomial_ring`: exact polynomial multiplication/reduction primitives
+8. `app.polynomial_ring`: exact polynomial multiplication/reduction primitives
    for cyclic `x^n - 1`, negacyclic `x^n + 1`, and NTRU Prime
    `x^n - x - 1` quotient rings.
-8. `app.decryption_failure`: independent, ring-aware finite-PMF DFR engine for
+9. `app.decryption_failure`: independent, ring-aware finite-PMF DFR engine for
    NTRU and LWE correctness expressions. It converts estimator-style
    distribution descriptors into finite `value -> probability` maps without
    modifying the third-party estimator and aggregates vector failure with a
    union bound.
-9. `app.server`: HTTP routing and static UI serving for a local checkout.
-10. `static/app-model.js`: browser request-state model. Search and DFR have
+10. `app.server`: HTTP routing and static UI serving for a local checkout.
+11. `static/app-model.js`: browser request-state model. Search and DFR have
     independent input revisions and monotonic request tokens. Input changes
     advance the revision, making prior results stale and disabling their
     actions. An identical-input resubmission keeps the revision, so the prior
     result may remain current and copyable while pending, but its new token
     still prevents any older response from winning.
-11. `static/app.js`: browser rendering and API orchestration. The LLM checkbox
+12. `static/app.js`: browser rendering and API orchestration. The LLM checkbox
     is disabled unless public config says the local LLM provider is enabled and
     authenticated.
 
@@ -56,8 +58,16 @@ The remote worker implements the same profile field and source-origin check.
 Routing is fixed: LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use
 `enhanced`. LWE-family runs evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid`
 under MATZOV and ADPS16 classical/quantum models. In the enhanced profile,
-`dual_hybrid` uses the fork's structured implementation and `bdd_hybrid`
-receives `deg_ring`, `structure_leverage=true`, and quantum `Grover=true`.
+both hybrid attacks run in the pinned fork, but explicit ring correction is
+available only for `bdd_hybrid`, which receives `deg_ring`,
+`structure_leverage=true`, and quantum `Grover=true`. Enhanced `dual_hybrid`
+has no explicit ring-structure parameters at that revision. Its finite result
+is retained for inspection but excluded from covered-attack ranking.
+`app.estimator_contract` emits and validates per-attack `requested`,
+`available`, and `applied` booleans plus stable codes/messages. Missing or
+forged metadata invalidates the estimator response. Consequently, a structured
+response is partial while `dual_hybrid` lacks the requested correction and
+cannot become full validation or certify the target from that result alone.
 NTRU calls the standard estimator's NTRU attack dispatcher under the same four
 reduction-model/mode combinations. For power-of-two NTRU, the requested
 security variant maps directly to the estimator: `matrix` becomes

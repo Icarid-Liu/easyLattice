@@ -81,9 +81,11 @@ easyLattice uses two estimator profiles:
   [`malb/lattice-estimator`](https://github.com/malb/lattice-estimator) profile.
 - RLWE, MLWE, RLWR, and MLWR use the
   [`identitymapping/enhanced_lattice-estimator`](https://github.com/identitymapping/enhanced_lattice-estimator)
-  profile. All three attacks run in that profile; `dual_hybrid` uses the fork's
-  structured correction, while `bdd_hybrid` receives `deg_ring` and
-  `structure_leverage=true`, plus `Grover=true` in quantum mode.
+  profile. All three attacks run in that profile. At the pinned revision,
+  explicit ring-structure correction is available only for `bdd_hybrid`, which
+  receives `deg_ring` and `structure_leverage=true`, plus `Grover=true` in
+  quantum mode. Enhanced `dual_hybrid` remains useful output from the fork, but
+  it has no explicit ring-structure correction and is never labeled as such.
 - NTRU uses the standard estimator profile and its NTRU estimator.
 
 Every LWE-family validation evaluates `usvp`, `dual_hybrid`, and `bdd_hybrid`.
@@ -93,6 +95,18 @@ Both profiles evaluate MATZOV and ADPS16 in classical and quantum modes:
 ring-specific arguments are added to that attack. NTRU validation calls the
 standard estimator's complete NTRU attack dispatcher under the same four
 reduction-model/mode combinations.
+
+Each LWE attack result includes a JSON-safe `structure_correction` object with
+stable `requested`, `available`, `applied`, `code`, and `message` fields. For a
+structured enhanced request, `dual_hybrid` is reported with correction
+requested but unavailable and unapplied; `bdd_hybrid` is reported as applied;
+`usvp` is not applicable. The unavailable dual result remains visible for
+inspection but is excluded from the security-bit minimum. Because one requested
+attack lacks its required correction, structured validation is `partial` at
+the pinned revision even when every attack returns a finite cost, and
+`dual_hybrid` cannot certify the target by itself. The stable codes are
+`structure_correction_not_applicable`, `structure_correction_unavailable`, and
+`structure_correction_applied`.
 
 The two repositories both expose a top-level Python package named `estimator`.
 easyLattice therefore launches each profile in a separate Sage subprocess,
@@ -432,8 +446,9 @@ The `matzov` and `adps16` options select reduction-cost models, not individual
 attack aliases. For LWE-family validation, the selected model is applied to
 each of `usvp`, `dual_hybrid`, and `bdd_hybrid`; the estimator evaluates both
 MATZOV and ADPS16 in classical and quantum modes as described above. With
-estimator validation enabled, easyLattice rounds selected bit counts downward
-to avoid overstating a lower bound.
+estimator validation enabled, easyLattice ranks only attacks whose requested
+structure correction is covered and rounds selected bit counts downward to
+avoid overstating a lower bound.
 
 ## Planned Extension Points
 

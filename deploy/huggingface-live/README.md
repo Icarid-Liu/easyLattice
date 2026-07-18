@@ -84,10 +84,13 @@ The live API chooses a subprocess profile from the request variant and adds
 ```
 
 LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use `enhanced`. Structured
-LWE-family payloads evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid`; the
-enhanced fork supplies the ring correction for `dual_hybrid`, and `bdd_hybrid`
-receives the ring degree and structure-leverage arguments. MATZOV and ADPS16
-are run in classical and quantum modes.
+LWE-family payloads evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid` in the
+enhanced profile. At the pinned revision, explicit ring correction is available
+and applied only to `bdd_hybrid` through the ring degree and
+`structure_leverage`; `dual_hybrid` has no explicit ring correction. Its finite
+result remains visible, but it makes structured validation partial and cannot
+certify the target alone. MATZOV and ADPS16 are run in classical and quantum
+modes.
 
 Both repositories expose the same top-level Python import name, `estimator`.
 The server therefore launches the selected profile in a separate Sage process

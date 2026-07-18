@@ -18,6 +18,7 @@ from app.estimator_runner import (
     run_ntru,
     summarize_attacks,
 )
+from app.estimator_contract import structure_correction_metadata
 
 
 FAKE_OO = object()
@@ -267,6 +268,26 @@ class EstimatorRunnerTests(unittest.TestCase):
                 self.assertFalse(mode["complete"])
                 self.assertEqual(set(mode["attacks"]), {"usvp", "dual_hybrid", "bdd_hybrid"})
 
+    def test_structured_attacks_report_honest_structure_correction_metadata(self):
+        result = self.run_fake_lwe()
+
+        for family in result["models"].values():
+            for mode in family.values():
+                for attack, attack_result in mode["attacks"].items():
+                    self.assertEqual(
+                        attack_result["structure_correction"],
+                        structure_correction_metadata(attack, "enhanced", "rlwe"),
+                    )
+                self.assertFalse(
+                    mode["attacks"]["dual_hybrid"]["structure_correction"]["available"]
+                )
+                self.assertFalse(
+                    mode["attacks"]["dual_hybrid"]["structure_correction"]["applied"]
+                )
+                self.assertTrue(
+                    mode["attacks"]["bdd_hybrid"]["structure_correction"]["applied"]
+                )
+
     def test_run_lwe_top_level_ok_requires_a_success_in_every_model_mode(self):
         FakeLWE.failures = {
             ("matzov-quantum", attack)
@@ -281,15 +302,68 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertTrue(result["models"]["matzov"]["classical"]["ok"])
         self.assertTrue(result["models"]["adps16"]["quantum"]["ok"])
 
-    def test_run_lwe_top_level_complete_requires_every_attack_to_succeed(self):
+    def test_structured_run_stays_partial_when_every_attack_returns_finite_cost(self):
         result = self.run_fake_lwe()
 
         self.assertTrue(result["ok"])
-        self.assertTrue(result["complete"])
+        self.assertFalse(result["complete"])
         self.assertEqual(set(result["models"]), {"matzov", "adps16"})
         for family in result["models"].values():
             for mode in family.values():
+                self.assertFalse(mode["complete"])
+
+    def test_standard_run_is_complete_when_every_attack_returns_finite_cost(self):
+        result = self.run_fake_lwe(profile="standard", variant="lwe")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["complete"])
+        for family in result["models"].values():
+            for mode in family.values():
                 self.assertTrue(mode["complete"])
+                for attack_result in mode["attacks"].values():
+                    self.assertEqual(
+                        attack_result["structure_correction"]["code"],
+                        "structure_correction_not_applicable",
+                    )
+
+    def test_unavailable_structured_dual_cost_is_inspection_only(self):
+        FakeLWE.costs.update(
+            {
+                "usvp": {"rop": 160.0},
+                "dual_hybrid": {"rop": 100.0},
+                "bdd_hybrid": {"rop": 150.0},
+            }
+        )
+
+        result = self.run_fake_lwe()
+
+        for family in result["models"].values():
+            for mode in family.values():
+                self.assertEqual(mode["attacks"]["dual_hybrid"]["rop_bits"], 100.0)
+                self.assertEqual(mode["best_attack"], "bdd_hybrid")
+                self.assertEqual(mode["min_bits"], 150.0)
+
+    def test_unavailable_structured_dual_cannot_make_a_mode_usable_alone(self):
+        FakeLWE.failures = {
+            (model, attack)
+            for model in (
+                "matzov-classical",
+                "matzov-quantum",
+                "adps16-classical",
+                "adps16-quantum",
+            )
+            for attack in ("usvp", "bdd_hybrid")
+        }
+
+        result = self.run_fake_lwe()
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["complete"])
+        for family in result["models"].values():
+            for mode in family.values():
+                self.assertFalse(mode["ok"])
+                self.assertNotIn("min_bits", mode)
+                self.assertTrue(mode["attacks"]["dual_hybrid"]["ok"])
 
     def test_run_lwe_rejects_oo_and_non_finite_attack_costs(self):
         FakeLWE.costs.update(
@@ -400,7 +474,7 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertIn(str(Path(competing).resolve()), result["message"])
         self.assertIn(str(Path(selected).resolve()), result["message"])
 
-    def run_fake_lwe(self):
+    def run_fake_lwe(self, profile="enhanced", variant="rlwe"):
         estimator_module = types.ModuleType("estimator")
         estimator_module.LWE = FakeLWE
         estimator_module.ND = FakeND
@@ -422,8 +496,8 @@ class EstimatorRunnerTests(unittest.TestCase):
                 "name": "CBD(2)",
                 "estimator": {"type": "centered_binomial", "eta": 2},
             },
-            "estimator_profile": "enhanced",
-            "hard_problem_variant": "rlwe",
+            "estimator_profile": profile,
+            "hard_problem_variant": variant,
             "ring_degree": 512,
             "per_attack_timeout": 1,
         }

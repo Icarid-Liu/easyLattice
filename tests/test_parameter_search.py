@@ -7,6 +7,7 @@ from app.parameter_search import (
     factor_integer,
     is_prime,
     ntt_prime_candidates,
+    normalize_estimator_response,
     recommend_rlwe,
     rotate_secret_candidates,
     run_sage_estimator,
@@ -20,24 +21,68 @@ from app.parameter_search import (
     ring_dimensions,
 )
 from app.estimator_runner import estimator_distribution
+from app.estimator_contract import LWE_ATTACKS, structure_correction_metadata
 from app.compression_noise import compression_noise_pdf, compression_noise_profile
 from app.security_result import modulus_bits, selection_status, validation_result
 
 
-def estimator_success(bits=140.0, complete=True, profile="enhanced", commit="abc1234"):
+def estimator_attack(attack, bits, *, ok=True, profile="enhanced", variant="rlwr"):
+    result = {
+        "ok": ok,
+        "structure_correction": structure_correction_metadata(attack, profile, variant),
+    }
+    if ok:
+        result["rop_bits"] = bits
+    else:
+        result["message"] = "attack unavailable"
+    return result
+
+
+def estimator_mode(bits, *, profile="enhanced", variant="rlwr"):
+    structured_enhanced = (
+        profile == "enhanced"
+        and variant in {"rlwe", "mlwe", "rlwr", "mlwr"}
+    )
+    attacks = {
+        "usvp": estimator_attack("usvp", bits, profile=profile, variant=variant),
+        "dual_hybrid": estimator_attack(
+            "dual_hybrid",
+            bits - 10.0 if structured_enhanced else bits + 10.0,
+            profile=profile,
+            variant=variant,
+        ),
+        "bdd_hybrid": estimator_attack(
+            "bdd_hybrid",
+            bits + 5.0,
+            profile=profile,
+            variant=variant,
+        ),
+    }
+    complete = not structured_enhanced
+    return {
+        "ok": True,
+        "complete": complete,
+        "min_bits": bits,
+        "best_attack": "usvp",
+        "attacks": attacks,
+    }
+
+
+def estimator_success(bits=140.0, complete=False, profile="enhanced", commit="abc1234"):
     models = {
         model: {
-            mode: {
-                "ok": True,
-                "complete": complete,
-                "min_bits": bits - (1.0 if mode == "quantum" else 0.0),
-                "best_attack": "usvp",
-                "attacks": {},
-            }
+            mode: estimator_mode(
+                bits - (1.0 if mode == "quantum" else 0.0),
+                profile=profile,
+            )
             for mode in ("classical", "quantum")
         }
         for model in ("matzov", "adps16")
     }
+    if complete:
+        for family in models.values():
+            for mode in family.values():
+                mode["complete"] = True
     return {
         "ok": True,
         "complete": complete,
@@ -49,11 +94,15 @@ def estimator_success(bits=140.0, complete=True, profile="enhanced", commit="abc
 
 
 def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
+    failed_attacks = {
+        attack: estimator_attack(attack, bits, ok=False)
+        for attack in LWE_ATTACKS
+    }
     failed_mode = {
         "ok": False,
         "complete": False,
-        "message": "no attack estimate completed",
-        "attacks": {},
+        "message": "no covered attack estimate completed",
+        "attacks": failed_attacks,
     }
     models = {
         model: {
@@ -62,13 +111,7 @@ def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
         }
         for model in ("matzov", "adps16")
     }
-    models[model][mode] = {
-        "ok": True,
-        "complete": True,
-        "min_bits": bits,
-        "best_attack": "usvp",
-        "attacks": {},
-    }
+    models[model][mode] = estimator_mode(bits)
     return {
         "ok": False,
         "complete": False,
@@ -453,6 +496,25 @@ class ParameterSearchTests(unittest.TestCase):
                     self.assertEqual(payload["hard_problem_variant"], variant)
                     self.assertEqual(payload["ring_degree"], 512)
 
+    def test_standard_lwe_can_still_report_complete_validation(self):
+        request = parse_request({
+            "hardProblemCategory": "lwe",
+            "hardProblemVariant": "lwe",
+        })
+        response = estimator_success(
+            complete=True,
+            profile="standard",
+        )
+
+        normalized, _ = normalize_estimator_response(
+            response,
+            request=request,
+            expected_profile="standard",
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertTrue(normalized["complete"])
+
     def test_mocked_validation_rotates_secrets_and_reports_partial_coverage(self):
         returned_bits = iter((141.0, 151.0))
 
@@ -554,6 +616,28 @@ class ParameterSearchTests(unittest.TestCase):
         huge_integer_bits["models"]["matzov"]["classical"]["min_bits"] = 10**10000
         near_float_max_bits = estimator_success()
         near_float_max_bits["models"]["matzov"]["classical"]["min_bits"] = 1e308
+        fake_dual_correction = estimator_success()
+        fake_dual_correction["models"]["matzov"]["classical"]["attacks"][
+            "dual_hybrid"
+        ]["structure_correction"] = structure_correction_metadata(
+            "bdd_hybrid",
+            "enhanced",
+            "rlwr",
+        )
+        missing_bdd_correction = estimator_success()
+        del missing_bdd_correction["models"]["matzov"]["classical"]["attacks"][
+            "bdd_hybrid"
+        ]["structure_correction"]
+        dual_selected_as_best = estimator_success()
+        dual_selected_as_best["models"]["matzov"]["classical"].update(
+            {
+                "min_bits": 130.0,
+                "best_attack": "dual_hybrid",
+            }
+        )
+        forged_structure_complete = estimator_success()
+        forged_structure_complete["complete"] = True
+        forged_structure_complete["models"]["matzov"]["classical"]["complete"] = True
         cases = {
             "non_object": "not an estimator response",
             "list_code": {
@@ -577,6 +661,10 @@ class ParameterSearchTests(unittest.TestCase):
             "nan_bits": nan_bits,
             "huge_integer_bits": huge_integer_bits,
             "near_float_max_bits": near_float_max_bits,
+            "fake_dual_correction": fake_dual_correction,
+            "missing_bdd_correction": missing_bdd_correction,
+            "dual_selected_as_best": dual_selected_as_best,
+            "forged_structure_complete": forged_structure_complete,
         }
 
         for name, response in cases.items():

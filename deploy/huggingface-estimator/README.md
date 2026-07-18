@@ -132,10 +132,13 @@ Sage subprocess with only that source root on `PYTHONPATH`, disables the user
 site, and verifies the imported package origin before running the estimate.
 
 For enhanced structured LWE payloads, all of `usvp`, `dual_hybrid`, and
-`bdd_hybrid` run in the enhanced profile. The fork supplies the structured
-`dual_hybrid` correction; `bdd_hybrid` additionally receives the ring degree
-and structure-leverage arguments. MATZOV and ADPS16 are evaluated in classical
-and quantum modes. NTRU payloads use the standard profile.
+`bdd_hybrid` run in the enhanced profile. At the pinned enhanced revision,
+explicit `deg_ring`/`structure_leverage` correction exists only for
+`bdd_hybrid`. Enhanced `dual_hybrid` has no explicit ring-structure correction:
+its finite result is reported with `structure_correction.applied=false` and
+`available=false`, is kept for inspection, and makes structured validation
+partial. It cannot certify the target alone. MATZOV and ADPS16 are evaluated in
+classical and quantum modes. NTRU payloads use the standard profile.
 
 ## Safety Defaults
 

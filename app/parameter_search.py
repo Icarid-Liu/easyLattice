@@ -10,6 +10,11 @@ from typing import Any
 
 from .compression_noise import compression_noise_profile
 from .config import AppConfig, load_config
+from .estimator_contract import (
+    LWE_ATTACKS,
+    structure_correction_metadata,
+    structure_correction_satisfied,
+)
 from .estimator_process import estimator_profile_for, run_estimator
 from .security_result import modulus_bits, selection_status, validation_result
 
@@ -1396,7 +1401,82 @@ def invalid_estimator_response(message: str) -> dict[str, Any]:
     }
 
 
-def normalize_mode_results(modes: Any, context: str) -> dict[str, dict[str, Any]]:
+def normalize_structure_correction(
+    value: Any,
+    *,
+    attack: str,
+    profile: str,
+    variant: str,
+    context: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be an object")
+    expected = structure_correction_metadata(attack, profile, variant)
+    for field in ("requested", "available", "applied"):
+        if type(value.get(field)) is not bool:
+            raise ValueError(f"{context}.{field} must be a boolean")
+    for field in ("code", "message"):
+        if not isinstance(value.get(field), str) or not value[field]:
+            raise ValueError(f"{context}.{field} must be a non-empty string")
+    for field, expected_value in expected.items():
+        if value.get(field) != expected_value:
+            raise ValueError(
+                f"{context}.{field} does not match the requested estimator contract"
+            )
+    return dict(expected)
+
+
+def normalize_lwe_attacks(
+    attacks: Any,
+    *,
+    profile: str,
+    variant: str,
+    context: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    if not isinstance(attacks, dict):
+        raise ValueError(f"{context} must be an object")
+    if set(attacks) != set(LWE_ATTACKS):
+        raise ValueError(f"{context} must contain exactly {', '.join(LWE_ATTACKS)}")
+
+    normalized: dict[str, dict[str, Any]] = {}
+    covered: dict[str, dict[str, Any]] = {}
+    for attack in LWE_ATTACKS:
+        result = attacks[attack]
+        attack_context = f"{context}.{attack}"
+        if not isinstance(result, dict):
+            raise ValueError(f"{attack_context} must be an object")
+        if type(result.get("ok")) is not bool:
+            raise ValueError(f"{attack_context}.ok must be a boolean")
+
+        normalized_result = dict(result)
+        normalized_result["structure_correction"] = normalize_structure_correction(
+            result.get("structure_correction"),
+            attack=attack,
+            profile=profile,
+            variant=variant,
+            context=f"{attack_context}.structure_correction",
+        )
+        if result["ok"]:
+            bits = parse_security_bits(result.get("rop_bits"))
+            if bits is None:
+                raise ValueError(
+                    f"{attack_context}.rop_bits must be between 0 and "
+                    f"{int(MAX_SECURITY_BITS)}"
+                )
+            normalized_result["rop_bits"] = bits
+            if structure_correction_satisfied(normalized_result):
+                covered[attack] = normalized_result
+        normalized[attack] = normalized_result
+    return normalized, covered
+
+
+def normalize_mode_results(
+    modes: Any,
+    context: str,
+    *,
+    lwe_profile: str | None = None,
+    lwe_variant: str | None = None,
+) -> dict[str, dict[str, Any]]:
     if not isinstance(modes, dict):
         raise ValueError(f"{context} must be an object")
 
@@ -1410,7 +1490,48 @@ def normalize_mode_results(modes: Any, context: str) -> dict[str, dict[str, Any]
             raise ValueError(f"{context}.{mode}.complete must be a boolean")
 
         normalized_mode = dict(mode_result)
-        if "min_bits" in mode_result:
+        if lwe_profile is not None and lwe_variant is not None:
+            normalized_attacks, covered = normalize_lwe_attacks(
+                mode_result.get("attacks"),
+                profile=lwe_profile,
+                variant=lwe_variant,
+                context=f"{context}.{mode}.attacks",
+            )
+            derived_ok = bool(covered)
+            derived_complete = (
+                all(normalized_attacks[name]["ok"] for name in LWE_ATTACKS)
+                and all(
+                    structure_correction_satisfied(normalized_attacks[name])
+                    for name in LWE_ATTACKS
+                )
+            )
+            if mode_result["ok"] is not derived_ok:
+                raise ValueError(f"{context}.{mode}.ok disagrees with covered attacks")
+            if mode_result["complete"] is not derived_complete:
+                raise ValueError(
+                    f"{context}.{mode}.complete disagrees with attack coverage"
+                )
+            normalized_mode["attacks"] = normalized_attacks
+            if derived_ok:
+                best_attack, best_result = min(
+                    covered.items(),
+                    key=lambda item: item[1]["rop_bits"],
+                )
+                bits = parse_security_bits(mode_result.get("min_bits"))
+                if bits is None or bits != best_result["rop_bits"]:
+                    raise ValueError(
+                        f"{context}.{mode}.min_bits must equal the least covered attack cost"
+                    )
+                if mode_result.get("best_attack") != best_attack:
+                    raise ValueError(
+                        f"{context}.{mode}.best_attack must identify the least covered attack"
+                    )
+                normalized_mode["min_bits"] = bits
+            elif "min_bits" in mode_result or "best_attack" in mode_result:
+                raise ValueError(
+                    f"{context}.{mode} cannot report a best attack without covered attacks"
+                )
+        elif "min_bits" in mode_result:
             bits = parse_security_bits(mode_result["min_bits"])
             if bits is None:
                 raise ValueError(
@@ -1463,12 +1584,25 @@ def normalize_estimator_response(
     if not isinstance(models, dict):
         return None, invalid_estimator_response("models must be an object")
 
+    is_lwe_response = getattr(request, "hard_problem_category", None) == "lwe"
+    lwe_profile = expected_profile if is_lwe_response else None
+    lwe_variant = request.hard_problem_variant if is_lwe_response else None
     try:
         normalized_models = {
-            str(model): normalize_mode_results(model_modes, f"models.{model}")
+            str(model): normalize_mode_results(
+                model_modes,
+                f"models.{model}",
+                lwe_profile=lwe_profile,
+                lwe_variant=lwe_variant,
+            )
             for model, model_modes in models.items()
         }
-        normalized_modes = normalize_mode_results(modes, "modes")
+        normalized_modes = normalize_mode_results(
+            modes,
+            "modes",
+            lwe_profile=lwe_profile,
+            lwe_variant=lwe_variant,
+        )
     except ValueError as exc:
         return None, invalid_estimator_response(str(exc))
 
@@ -1481,12 +1615,30 @@ def normalize_estimator_response(
             f"no finite {request.red_cost_model}/{request.security_model} security estimate was returned"
         )
 
+    all_modes_ok = all(
+        normalized_models.get(model, {}).get(mode, {}).get("ok")
+        for model in ESTIMATOR_MODELS
+        for mode in ESTIMATOR_MODES
+    )
     all_modes_complete = all(
         normalized_models.get(model, {}).get(mode, {}).get("ok")
         and normalized_models[model][mode]["complete"]
         for model in ESTIMATOR_MODELS
         for mode in ESTIMATOR_MODES
     )
+    if is_lwe_response:
+        if normalized_modes != normalized_models.get("adps16"):
+            return None, invalid_estimator_response(
+                "modes must match models.adps16"
+            )
+        if response["ok"] is not all_modes_ok:
+            return None, invalid_estimator_response(
+                "ok disagrees with model/mode attack coverage"
+            )
+        if response["complete"] is not all_modes_complete:
+            return None, invalid_estimator_response(
+                "complete disagrees with model/mode attack coverage"
+            )
     normalized = dict(response)
     normalized["ok"] = True
     normalized["complete"] = bool(
