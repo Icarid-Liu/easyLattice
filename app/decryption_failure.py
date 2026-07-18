@@ -21,6 +21,8 @@ MAX_TAIL_BITS = 1024
 MAX_NTRU_DIMENSION = 4096
 MAX_LWE_DIMENSION = 65_536
 MAX_SAFE_INTEGER_PARAMETER = 2**53 - 1
+# PMF coordinates stay within a safe exact-integer magnitude before grid conversion.
+MAX_PMF_ABS_SUPPORT = MAX_SAFE_INTEGER_PARAMETER
 MAX_INTEGER_TEXT_LENGTH = 64
 MAX_NUMERIC_EXPONENT_ABS = 1_000
 MAX_COMPRESSION_BITS = 63
@@ -476,7 +478,12 @@ def custom_pmf(raw: Any, label: str, tail_bits: int) -> PMF:
 
     probabilities: dict[Decimal, Decimal] = {}
     for raw_value, raw_probability in raw.items():
-        value = scalar(raw_value, f"{label}.pmf value")
+        value = bounded_finite_decimal(
+            raw_value,
+            f"{label}.pmf value",
+            MAX_PMF_ABS_SUPPORT,
+            "MAX_PMF_ABS_SUPPORT",
+        )
         probability = nonnegative_scalar(raw_probability, f"{label}.pmf[{raw_value!r}]")
         probabilities[value] = probabilities.get(value, Decimal(0)) + probability
     total = sum(probabilities.values(), Decimal(0))
@@ -741,10 +748,12 @@ def dense_integer_convolution(left: PMF, right: PMF) -> dict[Decimal, Decimal] |
 
 
 def integer_grid(pmf: PMF) -> tuple[int, list[Decimal]] | None:
+    if not pmf.probabilities or not all(
+        safe_integer_grid_coordinate(value) for value in pmf.probabilities
+    ):
+        return None
     minimum = min(pmf.probabilities)
     maximum = max(pmf.probabilities)
-    if minimum != minimum.to_integral_value() or maximum != maximum.to_integral_value():
-        return None
     lower = int(minimum)
     upper = int(maximum)
     size = upper - lower + 1
@@ -752,10 +761,16 @@ def integer_grid(pmf: PMF) -> tuple[int, list[Decimal]] | None:
         return None
     values = [Decimal(0)] * size
     for value, probability in pmf.probabilities.items():
-        if value != value.to_integral_value():
-            return None
         values[int(value) - lower] = probability
     return lower, values
+
+
+def safe_integer_grid_coordinate(value: Any) -> bool:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        return False
+    if value != 0 and abs(value.adjusted()) > MAX_NUMERIC_EXPONENT_ABS:
+        return False
+    return abs(value) <= MAX_PMF_ABS_SUPPORT and decimal_is_integer(value)
 
 
 def karatsuba_convolution(left: list[Decimal], right: list[Decimal]) -> list[Decimal]:
@@ -976,6 +991,23 @@ def safe_nonnegative_integer(
     if value < 0 or not decimal_is_integer(value):
         raise ValueError(invalid_message)
     return int(value)
+
+
+def bounded_finite_decimal(
+    raw: Any,
+    label: str,
+    maximum: int,
+    maximum_name: str,
+) -> Decimal:
+    limit_message = (
+        f"{label} magnitude must not exceed {maximum} ({maximum_name})."
+    )
+    return bounded_decimal_number(
+        raw,
+        maximum,
+        f"{label} must be a finite decimal number bounded by {maximum_name}.",
+        limit_message,
+    )
 
 
 def bounded_decimal_number(

@@ -759,6 +759,64 @@ class DecryptionFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "custom_pmf"):
             calculate_decryption_failure(payload | {"ec2": {"type": "noise_distribution"}})
 
+    def test_custom_pmf_support_rejects_hostile_exponent_before_int_conversion(self):
+        hostile = {
+            "type": "custom_pmf",
+            "pmf": {"1e10000000": "1"},
+        }
+        with (
+            self.assertRaisesRegex(ValueError, "MAX_PMF_ABS_SUPPORT"),
+            mock.patch(
+                "builtins.int",
+                side_effect=AssertionError("hostile support reached int conversion"),
+            ),
+            mock.patch.object(
+                dfr,
+                "integer_grid",
+                side_effect=AssertionError("hostile support reached integer_grid"),
+            ),
+        ):
+            pmf = pmf_from_distribution(
+                hostile,
+                default_dimension=1,
+                tail_bits=128,
+                label="noise",
+            )
+            convolve_pmfs(pmf, dfr.zero_pmf())
+
+    def test_custom_pmf_support_accepts_bounded_scientific_and_fractional_values(self):
+        scientific = pmf_from_distribution(
+            {"type": "custom_pmf", "pmf": {"1e2": "1"}},
+            default_dimension=1,
+            tail_bits=128,
+            label="noise",
+        )
+        fractional = pmf_from_distribution(
+            {
+                "type": "custom_pmf",
+                "pmf": {"-5e-1": "0.25", "1.25": "0.75"},
+            },
+            default_dimension=1,
+            tail_bits=128,
+            label="noise",
+        )
+
+        self.assertEqual(scientific.probabilities, {Decimal(100): Decimal(1)})
+        self.assertEqual(
+            fractional.probabilities,
+            {Decimal("-0.5"): Decimal("0.25"), Decimal("1.25"): Decimal("0.75")},
+        )
+        self.assertEqual(dfr.integer_grid(scientific), (100, [Decimal(1)]))
+        self.assertIsNone(dfr.integer_grid(fractional))
+
+    def test_integer_grid_rejects_huge_decimal_without_int_conversion(self):
+        pmf = dfr.PMF({Decimal("1e10000000"): Decimal(1)})
+        with mock.patch(
+            "builtins.int",
+            side_effect=AssertionError("huge coordinate reached int conversion"),
+        ):
+            self.assertIsNone(dfr.integer_grid(pmf))
+
     def test_karatsuba_convolution_matches_small_hand_distribution(self):
         left = normalized_pmf({Decimal(value): Decimal(1) for value in range(65)})
         right = normalized_pmf({Decimal(value): Decimal(1) for value in range(65)})
