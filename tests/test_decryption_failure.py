@@ -385,6 +385,67 @@ class DecryptionFailureTests(unittest.TestCase):
                 ):
                     calculate_decryption_failure(payload_for(hostile))
 
+    def test_sqrt2_special_value_obeys_original_text_length_limit(self):
+        padded = " " * dfr.MAX_NUMERIC_TEXT_LENGTH + "sqrt(2)"
+        with self.assertRaisesRegex(ValueError, "p1.*supported"):
+            calculate_decryption_failure(
+                ntru_product_payload("cyclic") | {"n": 1, "p1": padded}
+            )
+
+    def test_decimal_objects_obey_digit_exponent_and_magnitude_limits(self):
+        huge_coefficient = Decimal("1." + "0" * 100_000)
+        hostile_values = (
+            Decimal("1e10000000"),
+            Decimal("1e-10000000"),
+            huge_coefficient,
+        )
+        base = ntru_product_payload("cyclic") | {"n": 1, "p0": 0, "delta": 1}
+
+        def coefficient(value):
+            return base | {"p0": value}
+
+        def delta(value):
+            return base | {"delta": value}
+
+        def gaussian_mean(value):
+            return base | {
+                "e": {"type": "discrete_gaussian", "stddev": "1", "mean": value},
+            }
+
+        def gaussian_stddev(value):
+            return base | {
+                "e": {"type": "discrete_gaussian", "stddev": value, "mean": "0"},
+            }
+
+        def pmf_support(value):
+            return base | {
+                "e": {"type": "custom_pmf", "pmf": {value: Decimal(1)}},
+            }
+
+        def pmf_probability(value):
+            return base | {
+                "e": {"type": "custom_pmf", "pmf": {"0": value}},
+            }
+
+        fields = (
+            ("p0", coefficient),
+            ("delta", delta),
+            ("e.mean", gaussian_mean),
+            ("e.stddev", gaussian_stddev),
+            ("e.pmf value", pmf_support),
+            ("e.pmf", pmf_probability),
+        )
+        for label, payload_for in fields:
+            for hostile in hostile_values:
+                with (
+                    self.subTest(label=label, hostile=hostile.adjusted()),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        label.replace(".", r"\.") + ".*supported",
+                    ),
+                ):
+                    calculate_decryption_failure(payload_for(hostile))
+
     def test_bounded_scalar_forms_remain_supported(self):
         result = calculate_decryption_failure(
             ntru_product_payload("cyclic")

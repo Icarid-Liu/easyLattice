@@ -476,7 +476,12 @@ def discrete_gaussian_tail_bound(stddev: Decimal, radius: int) -> Decimal:
 def custom_pmf(raw: Any, label: str, tail_bits: int) -> PMF:
     if isinstance(raw, str):
         try:
-            raw = json.loads(raw)
+            raw = json.loads(
+                raw,
+                parse_int=str,
+                parse_float=str,
+                parse_constant=str,
+            )
         except json.JSONDecodeError as exc:
             raise ValueError(f"{label}.pmf must be valid JSON.") from exc
     if not isinstance(raw, dict) or not raw:
@@ -1008,8 +1013,8 @@ def bounded_finite_decimal(
     limit_message = (
         f"{label} exceeds supported numeric limits: magnitude must not exceed "
         f"{maximum} ({maximum_name}), exponent magnitude must not exceed "
-        f"{MAX_NUMERIC_EXPONENT_ABS}, and text length must not exceed "
-        f"{MAX_NUMERIC_TEXT_LENGTH}."
+        f"{MAX_NUMERIC_EXPONENT_ABS}, and coefficient digits/text length must "
+        f"not exceed {MAX_NUMERIC_TEXT_LENGTH}."
     )
     return bounded_decimal_number(
         raw,
@@ -1097,16 +1102,20 @@ def validated_bounded_decimal(
     maximum: int,
     invalid_message: str,
     limit_message: str,
+    *,
+    enforce_digit_limit: bool = True,
 ) -> Decimal:
     if not value.is_finite():
         raise ValueError(invalid_message)
-    if abs(value) > maximum:
+    _, digits, exponent = value.as_tuple()
+    if enforce_digit_limit and len(digits) > MAX_NUMERIC_TEXT_LENGTH:
         raise ValueError(limit_message)
     if value == 0:
-        _, _, exponent = value.as_tuple()
         if abs(exponent) > MAX_NUMERIC_EXPONENT_ABS:
             raise ValueError(limit_message)
     elif abs(value.adjusted()) > MAX_NUMERIC_EXPONENT_ABS:
+        raise ValueError(limit_message)
+    if value.copy_abs() > Decimal(maximum):
         raise ValueError(limit_message)
     return value
 
@@ -1162,16 +1171,20 @@ def scalar(raw: Any, label: str) -> Decimal:
     limit_message = (
         f"{label} exceeds supported numeric limits: magnitude must not exceed "
         f"{MAX_SCALAR_ABS} (MAX_SCALAR_ABS), exponent magnitude must not exceed "
-        f"{MAX_NUMERIC_EXPONENT_ABS}, and text length must not exceed "
-        f"{MAX_NUMERIC_TEXT_LENGTH}."
+        f"{MAX_NUMERIC_EXPONENT_ABS}, and coefficient digits/text length must "
+        f"not exceed {MAX_NUMERIC_TEXT_LENGTH}."
     )
-    if isinstance(raw, str) and raw.strip() == "sqrt(2)":
-        return validated_bounded_decimal(
-            Decimal(2).sqrt(),
-            MAX_SCALAR_ABS,
-            invalid_message,
-            limit_message,
-        )
+    if isinstance(raw, str):
+        if len(raw) > MAX_NUMERIC_TEXT_LENGTH:
+            raise ValueError(limit_message)
+        if raw.strip() == "sqrt(2)":
+            return validated_bounded_decimal(
+                Decimal(2).sqrt(),
+                MAX_SCALAR_ABS,
+                invalid_message,
+                limit_message,
+                enforce_digit_limit=False,
+            )
     return bounded_decimal_number(
         raw,
         MAX_SCALAR_ABS,

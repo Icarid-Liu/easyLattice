@@ -154,7 +154,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/decryption-failure/calculate":
             try:
-                payload = self.read_json()
+                payload = self.read_json(preserve_numeric_lexemes=True)
                 result = calculate_decryption_failure(payload)
             except ValueError as exc:
                 self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -210,10 +210,19 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         self.write_json(result)
 
-    def read_json(self) -> dict[str, Any]:
+    def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8") if length else "{}"
-        payload = json.loads(body or "{}")
+        numeric_options = (
+            {
+                "parse_int": str,
+                "parse_float": str,
+                "parse_constant": str,
+            }
+            if preserve_numeric_lexemes
+            else {}
+        )
+        payload = json.loads(body or "{}", **numeric_options)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
         return payload
