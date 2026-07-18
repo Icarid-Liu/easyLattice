@@ -137,6 +137,8 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
             key=lambda candidate: candidate_rank(candidate, request),
         )
         for candidate in validation_pool[:max_validation_attempts]:
+            if successful >= request.validation_count:
+                break
             attempts += 1
             raw_result = run_ntru_estimator(
                 candidate,
@@ -144,10 +146,10 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
                 config=config,
                 request=request,
             )
-            result, validation_entry = normalize_estimator_response(
+            result, validation_entry = normalize_ntru_estimator_response(
                 raw_result,
+                candidate=candidate,
                 request=request,
-                expected_profile=NTRU_ESTIMATOR_PROFILE,
             )
             estimator_result["validated"].append(validation_entry)
             if result is not None:
@@ -311,7 +313,7 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
         use_estimator=use_estimator,
         estimator_timeout=max(4, min(300, estimator_timeout)),
         validation_count=validation_count,
-        validation_attempts=max(validation_count, min(24, validation_attempts)),
+        validation_attempts=max(1, min(24, validation_attempts)),
     )
 
 
@@ -726,6 +728,172 @@ def ntru_validation_candidate_key(candidate: dict[str, Any]) -> str:
     )
 
 
+def sanitize_json_metadata(
+    value: Any,
+    seen: set[int] | None = None,
+    depth: int = 0,
+) -> Any:
+    if depth > 32:
+        return "<maximum-depth-exceeded>"
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value if value.bit_length() <= 4096 else "<integer-too-large>"
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    seen = seen if seen is not None else set()
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in seen:
+            return "<recursive-reference>"
+        seen.add(identity)
+        try:
+            return {
+                sanitize_json_key(key): sanitize_json_metadata(item, seen, depth + 1)
+                for key, item in value.items()
+            }
+        finally:
+            seen.remove(identity)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        identity = id(value)
+        if identity in seen:
+            return "<recursive-reference>"
+        seen.add(identity)
+        try:
+            items = list(value)
+            if isinstance(value, (set, frozenset)):
+                items.sort(key=lambda item: safe_diagnostic_string(item))
+            return [
+                sanitize_json_metadata(item, seen, depth + 1)
+                for item in items
+            ]
+        finally:
+            seen.remove(identity)
+    return safe_diagnostic_string(value)
+
+
+def sanitize_json_key(key: Any) -> str:
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool):
+        return "true" if key else "false"
+    if isinstance(key, int):
+        return str(key) if key.bit_length() <= 4096 else "<integer-key-too-large>"
+    if isinstance(key, float) and not math.isfinite(key):
+        return "<nonfinite-key>"
+    return safe_diagnostic_string(key)
+
+
+def safe_diagnostic_string(value: Any) -> str:
+    try:
+        return str(value)
+    except Exception:
+        return f"<{type(value).__name__}>"
+
+
+def effective_ntru_security_variant(
+    candidate: dict[str, Any],
+    request: NTRURequest | None,
+) -> str:
+    if candidate["ring"]["family_id"] == "power2" and request is not None:
+        return request.hard_problem_variant
+    return "matrix" if candidate["ring"]["ntru_type"] == "matrix" else "ring"
+
+
+def ntru_estimator_provenance(
+    candidate: dict[str, Any],
+    request: NTRURequest | None,
+) -> dict[str, Any]:
+    effective_variant = effective_ntru_security_variant(candidate, request)
+    requested_variant = (
+        request.hard_problem_variant if request is not None else effective_variant
+    )
+    return {
+        "hard_problem_variant": effective_variant,
+        "requested_hard_problem_variant": requested_variant,
+        "ring_degree": int(candidate["ring"]["n"]),
+    }
+
+
+def normalize_ntru_estimator_response(
+    response: Any,
+    candidate: dict[str, Any],
+    request: NTRURequest,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    safe_response = sanitize_json_metadata(response)
+    normalized, validation_entry = normalize_estimator_response(
+        safe_response,
+        request=request,
+        expected_profile=NTRU_ESTIMATOR_PROFILE,
+    )
+    provenance = ntru_estimator_provenance(candidate, request)
+    validation_entry = with_ntru_estimator_provenance(validation_entry, provenance)
+    if normalized is None:
+        return None, validation_entry
+    return extract_ntru_estimator_result(normalized, provenance), validation_entry
+
+
+def with_ntru_estimator_provenance(
+    entry: dict[str, Any],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(entry)
+    enriched.update(provenance)
+    parameters = enriched.get("parameters")
+    if isinstance(parameters, dict):
+        enriched["parameters"] = dict(parameters) | provenance
+    return enriched
+
+
+def extract_ntru_estimator_result(
+    result: dict[str, Any],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    models = result.get("models", {})
+    modes = result.get("modes", {})
+    extracted_models = {}
+    for model in NTRU_ESTIMATOR_MODELS:
+        model_modes = models.get(model)
+        if not isinstance(model_modes, dict):
+            continue
+        extracted_models[model] = {
+            mode: extract_ntru_mode_result(model_modes[mode])
+            for mode in NTRU_ESTIMATOR_MODES
+            if mode in model_modes
+        }
+    extracted_modes = {
+        mode: extract_ntru_mode_result(modes[mode])
+        for mode in NTRU_ESTIMATOR_MODES
+        if mode in modes
+    }
+    return {
+        "ok": True,
+        "complete": result["complete"],
+        "estimator_profile": NTRU_ESTIMATOR_PROFILE,
+        "estimator_commit": result.get("estimator_commit"),
+        "models": extracted_models,
+        "modes": extracted_modes,
+        **provenance,
+    }
+
+
+def extract_ntru_mode_result(mode_result: dict[str, Any]) -> dict[str, Any]:
+    extracted = {
+        "ok": mode_result.get("ok") is True,
+        "complete": mode_result.get("complete") is True,
+        "attacks": sanitize_json_metadata(mode_result.get("attacks", {})),
+    }
+    bits = parse_security_bits(mode_result.get("min_bits"))
+    if bits is not None:
+        extracted["min_bits"] = bits
+    for field in ("best_attack", "code", "message"):
+        value = mode_result.get(field)
+        if isinstance(value, str):
+            extracted[field] = value
+    return extracted
+
+
 def run_ntru_estimator(
     candidate: dict[str, Any],
     timeout: int,
@@ -733,20 +901,19 @@ def run_ntru_estimator(
     request: NTRURequest | None = None,
 ) -> dict[str, Any]:
     config = config or load_config()
-    hard_problem_variant = (
-        request.hard_problem_variant
-        if request is not None
-        else ("matrix" if candidate["ring"]["ntru_type"] == "matrix" else "ring")
-    )
+    provenance = ntru_estimator_provenance(candidate, request)
     payload = {
         "problem": "ntru",
         "n": candidate["ring"]["n"],
         "q": candidate["modulus"]["q"],
-        "ntru_type": candidate["ring"]["ntru_type"],
+        "ntru_type": (
+            "matrix"
+            if provenance["hard_problem_variant"] == "matrix"
+            else "circulant"
+        ),
         "secret_distribution": candidate["distribution"]["secret"],
         "error_distribution": candidate["distribution"]["error"],
-        "hard_problem_variant": hard_problem_variant,
-        "ring_degree": candidate["ring"]["n"],
+        **provenance,
         "per_attack_timeout": max(
             5,
             min(90, config.estimator.per_attack_timeout_seconds * 2),
@@ -824,6 +991,11 @@ def apply_ntru_estimator_result(
         "reference_screen": previous_security.get("reference_screen"),
         "attacks": estimator_result.get("models") or estimator_result.get("modes", {}),
         "estimator_commit": estimator_result.get("estimator_commit"),
+        "hard_problem_variant": estimator_result.get("hard_problem_variant"),
+        "requested_hard_problem_variant": estimator_result.get(
+            "requested_hard_problem_variant"
+        ),
+        "ring_degree": estimator_result.get("ring_degree"),
         "notes": notes,
     }
     selected = selected_security_bits(candidate["security"], request)

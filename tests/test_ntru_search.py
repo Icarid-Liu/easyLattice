@@ -267,6 +267,17 @@ class NTRUSearchTests(unittest.TestCase):
 
         self.assertEqual(request.estimator_timeout, 300)
 
+    def test_ntru_validation_attempts_remains_an_independent_cap(self):
+        request = parse_ntru_request(
+            {
+                "validationCount": 3,
+                "validationAttempts": 2,
+            }
+        )
+
+        self.assertEqual(request.validation_count, 3)
+        self.assertEqual(request.validation_attempts, 2)
+
     def test_old_family_quantum_without_estimator_is_json_safe_and_explicit(self):
         for family in ("power2", "hps", "hrss"):
             with self.subTest(family=family):
@@ -361,7 +372,11 @@ class NTRUSearchTests(unittest.TestCase):
                 )
                 self.assertIn("validation_config_missing", candidate["warning_codes"])
                 self.assertIn("quantum_estimate_unavailable", candidate["warning_codes"])
-                self.assertEqual(result["estimator"]["validated"][0], failure)
+                entry = result["estimator"]["validated"][0]
+                self.assertEqual(entry["code"], failure["code"])
+                self.assertEqual(entry["message"], failure["message"])
+                self.assertEqual(entry["hard_problem_variant"], "ring")
+                self.assertEqual(entry["ring_degree"], candidate["ring"]["n"])
                 json.dumps(result, allow_nan=False)
 
     def test_ntru_estimator_uses_selected_model_for_classical_and_quantum_bits(self):
@@ -499,11 +514,103 @@ class NTRUSearchTests(unittest.TestCase):
         self.assertIs(passed_config, config)
         self.assertEqual(profile, "standard")
         self.assertEqual(payload["problem"], "ntru")
-        self.assertEqual(payload["ntru_type"], candidate["ring"]["ntru_type"])
+        self.assertEqual(payload["ntru_type"], "matrix")
         self.assertEqual(payload["hard_problem_variant"], "matrix")
+        self.assertEqual(payload["requested_hard_problem_variant"], "matrix")
         self.assertEqual(payload["ring_degree"], candidate["ring"]["n"])
         self.assertIn("secret_distribution", payload)
         self.assertIn("error_distribution", payload)
+
+    def test_forced_circulant_families_use_effective_ring_variant(self):
+        cases = {
+            "hps": {"minN": 592, "maxN": 592},
+            "hrss": {"minN": 672, "maxN": 672},
+            "ntru_prime": {"minN": 653, "maxN": 653},
+        }
+        for family, bounds in cases.items():
+            with self.subTest(family=family):
+                with patch(
+                    "app.ntru_search.run_estimator",
+                    return_value=estimator_success(),
+                ) as run:
+                    result = recommend_ntru(
+                        {
+                            "ringFamily": family,
+                            "hardProblemVariant": "matrix",
+                            "useEstimator": True,
+                            "validationCount": 1,
+                            "validationAttempts": 1,
+                            **bounds,
+                        },
+                        config=AppConfig(),
+                    )
+
+                payload = run.call_args.args[0]
+                entry = result["estimator"]["validated"][0]
+                security = result["recommendation"]["security"]
+                self.assertEqual(payload["ntru_type"], "circulant")
+                self.assertEqual(payload["hard_problem_variant"], "ring")
+                self.assertEqual(payload["requested_hard_problem_variant"], "matrix")
+                self.assertEqual(entry["hard_problem_variant"], "ring")
+                self.assertEqual(entry["requested_hard_problem_variant"], "matrix")
+                self.assertEqual(security["hard_problem_variant"], "ring")
+                self.assertEqual(security["requested_hard_problem_variant"], "matrix")
+
+    def test_validation_count_caps_successful_coverage(self):
+        with patch(
+            "app.ntru_search.run_estimator",
+            return_value=estimator_success(),
+        ) as run:
+            result = recommend_ntru(
+                {
+                    "ringFamily": "ntru_prime",
+                    "useEstimator": True,
+                    "validationCount": 3,
+                    "validationAttempts": 5,
+                },
+                config=AppConfig(),
+            )
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(result["validation"]["attempted_candidates"], 3)
+        self.assertEqual(result["validation"]["successful_candidates"], 3)
+        self.assertEqual(result["validation"]["covered_candidates"], 3)
+        self.assertEqual(result["validation"]["eligible_candidates"], 6)
+        self.assertEqual(result["validation"]["status"], "partial")
+
+    def test_validation_failures_use_remaining_attempt_budget(self):
+        failure = {
+            "ok": False,
+            "code": "estimator_timeout",
+            "message": "timed out",
+        }
+        responses = [
+            failure,
+            estimator_success(bits=141.0),
+            failure,
+            estimator_success(bits=142.0),
+            estimator_success(bits=143.0),
+        ]
+        with patch(
+            "app.ntru_search.run_estimator",
+            side_effect=responses,
+        ) as run:
+            result = recommend_ntru(
+                {
+                    "ringFamily": "ntru_prime",
+                    "useEstimator": True,
+                    "validationCount": 3,
+                    "validationAttempts": 5,
+                },
+                config=AppConfig(),
+            )
+
+        self.assertEqual(run.call_count, 5)
+        self.assertEqual(result["validation"]["attempted_candidates"], 5)
+        self.assertEqual(result["validation"]["successful_candidates"], 3)
+        self.assertEqual(result["validation"]["covered_candidates"], 3)
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertEqual(len(result["estimator"]["validated"]), 5)
 
     def test_complete_estimator_result_reports_validated_state(self):
         with patch("app.ntru_search.run_estimator", return_value=estimator_success(bits=151.0)):
@@ -561,6 +668,49 @@ class NTRUSearchTests(unittest.TestCase):
         self.assertIsNone(security["adps16_quantum_bits"])
         self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 149.0)
 
+    def test_nested_nonfinite_attack_metadata_is_sanitized_without_losing_coverage(self):
+        response = estimator_success(bits=151.0)
+        attack = {
+            "ok": True,
+            "rop_bits": float("inf"),
+            "diagnostics": {
+                "nan": float("nan"),
+                "limits": [float("inf"), float("-inf")],
+            },
+        }
+        response["models"]["matzov"]["classical"]["attacks"] = {"usvp": attack}
+        response["diagnostics"] = {"nested": {"nan": float("nan")}}
+
+        with patch("app.ntru_search.run_estimator", return_value=response):
+            result = recommend_ntru(
+                {
+                    "ringFamily": "ntru_prime",
+                    "minN": 653,
+                    "maxN": 653,
+                    "useEstimator": True,
+                    "validationCount": 1,
+                    "validationAttempts": 1,
+                },
+                config=AppConfig(),
+            )
+
+        entry = result["estimator"]["validated"][0]
+        attacks = result["recommendation"]["security"]["attacks"]
+        self.assertEqual(result["validation"]["successful_candidates"], 1)
+        self.assertEqual(result["validation"]["covered_candidates"], 1)
+        self.assertIsNone(entry["diagnostics"]["nested"]["nan"])
+        self.assertIsNone(
+            attacks["matzov"]["classical"]["attacks"]["usvp"]["diagnostics"]["nan"]
+        )
+        self.assertIsNone(
+            attacks["matzov"]["classical"]["attacks"]["usvp"]["rop_bits"]
+        )
+        self.assertEqual(
+            attacks["matzov"]["classical"]["attacks"]["usvp"]["diagnostics"]["limits"],
+            [None, None],
+        )
+        json.dumps(result, allow_nan=False)
+
     def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
         malformed = estimator_success()
         malformed["models"]["matzov"]["classical"]["min_bits"] = float("inf")
@@ -601,6 +751,10 @@ class NTRUSearchTests(unittest.TestCase):
             "ok": False,
             "code": "future_estimator_failure",
             "message": "opaque NTRU estimator failure",
+            "diagnostics": {
+                "nan": float("nan"),
+                "nested": [float("inf"), {"value": float("-inf")}],
+            },
         }
         with patch("app.ntru_search.run_estimator", return_value=failure):
             result = recommend_ntru(
@@ -617,9 +771,14 @@ class NTRUSearchTests(unittest.TestCase):
 
         self.assertEqual(result["validation"]["status"], "failed")
         self.assertEqual(result["validation"]["message"], "opaque NTRU estimator failure")
-        self.assertEqual(result["estimator"]["validated"][0], failure)
+        entry = result["estimator"]["validated"][0]
+        self.assertEqual(entry["code"], failure["code"])
+        self.assertEqual(entry["message"], failure["message"])
+        self.assertIsNone(entry["diagnostics"]["nan"])
+        self.assertEqual(entry["diagnostics"]["nested"], [None, {"value": None}])
         self.assertEqual(result["recommendation"]["security"]["source_code"], "ntru_reference_screen")
         self.assertIn("opaque NTRU estimator failure", result["recommendation"]["warnings"])
+        json.dumps(result, allow_nan=False)
 
     def test_estimator_configuration_failure_uses_stable_warning_code(self):
         failure = {
@@ -643,7 +802,10 @@ class NTRUSearchTests(unittest.TestCase):
         self.assertEqual(result["validation"]["status"], "failed")
         self.assertIn("validation_config_missing", result["validation"]["message_codes"])
         self.assertIn("validation_config_missing", result["recommendation"]["warning_codes"])
-        self.assertEqual(result["estimator"]["validated"][0], failure)
+        entry = result["estimator"]["validated"][0]
+        self.assertEqual(entry["code"], failure["code"])
+        self.assertEqual(entry["message"], failure["message"])
+        self.assertEqual(entry["hard_problem_variant"], "ring")
 
 
 if __name__ == "__main__":
