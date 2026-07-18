@@ -2,7 +2,9 @@ import itertools
 import json
 import unittest
 from decimal import Decimal, localcontext
+from unittest import mock
 
+import app.decryption_failure as dfr
 from app.decryption_failure import (
     calculate_decryption_failure,
     convolve_pmfs,
@@ -119,7 +121,16 @@ class DecryptionFailureTests(unittest.TestCase):
         cyclic = ring_product_coefficient_pmfs(bernoulli, bernoulli, 4, "cyclic")
         self.assertTrue(all(pmf is cyclic[0] for pmf in cyclic))
 
-        scaled = scaled_ring_products(
+        scaled_cyclic = scaled_ring_products(
+            Decimal(2),
+            bernoulli,
+            bernoulli,
+            4,
+            "cyclic",
+        )
+        self.assertTrue(all(pmf is scaled_cyclic[0] for pmf in scaled_cyclic))
+
+        zero_scaled = scaled_ring_products(
             Decimal(0),
             bernoulli,
             bernoulli,
@@ -127,11 +138,122 @@ class DecryptionFailureTests(unittest.TestCase):
             "negacyclic",
         )
         self.assertEqual(
-            tuple(pmf.probabilities for pmf in scaled),
+            tuple(pmf.probabilities for pmf in zero_scaled),
             ({Decimal(0): Decimal(1)},) * 3,
         )
+        self.assertTrue(all(pmf is zero_scaled[0] for pmf in zero_scaled))
         with self.assertRaisesRegex(ValueError, "n must be at least 2 for ntru_prime"):
             scaled_ring_products(Decimal(0), bernoulli, bernoulli, 1, "ntru_prime")
+
+    def test_cyclic_ntru_reuses_each_distinct_coefficient_computation(self):
+        payload = ntru_product_payload("cyclic") | {
+            "n": 509,
+            "delta": 509,
+        }
+        with (
+            mock.patch.object(dfr, "add_pmfs", wraps=dfr.add_pmfs) as add_pmfs,
+            mock.patch.object(
+                dfr,
+                "coefficient_failure_probability",
+                wraps=dfr.coefficient_failure_probability,
+            ) as failure_probability,
+        ):
+            result = calculate_decryption_failure(payload)
+
+        self.assertEqual(add_pmfs.call_count, 2)
+        self.assertEqual(failure_probability.call_count, 1)
+        self.assertEqual(result["coefficient_dfr"]["distinct_profiles"], 1)
+        self.assertEqual(len(result["coefficient_dfr"]["failure_probabilities"]), 509)
+        self.assertEqual(set(result["coefficient_dfr"]["failure_probabilities"]), {"0"})
+
+    def test_lwe_aggregation_does_not_scale_work_with_vector_dimension(self):
+        with mock.patch.object(
+            dfr,
+            "coefficient_failure_probability",
+            wraps=dfr.coefficient_failure_probability,
+        ) as failure_probability:
+            result = calculate_decryption_failure({
+                "type": "lwe",
+                "m": 1,
+                "n": dfr.MAX_LWE_DIMENSION,
+                "delta": 0,
+                "s": ZERO,
+                "e": ZERO,
+                "e1": ZERO,
+                "r": ZERO,
+                "e2": ZERO,
+                "ec1": ZERO,
+                "ec2": ZERO,
+            })
+
+        self.assertEqual(failure_probability.call_count, 1)
+        self.assertEqual(result["dimensions"]["n"], dfr.MAX_LWE_DIMENSION)
+        self.assertNotIn("coefficient_dfr", result)
+
+    def test_dimension_limits_reject_oversized_and_boolean_inputs(self):
+        oversized = 10_000_000
+        cases = (
+            (
+                {"type": "ntru", "n": oversized},
+                rf"^n must not exceed {dfr.MAX_NTRU_DIMENSION} \(MAX_NTRU_DIMENSION\)[.]$",
+            ),
+            (
+                {"type": "lwe", "m": oversized, "n": 1},
+                rf"^m must not exceed {dfr.MAX_LWE_DIMENSION} \(MAX_LWE_DIMENSION\)[.]$",
+            ),
+            (
+                {"type": "lwe", "m": 1, "n": oversized},
+                rf"^n must not exceed {dfr.MAX_LWE_DIMENSION} \(MAX_LWE_DIMENSION\)[.]$",
+            ),
+        )
+        for payload, message in cases:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, message):
+                calculate_decryption_failure(payload)
+
+        for payload, dimension in (
+            ({"type": "ntru", "n": True}, "n"),
+            ({"type": "lwe", "m": True, "n": 1}, "m"),
+            ({"type": "lwe", "m": 1, "n": True}, "n"),
+        ):
+            with (
+                self.subTest(payload=payload),
+                self.assertRaisesRegex(ValueError, rf"^{dimension} "),
+            ):
+                calculate_decryption_failure(payload)
+
+    def test_dimension_limit_boundaries_accept_cheap_zero_models(self):
+        ntru_result = calculate_decryption_failure(
+            ntru_product_payload("cyclic")
+            | {
+                "n": dfr.MAX_NTRU_DIMENSION,
+                "p0": 0,
+                "g": ZERO,
+                "s": ZERO,
+            }
+        )
+        self.assertEqual(ntru_result["dimensions"]["n"], dfr.MAX_NTRU_DIMENSION)
+        self.assertEqual(
+            len(ntru_result["coefficient_dfr"]["failure_probabilities"]),
+            dfr.MAX_NTRU_DIMENSION,
+        )
+
+        lwe_result = calculate_decryption_failure({
+            "type": "lwe",
+            "m": dfr.MAX_LWE_DIMENSION,
+            "n": dfr.MAX_LWE_DIMENSION,
+            "delta": 0,
+            "s": ZERO,
+            "e": ZERO,
+            "e1": ZERO,
+            "r": ZERO,
+            "e2": ZERO,
+            "ec1": ZERO,
+            "ec2": ZERO,
+        })
+        self.assertEqual(lwe_result["dimensions"], {
+            "m": dfr.MAX_LWE_DIMENSION,
+            "n": dfr.MAX_LWE_DIMENSION,
+        })
 
     def test_lwe_reports_single_and_vector_dfr(self):
         result = calculate_decryption_failure({

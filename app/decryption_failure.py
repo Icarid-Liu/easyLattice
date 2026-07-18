@@ -16,6 +16,9 @@ DEFAULT_PRECISION_BITS = 512
 DEFAULT_TAIL_BITS = 128
 MAX_PRECISION_BITS = 4096
 MAX_TAIL_BITS = 1024
+# Request limits cover supported presets while bounding audit and convolution work.
+MAX_NTRU_DIMENSION = 4096
+MAX_LWE_DIMENSION = 65_536
 MAX_PMF_SUPPORT = 50_000
 MAX_PAIR_PRODUCTS = 30_000_000
 
@@ -56,7 +59,12 @@ def calculate_ntru(
     decimal_digits: int,
     tail_bits: int,
 ) -> dict[str, Any]:
-    n = positive_int(raw.get("n"), "n")
+    n = bounded_dimension(
+        raw.get("n"),
+        "n",
+        MAX_NTRU_DIMENSION,
+        "MAX_NTRU_DIMENSION",
+    )
     ring_type = raw.get("ringType", raw.get("ring_type", "cyclic"))
     if isinstance(ring_type, str):
         ring_type = ring_type.strip().lower()
@@ -96,10 +104,15 @@ def calculate_ntru(
         ),
     )
     direct_error = scale_pmf(distributions["e"], coefficients["p3"])
-    coefficient_errors = tuple(
-        add_pmfs(*(term[index] for term in product_terms), direct_error)
-        for index in range(n)
-    )
+    error_cache: dict[tuple[int, ...], PMF] = {}
+    coefficient_error_list = []
+    for index in range(n):
+        inputs = tuple(term[index] for term in product_terms) + (direct_error,)
+        key = tuple(id(item) for item in inputs)
+        if key not in error_cache:
+            error_cache[key] = add_pmfs(*inputs)
+        coefficient_error_list.append(error_cache[key])
+    coefficient_errors = tuple(coefficient_error_list)
     payload = result_payload(
         kind="ntru",
         formula="p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e",
@@ -144,8 +157,18 @@ def calculate_lwe(
     decimal_digits: int,
     tail_bits: int,
 ) -> dict[str, Any]:
-    m = positive_int(raw.get("m"), "m")
-    n = positive_int(raw.get("n"), "n")
+    m = bounded_dimension(
+        raw.get("m"),
+        "m",
+        MAX_LWE_DIMENSION,
+        "MAX_LWE_DIMENSION",
+    )
+    n = bounded_dimension(
+        raw.get("n"),
+        "n",
+        MAX_LWE_DIMENSION,
+        "MAX_LWE_DIMENSION",
+    )
     delta = nonnegative_scalar(raw.get("delta", raw.get("Delta")), "delta")
     defaults = {
         "s": m,
@@ -196,31 +219,38 @@ def result_payload(
     distinct_profiles: int | None = None,
 ) -> dict[str, Any]:
     coefficient_specific = coefficient_errors is not None
-    errors = coefficient_errors if coefficient_specific else (error,) * vector_dimension
-    if len(errors) != vector_dimension:
-        raise ValueError("coefficient_errors must match the vector dimension.")
-    failures = [
-        sum(
-            probability
-            for value, probability in item.probabilities.items()
-            if abs(value) > delta
-        )
-        for item in errors
-    ]
-    worst_index = max(range(len(failures)), key=failures.__getitem__)
-    single_failure = failures[worst_index]
-    vector_failure = (
-        min(Decimal(1), sum(failures, Decimal(0)))
-        if coefficient_specific
-        else aggregate_vector_failure(single_failure, vector_dimension)
-    )
-    reported_error = errors[worst_index]
-    tail_bound = max(item.tail_bound for item in errors)
-    warnings = list(dict.fromkeys(
-        warning
-        for item in errors
-        for warning in item.warnings
-    ))
+    failures: list[Decimal] | None = None
+    if coefficient_errors is None:
+        worst_index = 0
+        single_failure = coefficient_failure_probability(error, delta)
+        vector_failure = aggregate_vector_failure(single_failure, vector_dimension)
+        reported_error = error
+        tail_bound = error.tail_bound
+        warnings = list(error.warnings)
+    else:
+        if len(coefficient_errors) != vector_dimension:
+            raise ValueError("coefficient_errors must match the vector dimension.")
+        analysis_cache: dict[int, tuple[Decimal, Decimal, tuple[str, ...]]] = {}
+        failures = []
+        for item in coefficient_errors:
+            key = id(item)
+            if key not in analysis_cache:
+                analysis_cache[key] = (
+                    coefficient_failure_probability(item, delta),
+                    item.tail_bound,
+                    item.warnings,
+                )
+            failures.append(analysis_cache[key][0])
+        worst_index = max(range(len(failures)), key=failures.__getitem__)
+        single_failure = failures[worst_index]
+        vector_failure = min(Decimal(1), sum(failures, Decimal(0)))
+        reported_error = coefficient_errors[worst_index]
+        tail_bound = max(analysis[1] for analysis in analysis_cache.values())
+        warnings = list(dict.fromkeys(
+            warning
+            for analysis in analysis_cache.values()
+            for warning in analysis[2]
+        ))
     aggregation_warning = "Vector DFR uses a union bound and does not assume independent output coefficients."
     if aggregation_warning not in warnings:
         warnings.append(aggregation_warning)
@@ -274,6 +304,7 @@ def result_payload(
     if coefficients is not None:
         payload["coefficients"] = {name: decimal_text(value) for name, value in coefficients.items()}
     if coefficient_specific:
+        assert failures is not None
         payload["coefficient_dfr"] = {
             "worst_index": worst_index,
             "distinct_profiles": distinct_profiles,
@@ -492,11 +523,16 @@ def scaled_ring_products(
 ) -> tuple[PMF, ...]:
     if scale == 0:
         profiles = coefficient_profiles(n, ring_type)
-        return tuple(zero_pmf() for _ in profiles)
-    return tuple(
-        scale_pmf(pmf, scale)
-        for pmf in ring_product_coefficient_pmfs(left, right, n, ring_type)
-    )
+        zero = zero_pmf()
+        return (zero,) * len(profiles)
+    cache: dict[int, PMF] = {}
+    results = []
+    for pmf in ring_product_coefficient_pmfs(left, right, n, ring_type):
+        key = id(pmf)
+        if key not in cache:
+            cache[key] = scale_pmf(pmf, scale)
+        results.append(cache[key])
+    return tuple(results)
 
 
 def zero_pmf() -> PMF:
@@ -693,6 +729,14 @@ def aggregate_vector_failure(single_failure: Decimal, dimension: int) -> Decimal
     return min(Decimal(1), single_failure * Decimal(dimension))
 
 
+def coefficient_failure_probability(error: PMF, delta: Decimal) -> Decimal:
+    return sum(
+        probability
+        for value, probability in error.probabilities.items()
+        if abs(value) > delta
+    )
+
+
 def combine_tail_bounds(left: Decimal, right: Decimal) -> Decimal:
     return min(Decimal(1), left + right)
 
@@ -737,6 +781,18 @@ def positive_int(raw: Any, label: str) -> int:
     value = nonnegative_int(raw, label)
     if value < 1:
         raise ValueError(f"{label} must be at least 1.")
+    return value
+
+
+def bounded_dimension(
+    raw: Any,
+    label: str,
+    maximum: int,
+    maximum_name: str,
+) -> int:
+    value = positive_int(raw, label)
+    if value > maximum:
+        raise ValueError(f"{label} must not exceed {maximum} ({maximum_name}).")
     return value
 
 
