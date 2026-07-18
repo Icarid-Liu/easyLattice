@@ -45,8 +45,12 @@ The same agent API also includes an initial NTRU selector:
   estimator moment approximations capped by the Gaussian calibration;
 - HPS-like and HRSS-like comparison candidates;
 - optional local NTRU validation with MATZOV and ADPS16 classical and quantum
-  cost models. A quantum NTRU target therefore requires Sage estimation rather
-  than the classical-only fast reference screen.
+  cost models. The power-of-two, HPS, and HRSS fast/reference screens contain
+  only classical bits, so those families require Sage for a finite quantum
+  estimate. SNTRUP presets include both classical and quantum reference bits
+  and can therefore return `target_met` for a quantum request with
+  `useEstimator=false`; their validation status remains `not_requested` until
+  estimator validation is enabled.
 
 Streamlined NTRU Prime is available through the following six fixed presets.
 The security selector uses the listed reference bits and NIST category, while
@@ -98,8 +102,8 @@ Recommendation responses distinguish selection from validation:
 | Status | Meaning |
 | --- | --- |
 | `validated` | Every eligible candidate was successfully covered and every required attack/model/mode result was complete. |
-| `partial` | At least one estimate succeeded, but candidate coverage or required attack results were incomplete. |
-| `failed` | Validation was requested, but no candidate produced a usable estimate. |
+| `partial` | At least one estimate succeeded, but candidate coverage or required attack results were incomplete. Recommendation ranking is restricted to candidates with a usable estimator result; unvalidated candidates are not mixed back into that ranking. |
+| `failed` | Validation was requested, but no candidate produced a usable estimate. The recommendation falls back to the deterministic fast-screen/reference ranking and is explicitly identified by `validation.status="failed"`, its security `source_code`, and validation warnings/messages. |
 | `not_requested` | Estimator validation was not requested; values come from the deterministic screen/reference data. |
 | `target_unmet` | Selection status, not validation status: the returned best available candidate is below the requested security target. |
 
@@ -154,11 +158,13 @@ Open `http://127.0.0.1:8000`. The setup script creates `config.local.json`,
 detects local Sage/lattice-estimator paths where possible, and keeps optional
 LLM settings local. Manual startup is also supported with `python3 -m app.server`.
 
-While a newer search or DFR request is pending, or after any relevant input is
-changed, the browser marks the previous result stale and hides or disables its
-actionable output, including JSON copying. Only the response carrying the
-current request token can become active, so a slower older request cannot
-overwrite a newer result.
+Changing any relevant search or DFR input increments that workspace's input
+revision, marks its previous result stale, and disables actions such as JSON
+copying. Submitting the same unchanged inputs does not increment the revision,
+so the previous result may remain current and copyable while the replacement
+request is pending. Every submission still receives a new request token; only
+the latest active token at the current revision may update the UI, so an older
+response cannot overwrite it.
 
 The following representative prototype settings are examples only; use the
 local server for live output. They are not parameter certifications.
@@ -242,12 +248,17 @@ To create local configuration without starting the server:
 ./scripts/setup-local.sh
 ```
 
-To clone `malb/lattice-estimator` into `.external/lattice-estimator` when no
-local estimator path is detected:
+To detect both estimator profiles and clone either missing repository into
+`.external/lattice-estimator` and `.external/enhanced-lattice-estimator`:
 
 ```bash
 ./scripts/setup-local.sh --with-estimator
 ```
+
+When creating a new `config.local.json`, the script records both detected or
+cloned paths as `lattice_estimator_path` and
+`enhanced_lattice_estimator_path`. If the config already exists, add `--force`
+to regenerate it with those paths.
 
 Sage remains optional for fast-screen mode and is required only when
 `useEstimator=true`. Manual startup is also supported:

@@ -40,7 +40,10 @@ RLWE 选择器支持：
   短和。求和分布作为 estimator 的矩近似，并受高斯校准结果限制；
 - HPS-like 和 HRSS-like 对比候选；
 - 可选的本地 NTRU 验证：同一组参数会用 MATZOV 与 ADPS16 的经典、量子规约代价
-  模型评估。量子 NTRU 目标必须启用 Sage 估计，不能使用仅有经典参考值的快速筛选。
+  模型评估。二次幂、HPS 和 HRSS 的快速/参考筛选只提供经典安全比特，因此这些环族
+  需要 Sage 才能得到有限的量子估计。SNTRUP 预设同时包含经典和量子参考比特，所以在
+  `useEstimator=false` 时也能对量子请求返回 `target_met`；在启用 estimator 验证前，
+  其验证状态仍为 `not_requested`。
 
 Streamlined NTRU Prime 提供以下六组固定预设。安全选择器使用表中的参考安全比特和
 NIST 类别，estimator 验证仍遵循下文的验证契约。
@@ -87,8 +90,8 @@ profile。
 | 状态 | 含义 |
 | --- | --- |
 | `validated` | 每个 eligible candidate 都成功覆盖，且所有必需攻击、模型和模式结果完整。 |
-| `partial` | 至少一个估计成功，但 candidate 覆盖或必需攻击结果不完整。 |
-| `failed` | 已请求 estimator 验证，但没有 candidate 产生可用估计。 |
+| `partial` | 至少一个估计成功，但 candidate 覆盖或必需攻击结果不完整。推荐排名只使用具有可用 estimator 结果的 candidate，不会把未验证 candidate 混回排名。 |
+| `failed` | 已请求 estimator 验证，但没有 candidate 产生可用估计。推荐结果回退到确定性的快速筛选/参考排名，并由 `validation.status="failed"`、安全来源 `source_code` 以及验证警告/消息明确标识。 |
 | `not_requested` | 未请求 estimator 验证；数值来自确定性筛选或参考数据。 |
 | `target_unmet` | 这是选择状态而非验证状态：返回的最佳可用 candidate 低于请求的安全目标。 |
 
@@ -134,9 +137,11 @@ cd easyLattice
 Sage/lattice-estimator 路径，并将可选 LLM 设置保留在本机。也可以使用
 `python3 -m app.server` 手动启动。
 
-当更新的搜索或 DFR 请求仍在运行，或者相关输入发生变化后，浏览器会将旧结果标记为
-stale，并隐藏或禁用其中可执行的输出，包括复制 JSON。只有带有当前 request token 的
-响应可以重新激活结果，因此较慢的旧请求不能覆盖更新结果。
+任何相关搜索或 DFR 输入发生变化时，对应 workspace 的 input revision 会递增，旧结果
+会被标记为 stale，并禁用复制 JSON 等操作。使用完全相同且未变化的输入再次提交时，
+revision 不会递增，因此替换请求运行期间，旧结果仍可能保持 current 且可以复制。每次
+提交仍会获得新的 request token；只有当前 revision 下最新的 active token 可以更新
+界面，因此旧响应不能覆盖它。
 
 下表中的原型设置仅作示例。实时输出请使用本地服务，展示数值不构成参数认证。
 
@@ -210,12 +215,16 @@ Sage/lattice-estimator 路径，运行一个小型 smoke test，并在
 ./scripts/setup-local.sh
 ```
 
-若未检测到本地 estimator 路径，可将 `malb/lattice-estimator` clone 到
-`.external/lattice-estimator`：
+若要检测两个 estimator profile，并将缺少的仓库分别 clone 到
+`.external/lattice-estimator` 和 `.external/enhanced-lattice-estimator`：
 
 ```bash
 ./scripts/setup-local.sh --with-estimator
 ```
+
+创建新的 `config.local.json` 时，脚本会将检测或 clone 得到的两个路径分别写入
+`lattice_estimator_path` 和 `enhanced_lattice_estimator_path`。如果配置已存在，请加
+`--force` 重新生成并写入这些路径。
 
 快速筛选模式仍不强制需要 Sage；只有 `useEstimator=true` 时才需要 Sage。也可手动
 启动：

@@ -35,8 +35,11 @@ not part of the security calculation.
    union bound.
 9. `app.server`: HTTP routing and static UI serving for a local checkout.
 10. `static/app-model.js`: browser request-state model. Search and DFR have
-    independent monotonic request tokens; input changes and newer requests make
-    prior results stale, disabling their actions until a current response wins.
+    independent input revisions and monotonic request tokens. Input changes
+    advance the revision, making prior results stale and disabling their
+    actions. An identical-input resubmission keeps the revision, so the prior
+    result may remain current and copyable while pending, but its new token
+    still prevents any older response from winning.
 11. `static/app.js`: browser rendering and API orchestration. The LLM checkbox
     is disabled unless public config says the local LLM provider is enabled and
     authenticated.
