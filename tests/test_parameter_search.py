@@ -1,16 +1,18 @@
 import unittest
 from unittest.mock import patch
 
-from app.config import AppConfig, EstimatorConfig
+from app.config import AppConfig
 from app.parameter_search import (
     compression_noise_spec,
     factor_integer,
     is_prime,
     ntt_prime_candidates,
     recommend_rlwe,
+    rotate_secret_candidates,
     run_sage_estimator,
     security_margin_bits,
     security_level_for_bits,
+    secret_validation_key,
     parse_request,
     sparse_ternary_spec,
     uniform_spec,
@@ -19,9 +21,124 @@ from app.parameter_search import (
 )
 from app.estimator_runner import estimator_distribution
 from app.compression_noise import compression_noise_pdf, compression_noise_profile
+from app.security_result import modulus_bits, selection_status, validation_result
+
+
+def estimator_success(bits=140.0, complete=True, profile="enhanced", commit="abc1234"):
+    models = {
+        model: {
+            mode: {
+                "ok": True,
+                "complete": complete,
+                "min_bits": bits - (1.0 if mode == "quantum" else 0.0),
+                "best_attack": "usvp",
+                "attacks": {},
+            }
+            for mode in ("classical", "quantum")
+        }
+        for model in ("matzov", "adps16")
+    }
+    return {
+        "ok": True,
+        "complete": complete,
+        "estimator_profile": profile,
+        "estimator_commit": commit,
+        "modes": models["adps16"],
+        "models": models,
+    }
+
+
+def small_validation_request(**overrides):
+    request = {
+        "hardProblemCategory": "lwe",
+        "hardProblemVariant": "rlwr",
+        "targetSecurity": 40,
+        "securityModel": "classical",
+        "redCostModel": "matzov",
+        "ringFamily": "power2",
+        "minN": 512,
+        "maxN": 512,
+        "minQBits": 9,
+        "maxQBits": 9,
+        "nttScalePower": 1,
+        "secretDistribution": "centered_binomial",
+        "errorDistribution": "3",
+        "useEstimator": True,
+    }
+    request.update(overrides)
+    return request
 
 
 class ParameterSearchTests(unittest.TestCase):
+    def test_modulus_bits_uses_ceil_log2(self):
+        self.assertEqual(modulus_bits(2048), 11)
+        self.assertEqual(modulus_bits(2049), 12)
+        self.assertEqual(modulus_bits(8192), 13)
+        with self.assertRaises(ValueError):
+            modulus_bits(1)
+
+    def test_validation_contract_distinguishes_all_states(self):
+        self.assertEqual(
+            validation_result(False, "enhanced", 0, 0, 0, 8, True)["status"],
+            "not_requested",
+        )
+        self.assertEqual(
+            validation_result(True, "enhanced", 2, 0, 0, 8, False)["status"],
+            "failed",
+        )
+        self.assertEqual(
+            validation_result(True, "enhanced", 2, 2, 2, 8, True)["status"],
+            "partial",
+        )
+        validated = validation_result(
+            True,
+            "enhanced",
+            8,
+            8,
+            8,
+            8,
+            True,
+            estimator_commit="abc1234",
+            message_codes=["validation_applied", "validation_applied"],
+        )
+        self.assertEqual(validated["status"], "validated")
+        self.assertEqual(validated["estimator_commit"], "abc1234")
+        self.assertEqual(validated["attempted_candidates"], 8)
+        self.assertEqual(validated["successful_candidates"], 8)
+        self.assertEqual(validated["covered_candidates"], 8)
+        self.assertEqual(validated["eligible_candidates"], 8)
+        self.assertEqual(validated["message_codes"], ["validation_applied"])
+        self.assertEqual(selection_status(True), "target_met")
+        self.assertEqual(selection_status(False), "target_unmet")
+
+    def test_validation_scheduler_rotates_secret_distributions(self):
+        def candidate(secret, rank):
+            return {
+                "rank": rank,
+                "distribution": {
+                    "secret": {"estimator": secret},
+                },
+            }
+
+        cbd1 = {"type": "centered_binomial", "eta": 1}
+        cbd2 = {"eta": 2, "type": "centered_binomial"}
+        sparse = {"type": "sparse_ternary_fixed_weight", "plus_weight": 64, "minus_weight": 64}
+        candidates = [
+            candidate(cbd1, 1),
+            candidate(cbd1, 2),
+            candidate(cbd2, 3),
+            candidate(sparse, 4),
+        ]
+
+        scheduled = rotate_secret_candidates(candidates, lambda item: item["rank"])
+
+        self.assertEqual(len({secret_validation_key(item) for item in scheduled[:3]}), 3)
+        self.assertEqual(scheduled[-1]["rank"], 2)
+        self.assertEqual(
+            secret_validation_key(candidate({"eta": 2, "type": "centered_binomial"}, 0)),
+            secret_validation_key(candidate({"type": "centered_binomial", "eta": 2}, 0)),
+        )
+
     def test_prime_and_factor_helpers(self):
         self.assertTrue(is_prime(12289))
         self.assertFalse(is_prime(12291))
@@ -56,6 +173,12 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(candidate["visual_scores"]["security"]["max_bits"], 512)
         self.assertGreater(candidate["visual_scores"]["compactness"]["score"], 0)
         self.assertEqual(candidate["visual_scores"]["performance"]["score"], 1.0)
+        self.assertEqual(candidate["selection"]["status"], "target_met")
+        self.assertEqual(candidate["security"]["source_code"], "fast_screen")
+        self.assertIn("screen_scheme_not_bound", candidate["warning_codes"])
+        self.assertEqual(result["validation"]["status"], "not_requested")
+        self.assertEqual(result["validation"]["profile"], "enhanced")
+        self.assertEqual(result["next_step_code"], "bind_scheme_constraints")
 
     def test_ntt_unfriendly_mode_does_not_require_n_q_divisibility(self):
         primes = ntt_prime_candidates(512, 12, ntt_scale_power=6, min_q_bits=2, limit=8)
@@ -233,35 +356,129 @@ class ParameterSearchTests(unittest.TestCase):
 
         self.assertEqual(request.estimator_timeout, 300)
 
-    def test_remote_estimator_is_used_when_configured(self):
-        result = recommend_rlwe({
-            "targetSecurity": 128,
-            "securityModel": "classical",
-            "nttScalePower": 1,
-            "maxQBits": 24,
-            "distribution": "auto",
-        })
-        candidate = result["recommendation"]
-        remote_result = {"ok": True, "modes": {"classical": {}, "quantum": {}}}
-        config = AppConfig(
-            estimator=EstimatorConfig(
-                remote_url="https://example-estimator.hf.space",
-                remote_timeout_seconds=240,
-                remote_poll_interval_seconds=1.0,
+    def test_run_sage_estimator_routes_profiles_and_structured_payload_fields(self):
+        candidate = {
+            "ring": {"n": 512},
+            "modulus": {"q": 257},
+            "distribution": {
+                "name": "CBD(2)",
+                "secret": {"estimator": {"type": "centered_binomial", "eta": 2}},
+                "error": {"estimator": {"type": "centered_binomial", "eta": 2}},
+            },
+        }
+        expected_profiles = {
+            "lwe": "standard",
+            "lwr": "standard",
+            "rlwe": "enhanced",
+            "mlwe": "enhanced",
+            "rlwr": "enhanced",
+            "mlwr": "enhanced",
+        }
+
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value={"ok": False, "code": "estimator_timeout", "message": "timeout"},
+        ) as run:
+            for variant, expected_profile in expected_profiles.items():
+                with self.subTest(variant=variant):
+                    request = parse_request({
+                        "hardProblemCategory": "lwe",
+                        "hardProblemVariant": variant,
+                    })
+                    run_sage_estimator(candidate, 16, config=AppConfig(), request=request)
+                    payload, timeout, _, profile = run.call_args.args
+                    self.assertEqual(timeout, 16)
+                    self.assertEqual(profile, expected_profile)
+                    self.assertEqual(payload["hard_problem_variant"], variant)
+                    self.assertEqual(payload["ring_degree"], 512)
+
+    def test_mocked_validation_rotates_secrets_and_reports_partial_coverage(self):
+        returned_bits = iter((141.0, 151.0))
+
+        def estimate(*args):
+            return estimator_success(bits=next(returned_bits))
+
+        with patch("app.parameter_search.run_estimator", side_effect=estimate) as run:
+            result = recommend_rlwe(
+                small_validation_request(validationCount=2, validationAttempts=2),
+                config=AppConfig(),
             )
-        )
 
-        with patch("app.parameter_search.load_config", return_value=config):
-            with patch("app.parameter_search.estimate_remotely", return_value=remote_result) as remote:
-                self.assertIs(run_sage_estimator(candidate, 16), remote_result)
+        secret_descriptors = [call.args[0]["secret_distribution"]["estimator"] for call in run.call_args_list]
+        self.assertEqual(len({str(sorted(descriptor.items())) for descriptor in secret_descriptors}), 2)
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertEqual(result["validation"]["attempted_candidates"], 2)
+        self.assertEqual(result["validation"]["successful_candidates"], 2)
+        self.assertEqual(result["validation"]["covered_candidates"], 2)
+        self.assertEqual(result["validation"]["eligible_candidates"], 7)
+        self.assertEqual(result["validation"]["estimator_commit"], "abc1234")
+        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 151.0)
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
+        self.assertIn("validation_applied", result["recommendation"]["warning_codes"])
 
-        remote.assert_called_once()
-        _, kwargs = remote.call_args
-        self.assertEqual(kwargs["base_url"], "https://example-estimator.hf.space")
-        self.assertEqual(kwargs["timeout_seconds"], 240)
-        self.assertEqual(kwargs["payload"]["problem"], "lwe")
-        self.assertEqual(kwargs["payload"]["n"], candidate["ring"]["n"])
-        self.assertEqual(kwargs["payload"]["q"], candidate["modulus"]["q"])
+    def test_estimator_failure_keeps_fast_screen_and_preserves_unknown_message(self):
+        failures = [
+            {
+                "ok": False,
+                "code": "sage_not_found",
+                "message": "Sage is not installed.",
+            },
+            {
+                "ok": False,
+                "code": "future_estimator_failure",
+                "message": "opaque estimator failure",
+            },
+        ]
+        with patch("app.parameter_search.run_estimator", side_effect=failures):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=2, validationAttempts=2),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(result["validation"]["status"], "failed")
+        self.assertEqual(result["validation"]["attempted_candidates"], 2)
+        self.assertEqual(result["validation"]["successful_candidates"], 0)
+        self.assertEqual(result["validation"]["covered_candidates"], 0)
+        self.assertEqual(result["validation"]["message"], "opaque estimator failure")
+        self.assertEqual(result["validation"]["messages"], ["opaque estimator failure"])
+        self.assertIn("validation_config_missing", result["validation"]["message_codes"])
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+        self.assertIn("validation_config_missing", result["recommendation"]["warning_codes"])
+        self.assertEqual(result["estimator"]["validated"][1]["message"], "opaque estimator failure")
+
+    def test_complete_coverage_with_partial_attacks_is_partial(self):
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value=estimator_success(complete=False),
+        ) as run:
+            result = recommend_rlwe(
+                small_validation_request(validationCount=7, validationAttempts=80),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(run.call_count, 7)
+        self.assertEqual(result["validation"]["covered_candidates"], 7)
+        self.assertEqual(result["validation"]["eligible_candidates"], 7)
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertIn("validation_partial_attacks", result["validation"]["message_codes"])
+        self.assertIn("validation_partial_attacks", result["recommendation"]["warning_codes"])
+
+    def test_target_unmet_candidate_is_explicit_analytical_result(self):
+        result = recommend_rlwe({
+            "targetSecurity": 512,
+            "minN": 512,
+            "maxN": 512,
+            "minQBits": 9,
+            "maxQBits": 9,
+            "nttScalePower": 1,
+            "secretDistribution": "centered_binomial",
+            "errorDistribution": "centered_binomial",
+            "useEstimator": False,
+        })
+
+        self.assertEqual(result["recommendation"]["selection"]["status"], "target_unmet")
+        self.assertFalse(result["recommendation"]["selection"]["meets_target"])
+        self.assertEqual(result["validation"]["status"], "not_requested")
 
     def test_hard_problem_taxonomy_is_preserved(self):
         request = parse_request({

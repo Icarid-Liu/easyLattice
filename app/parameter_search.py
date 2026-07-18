@@ -2,19 +2,16 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import shutil
-import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
 from itertools import product
-from pathlib import Path
 from typing import Any
 
 from .compression_noise import compression_noise_profile
 from .config import AppConfig, load_config
-from .remote_estimator import estimate_remotely
+from .estimator_process import estimator_profile_for, run_estimator
+from .security_result import modulus_bits, selection_status, validation_result
 
 
 RING_DIMENSIONS = (512, 1024, 2048, 4096, 8192)
@@ -63,6 +60,13 @@ SUPPORTED_HARD_PROBLEMS = {
 LWR_VARIANTS = {"lwr", "rlwr", "mlwr"}
 NTT_UNFRIENDLY_SCALE_POWER = 6
 MAX_STRUCTURED_NTT_SCALE_POWER = 5
+VALIDATION_CONFIG_ERROR_CODES = {
+    "sage_not_found",
+    "standard_estimator_not_configured",
+    "enhanced_estimator_not_configured",
+    "estimator_path_invalid",
+    "estimator_origin_mismatch",
+}
 
 
 @dataclass(frozen=True)
@@ -115,48 +119,99 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
     viable = [c for c in candidates if meets_target(c["security"], request)]
     ranked = sorted(viable or candidates, key=lambda c: candidate_rank(c, request))
 
+    profile = (
+        estimator_profile_for(request.hard_problem_category, request.hard_problem_variant)
+        if request.hard_problem_category in {"lwe", "ntru"}
+        else "standard"
+    )
+    eligible_candidates: dict[str, dict[str, Any]] = {}
+    for candidate in raw_candidates:
+        eligible_candidates.setdefault(validation_candidate_key(candidate), candidate)
     estimator_result = None
+    validation = validation_result(
+        requested=False,
+        profile=profile,
+        attempted=0,
+        successful=0,
+        covered=0,
+        eligible=len(eligible_candidates),
+        attacks_complete=True,
+    )
+    validation_codes: list[str] = []
+    failure_messages: list[str] = []
+    raw_unknown_messages: list[str] = []
     if request.use_estimator:
-        estimator_result = {"ok": True, "validated": []}
+        estimator_result = {"ok": True, "profile": profile, "validated": []}
         validated_candidates: list[dict[str, Any]] = []
-        accepted_moduli: set[tuple[str, int, int]] = set()
-        max_validation_attempts = min(len(raw_candidates), max(request.validation_count, request.validation_attempts))
-        validation_pool = sorted(raw_candidates, key=lambda c: estimator_candidate_rank(c, request))
+        covered_keys: set[str] = set()
+        max_validation_attempts = min(len(eligible_candidates), request.validation_attempts)
+        validation_pool = rotate_secret_candidates(
+            list(eligible_candidates.values()),
+            lambda candidate: estimator_candidate_rank(candidate, request),
+        )
         attempts = 0
-        for candidate in validation_pool:
-            key = (
-                str(candidate["ring"]["family_id"]),
-                int(candidate["ring"]["n"]),
-                int(candidate["modulus"]["q"]),
-            )
-            if key in accepted_moduli:
-                continue
-            if attempts >= max_validation_attempts:
-                break
+        successful = 0
+        attacks_complete = True
+        estimator_commit = None
+        for candidate in validation_pool[:max_validation_attempts]:
             attempts += 1
-            result = run_sage_estimator(candidate, request.estimator_timeout, config=config)
+            result = run_sage_estimator(
+                candidate,
+                request.estimator_timeout,
+                config=config,
+                request=request,
+                profile=profile,
+            )
             estimator_result["validated"].append(result)
+            estimator_commit = estimator_commit or result.get("estimator_commit")
             if result.get("ok"):
-                apply_estimator_result(candidate, result, request)
+                successful += 1
+                covered_keys.add(validation_candidate_key(candidate))
+                attacks_complete = attacks_complete and bool(result.get("complete"))
+                apply_estimator_result(candidate, result, request, profile=profile)
                 validated_candidates.append(candidate)
-                if meets_target(candidate["security"], request):
-                    accepted_moduli.add(key)
+                validation_codes.append("validation_applied")
+                if not result.get("complete"):
+                    validation_codes.append("validation_partial_attacks")
             else:
                 estimator_result["ok"] = False
-                candidate["warnings"].append(result["message"])
-        validated_viable = select_best_distribution_per_modulus(
-            [c for c in validated_candidates if meets_target(c["security"], request)],
-            request,
+                code = result.get("code")
+                message = result.get("message", "Sage/lattice-estimator could not estimate this candidate.")
+                failure_messages.append(message)
+                candidate["warnings"].append(message)
+                if code in VALIDATION_CONFIG_ERROR_CODES:
+                    validation_codes.append("validation_config_missing")
+                else:
+                    raw_unknown_messages.append(message)
+
+        validation = validation_result(
+            requested=True,
+            profile=profile,
+            attempted=attempts,
+            successful=successful,
+            covered=len(covered_keys),
+            eligible=len(eligible_candidates),
+            attacks_complete=attacks_complete,
+            estimator_commit=estimator_commit,
+            message_codes=validation_codes,
         )
-        if validated_viable:
-            ranked = sorted(validated_viable, key=lambda c: candidate_rank(c, request))
+        if raw_unknown_messages:
+            validation["message"] = raw_unknown_messages[0]
+            validation["messages"] = list(dict.fromkeys(raw_unknown_messages))
+        if validated_candidates:
+            ranked = sorted(validated_candidates, key=lambda c: validated_candidate_rank(c, request))
+            viable = [candidate for candidate in ranked if meets_target(candidate["security"], request)]
         else:
-            estimator_result["ok"] = False
             viable = [c for c in ranked if meets_target(c["security"], request)]
             ranked = sorted(viable or ranked, key=lambda c: candidate_rank(c, request))
 
     recommendation = ranked[0]
     alternatives = ranked[1:5]
+    for candidate in [recommendation, *alternatives]:
+        candidate["warning_codes"] = list(
+            dict.fromkeys(candidate.get("warning_codes", []) + validation["message_codes"])
+        )
+        candidate["warnings"] = list(dict.fromkeys(candidate["warnings"] + failure_messages))
 
     elapsed_ms = round((time.perf_counter() - started) * 1000)
     return {
@@ -164,6 +219,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
         "recommendation": recommendation,
         "alternatives": alternatives,
         "estimator": estimator_result,
+        "validation": validation,
         "search": {
             "elapsed_ms": elapsed_ms,
             "generated_candidates": len(raw_candidates),
@@ -182,6 +238,7 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
             "the next step is to add scheme-specific constraints such as correctness, rejection sampling times, "
             "and smoothing parameters."
         ),
+        "next_step_code": "bind_scheme_constraints",
     }
 
 
@@ -428,7 +485,7 @@ def make_candidate(
         },
         "modulus": {
             "q": q,
-            "bits": q.bit_length(),
+            "bits": modulus_bits(q),
             "prime": True,
             "q_minus_1_factorization": format_factorization(factors),
             "ntt_condition": ntt["condition"],
@@ -463,10 +520,12 @@ def make_candidate(
             "selected_security_bits": selected_security_bits(security, request),
             "margin_bits": security_margin_bits(security, request),
             "meets_target": meets_target(security, request),
+            "status": selection_status(meets_target(security, request)),
             "security_level": security_level_for_bits(selected_security_bits(security, request)),
             "rank_score": None,
         },
         "warnings": warnings,
+        "warning_codes": ["screen_scheme_not_bound"],
     }
     if lwr_profile:
         candidate["lwr"] = lwr_profile
@@ -655,6 +714,7 @@ def fast_security_estimate(n: int, q: int, sigma: float, sparse_penalty_bits: fl
     quantum = floor_bits(max(0.0, 0.265 * beta - sparse_penalty_bits))
     return {
         "source": "fast-screen",
+        "source_code": "fast_screen",
         "classical_bits": classical,
         "quantum_bits": quantum,
         "matzov_bits": classical,
@@ -764,6 +824,8 @@ def candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[
     rank = (shortage, ring_rank, n, q, q_bits, ntt_layers_remaining, overkill, stddev, -ntt_score)
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = margin
+    candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+    candidate["selection"]["status"] = selection_status(candidate["selection"]["meets_target"])
     candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
     candidate["selection"]["rank_score"] = rank
     return rank
@@ -802,7 +864,7 @@ def visual_scores_for_candidate(candidate: dict[str, Any], request: RequestOptio
 
 
 def compactness_profile(q: int, request: RequestOptions) -> dict[str, Any]:
-    q_bits = q.bit_length()
+    q_bits = modulus_bits(q)
     span = max(1, request.max_q_bits - request.min_q_bits)
     score = 1.0 - ((q_bits - request.min_q_bits) / span)
     return {
@@ -885,6 +947,70 @@ def estimator_candidate_rank(candidate: dict[str, Any], request: RequestOptions)
     return (ring_rank, n, q, *distribution_rank(candidate, request))
 
 
+def secret_validation_key(candidate: dict[str, Any]) -> str:
+    estimator = candidate["distribution"]["secret"]["estimator"]
+    return json.dumps(estimator, sort_keys=True, separators=(",", ":"))
+
+
+def validation_candidate_key(candidate: dict[str, Any]) -> str:
+    descriptor = {
+        "ring_family": candidate["ring"]["family_id"],
+        "ring_degree": candidate["ring"]["n"],
+        "q": candidate["modulus"]["q"],
+        "secret": candidate["distribution"]["secret"]["estimator"],
+        "error": candidate["distribution"]["error"]["estimator"],
+    }
+    return json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+
+
+def rotate_secret_candidates(candidates, rank_key):
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for candidate in sorted(candidates, key=rank_key):
+        buckets.setdefault(secret_validation_key(candidate), []).append(candidate)
+
+    ordered: list[dict[str, Any]] = []
+    while buckets:
+        for key in list(buckets):
+            ordered.append(buckets[key].pop(0))
+            if not buckets[key]:
+                del buckets[key]
+    return ordered
+
+
+def validated_candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[Any, ...]:
+    selected_bits = selected_security_bits(candidate["security"], request)
+    measured_rank = -selected_bits if math.isfinite(selected_bits) else float("inf")
+    meets = meets_target(candidate["security"], request)
+    ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
+    n = int(candidate["ring"]["n"])
+    q = int(candidate["modulus"]["q"])
+    secret = candidate["distribution"]["secret"]
+    error = candidate["distribution"]["error"]
+    sampling_rank = 0 if secret.get("family") == "sparse_ternary" else 1
+    rank = (
+        0 if meets else 1,
+        measured_rank,
+        ring_rank,
+        n,
+        modulus_bits(q),
+        q,
+        sampling_rank,
+        str(secret.get("sampling", "")),
+        str(error.get("sampling", "")),
+        float(secret["stddev"]),
+        float(error["stddev"]),
+        str(secret.get("name", "")),
+        str(error.get("name", "")),
+    )
+    candidate["selection"]["selected_security_bits"] = selected_bits
+    candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
+    candidate["selection"]["meets_target"] = meets
+    candidate["selection"]["status"] = selection_status(meets)
+    candidate["selection"]["security_level"] = security_level_for_bits(selected_bits)
+    candidate["selection"]["rank_score"] = rank
+    return rank
+
+
 def ring_dimensions(family: str) -> tuple[int, ...]:
     if family == "ternary":
         return tuple(n for n in TERNARY_RING_DIMENSIONS if only_has_prime_factors(n, {2, 3}) and n % 2 == 0)
@@ -942,13 +1068,13 @@ def ntt_prime_candidates(
     found = {
         q
         for q in COMMON_NTT_PRIMES
-        if min_q_bits <= q.bit_length() <= max_q_bits
+        if min_q_bits <= modulus_bits(q) <= max_q_bits
         and q > modulus
         and (q - 1) % modulus == 0
         and is_prime(q)
     }
 
-    min_bits = max(min_q_bits, (modulus + 1).bit_length())
+    min_bits = max(min_q_bits, modulus_bits(modulus + 1))
     bit_targets = range(min_bits, max_q_bits + 1)
     for bits in bit_targets:
         start_k = max(1, ((1 << (bits - 1)) - 1) // modulus)
@@ -957,7 +1083,7 @@ def ntt_prime_candidates(
         added_for_bits = 0
         for k in range(start_k, stop_k + 1, step):
             q = k * modulus + 1
-            if q.bit_length() > max_q_bits:
+            if modulus_bits(q) > max_q_bits:
                 continue
             if is_prime(q):
                 found.add(q)
@@ -972,7 +1098,7 @@ def ntt_prime_candidates(
 def unrestricted_prime_candidates(min_q_bits: int, max_q_bits: int, limit: int = 96) -> list[int]:
     found: set[int] = set()
     for q in COMMON_NTT_PRIMES:
-        if min_q_bits <= q.bit_length() <= max_q_bits and is_prime(q):
+        if min_q_bits <= modulus_bits(q) <= max_q_bits and is_prime(q):
             found.add(q)
 
     lower_bound = max(3, 1 << (min_q_bits - 1))
@@ -1248,8 +1374,13 @@ def run_sage_estimator(
     candidate: dict[str, Any],
     timeout: int,
     config: AppConfig | None = None,
+    request: RequestOptions | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     config = config or load_config()
+    category = request.hard_problem_category if request else "lwe"
+    variant = request.hard_problem_variant if request else "rlwe"
+    profile = profile or estimator_profile_for(category, variant)
     payload = {
         "problem": "lwe",
         "n": candidate["ring"]["n"],
@@ -1257,84 +1388,25 @@ def run_sage_estimator(
         "distribution": candidate["distribution"],
         "secret_distribution": candidate["distribution"]["secret"],
         "error_distribution": candidate["distribution"]["error"],
+        "hard_problem_variant": variant,
+        "ring_degree": candidate["ring"]["n"],
         "per_attack_timeout": max(3, min(90, config.estimator.per_attack_timeout_seconds or timeout // 2)),
     }
-    if config.estimator.remote_url:
-        result = estimate_remotely(
-            base_url=config.estimator.remote_url,
-            payload=payload,
-            timeout_seconds=config.estimator.remote_timeout_seconds,
-            poll_interval_seconds=config.estimator.remote_poll_interval_seconds,
-        )
-        if not result.get("ok"):
-            return {
-                "ok": False,
-                "message": result.get("message", "Remote Sage/lattice-estimator could not estimate this candidate."),
-                "raw": result,
-            }
-        return result
-
-    sage_binary = config.estimator.sage_binary
-    sage = shutil.which(sage_binary) or (sage_binary if Path(sage_binary).exists() else None)
-    if not sage:
-        return {
-            "ok": False,
-            "message": f"Sage binary '{sage_binary}' not found; using fast-screen estimate only.",
-        }
-
-    runner = Path(__file__).with_name("estimator_runner.py")
-    env = os.environ.copy()
-    if config.estimator.lattice_estimator_path:
-        existing = env.get("PYTHONPATH")
-        estimator_path = str(Path(config.estimator.lattice_estimator_path).expanduser())
-        env["PYTHONPATH"] = estimator_path if not existing else f"{estimator_path}{os.pathsep}{existing}"
-
-    try:
-        completed = subprocess.run(
-            [sage, "-python", str(runner)],
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "message": f"Sage/lattice-estimator timed out after {timeout}s; keeping fast-screen estimate.",
-        }
-
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()[-1:]
-        suffix = f" Detail: {detail[0]}" if detail else ""
-        return {
-            "ok": False,
-            "message": f"Sage/lattice-estimator failed with exit code {completed.returncode}.{suffix}",
-        }
-
-    try:
-        data = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        return {
-            "ok": False,
-            "message": "Sage/lattice-estimator returned non-JSON output; keeping fast-screen estimate.",
-        }
-
-    if not data.get("ok"):
-        return {
-            "ok": False,
-            "message": data.get("message", "Sage/lattice-estimator could not estimate this candidate."),
-            "raw": data,
-        }
-    return data
+    return run_estimator(payload, timeout, config, profile)
 
 
 def apply_estimator_result(
     candidate: dict[str, Any],
     estimator_result: dict[str, Any],
     request: RequestOptions,
+    profile: str | None = None,
 ) -> None:
+    resolved_profile = profile or estimator_result.get("estimator_profile")
+    if not resolved_profile:
+        resolved_profile = estimator_profile_for(
+            request.hard_problem_category,
+            request.hard_problem_variant,
+        )
     adps16_classical = estimator_model_bits(estimator_result, "adps16", "classical")
     adps16_quantum = estimator_model_bits(estimator_result, "adps16", "quantum")
     matzov_classical = estimator_model_bits(estimator_result, "matzov", "classical")
@@ -1343,13 +1415,14 @@ def apply_estimator_result(
     quantum_bits = adps16_quantum or candidate["security"]["quantum_bits"]
     candidate["security"] = {
         "source": "sage-lattice-estimator",
+        "source_code": f"sage_{resolved_profile}",
         "classical_bits": floor_bits(float(classical_bits)),
         "quantum_bits": floor_bits(float(quantum_bits)),
         "matzov_bits": floor_optional_bits(matzov_classical),
         "matzov_quantum_bits": floor_optional_bits(matzov_quantum),
         "adps16_core_svp_bits": floor_optional_bits(adps16_classical),
         "adps16_quantum_bits": floor_optional_bits(adps16_quantum),
-        "attacks": estimator_result.get("models", estimator_result["modes"]),
+        "attacks": estimator_result.get("models") or estimator_result.get("modes", {}),
         "estimator_commit": estimator_result.get("estimator_commit"),
         "notes": [
             "Estimated as an LWE instance with n RLWE samples; use full scheme analysis for production.",
@@ -1359,9 +1432,13 @@ def apply_estimator_result(
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
     candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+    candidate["selection"]["status"] = selection_status(candidate["selection"]["meets_target"])
     candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
     update_visual_security(candidate)
     candidate["warnings"].append("Sage/lattice-estimator rough validation was applied to this recommendation.")
+    candidate["warning_codes"] = list(
+        dict.fromkeys(candidate.get("warning_codes", []) + ["validation_applied"])
+    )
 
 
 def estimator_model_bits(estimator_result: dict[str, Any], model: str, mode: str) -> float | None:
