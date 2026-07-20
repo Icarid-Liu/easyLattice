@@ -8,9 +8,13 @@ This directory is a Docker Space template for the public live backend. Unlike
 - public configuration at `GET /api/config/public`;
 - the same browser UI served by the Space itself.
 
-The Docker Space uses the Hugging Face Docker SDK on port `7860`, installs
-Sage/lattice-estimator, and sets a 240 second default estimator timeout with a
-300 second request cap.
+The Docker Space uses the Hugging Face Docker SDK on port `7860`, installs both
+estimator profiles, and sets a 240 second default estimator timeout. The
+standard profile is `malb/lattice-estimator`, pinned to revision
+`3e48ef421ec256afddb3e7d2249a77eab6e9ba12`; the enhanced profile is
+`identitymapping/enhanced_lattice-estimator`, pinned to revision
+`876b66173f4354a96ddafc0ce3a79767ec43c6d4`. Both checkouts are detached at
+their exact revisions by the Dockerfile.
 
 ## Deploy
 
@@ -60,10 +64,46 @@ HOST=0.0.0.0
 PORT=7860
 SAGE_BINARY=sage
 LATTICE_ESTIMATOR_PATH=/opt/lattice-estimator
+ENHANCED_LATTICE_ESTIMATOR_PATH=/opt/enhanced-lattice-estimator
 EASYLATTICE_ESTIMATOR_TIMEOUT=240
 EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60
 EASYLATTICE_ALLOWED_ORIGINS=*
 ```
+
+## Estimator Profiles
+
+The live API chooses a subprocess profile from the request variant and adds
+`estimator_profile` to the internal worker payload:
+
+```json
+{
+  "estimator_profile": "enhanced",
+  "hard_problem_variant": "rlwr",
+  "ring_degree": 512
+}
+```
+
+LWE/LWR and NTRU use `standard`; RLWE/MLWE/RLWR/MLWR use `enhanced`. Structured
+LWE-family payloads evaluate `usvp`, `dual_hybrid`, and `bdd_hybrid` in the
+enhanced profile. At the pinned revision, explicit ring correction is available
+and applied only to `bdd_hybrid` through the ring degree and
+`structure_leverage`; `dual_hybrid` has no explicit ring correction. Its finite
+result remains visible, but it makes structured validation partial and cannot
+certify the target alone. MATZOV and ADPS16 are run in classical and quantum
+modes.
+
+The local dispatcher, remote worker, estimator runner, and response validator
+all enforce the same problem/profile/variant tuple. Missing, unknown, or
+mismatched variants fail with `invalid_estimator_route` before attacks run.
+Remote diagnostics are depth/item bounded and serialized as strict JSON;
+non-finite diagnostic values are replaced with `null` and cannot leak into an
+API response.
+
+Both repositories expose the same top-level Python import name, `estimator`.
+The server therefore launches the selected profile in a separate Sage process
+with an isolated `PYTHONPATH` and verifies the imported package origin. Setting
+both paths is required to support all variants; combining both repositories in
+one Python import path is unsupported.
 
 For production, replace `EASYLATTICE_ALLOWED_ORIGINS=*` in the Space settings
 with your GitHub Pages origin, for example:
@@ -71,3 +111,11 @@ with your GitHub Pages origin, for example:
 ```text
 https://icarid-liu.github.io
 ```
+
+CORS is not access control: it only limits which browser origins may read
+responses, and it does not authenticate users or stop scripts and other
+non-browser clients from calling the API directly. Do not expose the
+compute-intensive estimator or DFR endpoints as an unrestricted public
+service. Require either a private Space or an authenticated, rate-limited
+gateway in front of those endpoints. Configure `EASYLATTICE_ALLOWED_ORIGINS`
+as an additional browser-origin restriction, not as the security boundary.

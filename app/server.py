@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import socket
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -17,6 +18,7 @@ from urllib.parse import urlparse
 from .agent import recommend_with_agent
 from .config import public_config
 from .decryption_failure import calculate_decryption_failure
+from .json_safety import reject_json_constant, sanitize_json_value
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,116 @@ STATIC_ROOT = ROOT / "static"
 API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1"))))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
+MAX_REQUEST_BODY_BYTES = 1_048_576
+REQUEST_HEADER_READ_DEADLINE_SECONDS = 5.0
+POST_BODY_READ_DEADLINE_SECONDS = 5.0
+POST_BODY_READ_CHUNK_BYTES = 65_536
+REQUEST_READ_CHUNK_BYTES = 8_192
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
+
+
+class RequestBodyReadTimeout(TimeoutError):
+    pass
+
+
+class RequestHeaderReadTimeout(Exception):
+    pass
+
+
+class DeadlineSocketReader:
+    def __init__(self, connection: socket.socket):
+        self.connection = connection
+        self.buffer = bytearray()
+        self.deadline: float | None = None
+        self.timeout_type: type[Exception] = TimeoutError
+        self.timeout_message = "Request read timed out."
+        self.eof = False
+        self.closed = False
+
+    def begin_deadline(
+        self,
+        seconds: float,
+        timeout_type: type[Exception],
+        message: str,
+    ) -> None:
+        self.deadline = time.monotonic() + seconds
+        self.timeout_type = timeout_type
+        self.timeout_message = message
+
+    def clear_deadline(self) -> None:
+        self.deadline = None
+
+    def readline(self, limit: int = -1) -> bytes:
+        if self.closed or limit == 0:
+            return b""
+        while True:
+            search_end = len(self.buffer) if limit < 0 else min(len(self.buffer), limit)
+            newline = self.buffer.find(b"\n", 0, search_end)
+            if newline >= 0:
+                return self.consume(newline + 1)
+            if limit >= 0 and len(self.buffer) >= limit:
+                return self.consume(limit)
+            if self.eof:
+                return self.consume(search_end)
+            read_size = REQUEST_READ_CHUNK_BYTES
+            if limit >= 0:
+                read_size = min(read_size, limit - len(self.buffer))
+            chunk = self.recv(read_size)
+            if not chunk:
+                self.eof = True
+            else:
+                self.buffer.extend(chunk)
+
+    def read_exact(self, size: int) -> bytes:
+        if self.closed:
+            return b""
+        while len(self.buffer) < size and not self.eof:
+            chunk = self.recv(
+                min(size - len(self.buffer), POST_BODY_READ_CHUNK_BYTES)
+            )
+            if not chunk:
+                self.eof = True
+            else:
+                self.buffer.extend(chunk)
+        return self.consume(min(size, len(self.buffer)))
+
+    def recv(self, size: int) -> bytes:
+        if self.deadline is None:
+            raise RuntimeError("Request read deadline is not active.")
+        remaining_time = self.deadline - time.monotonic()
+        if remaining_time <= 0:
+            self.raise_timeout()
+        previous_timeout = self.connection.gettimeout()
+        read_timeout = (
+            remaining_time
+            if previous_timeout is None
+            else min(previous_timeout, remaining_time)
+        )
+        try:
+            self.connection.settimeout(read_timeout)
+            chunk = self.connection.recv(size)
+        except (socket.timeout, TimeoutError) as exc:
+            raise self.timeout_type(self.timeout_message) from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if time.monotonic() >= self.deadline:
+            self.raise_timeout()
+        return chunk
+
+    def consume(self, size: int) -> bytes:
+        data = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return data
+
+    def raise_timeout(self) -> None:
+        raise self.timeout_type(self.timeout_message)
+
+    def close(self) -> None:
+        self.closed = True
+        self.buffer.clear()
 
 
 @dataclass
@@ -115,6 +227,36 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
 
 class EasyLatticeHandler(BaseHTTPRequestHandler):
     server_version = "easyLattice/0.1"
+    rbufsize = 0
+
+    def setup(self) -> None:
+        super().setup()
+        self.rfile.close()
+        self.request_reader = DeadlineSocketReader(self.connection)
+        self.rfile = self.request_reader
+
+    def handle_one_request(self) -> None:
+        self.requestline = ""
+        self.request_version = self.default_request_version
+        self.command = None
+        self.request_reader.begin_deadline(
+            REQUEST_HEADER_READ_DEADLINE_SECONDS,
+            RequestHeaderReadTimeout,
+            "Request headers read timed out.",
+        )
+        try:
+            super().handle_one_request()
+        except RequestHeaderReadTimeout as exc:
+            self.request_reader.clear_deadline()
+            self.write_preparse_timeout(str(exc))
+        finally:
+            self.request_reader.clear_deadline()
+
+    def parse_request(self) -> bool:
+        try:
+            return super().parse_request()
+        finally:
+            self.request_reader.clear_deadline()
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -126,7 +268,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self.serve_file(STATIC_ROOT / "index.html")
             return
-        if parsed.path in ("/app.js", "/preview-data.js", "/styles.css"):
+        if parsed.path in ("/app-model.js", "/app.js", "/preview-data.js", "/styles.css"):
             self.serve_file(STATIC_ROOT / parsed.path.lstrip("/"))
             return
         if parsed.path.startswith("/static/"):
@@ -154,8 +296,14 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/decryption-failure/calculate":
             try:
-                payload = self.read_json()
+                payload = self.read_json(preserve_numeric_lexemes=True)
                 result = calculate_decryption_failure(payload)
+            except RequestBodyReadTimeout as exc:
+                self.write_request_timeout(str(exc))
+                return
+            except RequestBodyTooLarge as exc:
+                self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+                return
             except ValueError as exc:
                 self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -172,6 +320,12 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/agent/jobs":
             try:
                 payload = self.read_json()
+            except RequestBodyReadTimeout as exc:
+                self.write_request_timeout(str(exc))
+                return
+            except RequestBodyTooLarge as exc:
+                self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+                return
             except ValueError as exc:
                 self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -198,6 +352,12 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             result = recommend_with_agent(payload)
+        except RequestBodyReadTimeout as exc:
+            self.write_request_timeout(str(exc))
+            return
+        except RequestBodyTooLarge as exc:
+            self.write_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
+            return
         except ValueError as exc:
             self.write_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
@@ -210,31 +370,86 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         self.write_json(result)
 
-    def read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8") if length else "{}"
-        payload = json.loads(body or "{}")
+    def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
+        length = self.request_content_length()
+        body_bytes = self.read_request_body(length)
+        try:
+            body = body_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Request body must be valid UTF-8.") from exc
+        numeric_options: dict[str, Any] = {
+            "parse_constant": reject_json_constant,
+        }
+        if preserve_numeric_lexemes:
+            numeric_options.update({"parse_int": str, "parse_float": str})
+        payload = json.loads(body or "{}", **numeric_options)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
         return payload
 
+    def read_request_body(self, length: int) -> bytes:
+        self.request_reader.begin_deadline(
+            POST_BODY_READ_DEADLINE_SECONDS,
+            RequestBodyReadTimeout,
+            "Request body read timed out.",
+        )
+        try:
+            body = self.request_reader.read_exact(length)
+        finally:
+            self.request_reader.clear_deadline()
+        if len(body) != length:
+            raise ValueError("Request body ended before Content-Length bytes were received.")
+        return body
+
+    def request_content_length(self) -> int:
+        values = self.headers.get_all("Content-Length", [])
+        if not values:
+            raise ValueError("Content-Length header is required.")
+        if len(values) != 1:
+            raise ValueError("Content-Length header must appear exactly once.")
+        raw = values[0]
+        if not raw or not raw.isascii() or not raw.isdigit():
+            raise ValueError("Content-Length must be a positive decimal integer.")
+        normalized = raw.lstrip("0") or "0"
+        maximum = str(MAX_REQUEST_BODY_BYTES)
+        if len(normalized) > len(maximum) or (
+            len(normalized) == len(maximum) and normalized > maximum
+        ):
+            raise RequestBodyTooLarge(
+                f"Content-Length exceeds {MAX_REQUEST_BODY_BYTES} "
+                "(MAX_REQUEST_BODY_BYTES)."
+            )
+        length = int(normalized)
+        if length < 1:
+            raise ValueError("Content-Length must be a positive decimal integer.")
+        return length
+
     def serve_file(self, path: Path) -> None:
         resolved = path.resolve()
-        if not str(resolved).startswith(str(STATIC_ROOT.resolve())) or not resolved.is_file():
+        if not resolved.is_relative_to(STATIC_ROOT.resolve()) or not resolved.is_file():
             self.write_error(HTTPStatus.NOT_FOUND, "Not found")
             return
 
-        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        content_type = (
+            "text/javascript; charset=utf-8"
+            if resolved.suffix == ".js"
+            else mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        )
         data = resolved.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.write_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
     def write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(
+            sanitize_json_value(payload),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
         self.send_response(status)
         self.write_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -245,11 +460,49 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
     def write_error(self, status: HTTPStatus, message: str) -> None:
         self.write_json({"ok": False, "error": message}, status)
 
+    def write_request_timeout(self, message: str) -> None:
+        self.close_connection = True
+        try:
+            self.write_error(HTTPStatus.REQUEST_TIMEOUT, message)
+        except OSError:
+            pass
+
+    def write_preparse_timeout(self, message: str) -> None:
+        self.close_connection = True
+        data = json.dumps(
+            sanitize_json_value({"ok": False, "error": message}),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        headers = [
+            "HTTP/1.1 408 Request Timeout",
+            f"Server: {self.version_string()}",
+            f"Date: {self.date_time_string()}",
+            "Content-Type: application/json; charset=utf-8",
+            f"Content-Length: {len(data)}",
+            "Connection: close",
+        ]
+        if "*" in allowed_origins():
+            headers.extend((
+                "Access-Control-Allow-Origin: *",
+                "Access-Control-Allow-Methods: GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers: Content-Type",
+                "Access-Control-Max-Age: 86400",
+            ))
+        response = ("\r\n".join(headers) + "\r\n\r\n").encode("latin-1") + data
+        try:
+            self.wfile.write(response)
+            self.wfile.flush()
+        except OSError:
+            pass
+
     def write_cors_headers(self) -> None:
         allowed = allowed_origins()
         if not allowed:
             return
-        origin = cors_origin_for(self.headers.get("Origin", ""), allowed)
+        request_headers = getattr(self, "headers", None)
+        request_origin = request_headers.get("Origin", "") if request_headers else ""
+        origin = cors_origin_for(request_origin, allowed)
         if not origin:
             return
         self.send_header("Access-Control-Allow-Origin", origin)

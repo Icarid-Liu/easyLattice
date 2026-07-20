@@ -1,16 +1,20 @@
+import json
 import unittest
 from unittest.mock import patch
 
-from app.config import AppConfig, EstimatorConfig
+from app.config import AppConfig
 from app.parameter_search import (
     compression_noise_spec,
     factor_integer,
     is_prime,
     ntt_prime_candidates,
+    normalize_estimator_response,
     recommend_rlwe,
+    rotate_secret_candidates,
     run_sage_estimator,
     security_margin_bits,
     security_level_for_bits,
+    secret_validation_key,
     parse_request,
     sparse_ternary_spec,
     uniform_spec,
@@ -18,10 +22,207 @@ from app.parameter_search import (
     ring_dimensions,
 )
 from app.estimator_runner import estimator_distribution
+from app.estimator_contract import LWE_ATTACKS, structure_correction_metadata
 from app.compression_noise import compression_noise_pdf, compression_noise_profile
+from app.security_result import modulus_bits, selection_status, validation_result
+
+
+def estimator_attack(attack, bits, *, ok=True, profile="enhanced", variant="rlwr"):
+    result = {
+        "ok": ok,
+        "structure_correction": structure_correction_metadata(attack, profile, variant),
+    }
+    if ok:
+        result["rop_bits"] = bits
+    else:
+        result["message"] = "attack unavailable"
+    return result
+
+
+def estimator_mode(bits, *, profile="enhanced", variant="rlwr"):
+    structured_enhanced = (
+        profile == "enhanced"
+        and variant in {"rlwe", "mlwe", "rlwr", "mlwr"}
+    )
+    attacks = {
+        "usvp": estimator_attack("usvp", bits, profile=profile, variant=variant),
+        "dual_hybrid": estimator_attack(
+            "dual_hybrid",
+            bits - 10.0 if structured_enhanced else bits + 10.0,
+            profile=profile,
+            variant=variant,
+        ),
+        "bdd_hybrid": estimator_attack(
+            "bdd_hybrid",
+            bits + 5.0,
+            profile=profile,
+            variant=variant,
+        ),
+    }
+    complete = not structured_enhanced
+    return {
+        "ok": True,
+        "complete": complete,
+        "min_bits": bits,
+        "best_attack": "usvp",
+        "attacks": attacks,
+    }
+
+
+def estimator_success(
+    bits=140.0,
+    complete=False,
+    profile="enhanced",
+    commit="abc1234",
+    variant="rlwr",
+):
+    models = {
+        model: {
+            mode: estimator_mode(
+                bits - (1.0 if mode == "quantum" else 0.0),
+                profile=profile,
+                variant=variant,
+            )
+            for mode in ("classical", "quantum")
+        }
+        for model in ("matzov", "adps16")
+    }
+    if complete:
+        for family in models.values():
+            for mode in family.values():
+                mode["complete"] = True
+    return {
+        "ok": True,
+        "complete": complete,
+        "estimator_profile": profile,
+        "hard_problem_variant": variant,
+        "estimator_commit": commit,
+        "modes": models["adps16"],
+        "models": models,
+    }
+
+
+def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
+    failed_attacks = {
+        attack: estimator_attack(attack, bits, ok=False)
+        for attack in LWE_ATTACKS
+    }
+    failed_mode = {
+        "ok": False,
+        "complete": False,
+        "message": "no covered attack estimate completed",
+        "attacks": failed_attacks,
+    }
+    models = {
+        model: {
+            mode: dict(failed_mode)
+            for mode in ("classical", "quantum")
+        }
+        for model in ("matzov", "adps16")
+    }
+    models[model][mode] = estimator_mode(bits)
+    return {
+        "ok": False,
+        "complete": False,
+        "estimator_profile": "enhanced",
+        "hard_problem_variant": "rlwr",
+        "estimator_commit": "partial123",
+        "modes": models["adps16"],
+        "models": models,
+    }
+
+
+def small_validation_request(**overrides):
+    request = {
+        "hardProblemCategory": "lwe",
+        "hardProblemVariant": "rlwr",
+        "targetSecurity": 40,
+        "securityModel": "classical",
+        "redCostModel": "matzov",
+        "ringFamily": "power2",
+        "minN": 512,
+        "maxN": 512,
+        "minQBits": 9,
+        "maxQBits": 9,
+        "nttScalePower": 1,
+        "secretDistribution": "centered_binomial",
+        "errorDistribution": "3",
+        "useEstimator": True,
+    }
+    request.update(overrides)
+    return request
 
 
 class ParameterSearchTests(unittest.TestCase):
+    def test_modulus_bits_uses_ceil_log2(self):
+        self.assertEqual(modulus_bits(2048), 11)
+        self.assertEqual(modulus_bits(2049), 12)
+        self.assertEqual(modulus_bits(8192), 13)
+        with self.assertRaises(ValueError):
+            modulus_bits(1)
+
+    def test_validation_contract_distinguishes_all_states(self):
+        self.assertEqual(
+            validation_result(False, "enhanced", 0, 0, 0, 8, True)["status"],
+            "not_requested",
+        )
+        self.assertEqual(
+            validation_result(True, "enhanced", 2, 0, 0, 8, False)["status"],
+            "failed",
+        )
+        self.assertEqual(
+            validation_result(True, "enhanced", 2, 2, 2, 8, True)["status"],
+            "partial",
+        )
+        validated = validation_result(
+            True,
+            "enhanced",
+            8,
+            8,
+            8,
+            8,
+            True,
+            estimator_commit="abc1234",
+            message_codes=["validation_applied", "validation_applied"],
+        )
+        self.assertEqual(validated["status"], "validated")
+        self.assertEqual(validated["estimator_commit"], "abc1234")
+        self.assertEqual(validated["attempted_candidates"], 8)
+        self.assertEqual(validated["successful_candidates"], 8)
+        self.assertEqual(validated["covered_candidates"], 8)
+        self.assertEqual(validated["eligible_candidates"], 8)
+        self.assertEqual(validated["message_codes"], ["validation_applied"])
+        self.assertEqual(selection_status(True), "target_met")
+        self.assertEqual(selection_status(False), "target_unmet")
+
+    def test_validation_scheduler_rotates_secret_distributions(self):
+        def candidate(secret, rank):
+            return {
+                "rank": rank,
+                "distribution": {
+                    "secret": {"estimator": secret},
+                },
+            }
+
+        cbd1 = {"type": "centered_binomial", "eta": 1}
+        cbd2 = {"eta": 2, "type": "centered_binomial"}
+        sparse = {"type": "sparse_ternary_fixed_weight", "plus_weight": 64, "minus_weight": 64}
+        candidates = [
+            candidate(cbd1, 1),
+            candidate(cbd1, 2),
+            candidate(cbd2, 3),
+            candidate(sparse, 4),
+        ]
+
+        scheduled = rotate_secret_candidates(candidates, lambda item: item["rank"])
+
+        self.assertEqual(len({secret_validation_key(item) for item in scheduled[:3]}), 3)
+        self.assertEqual(scheduled[-1]["rank"], 2)
+        self.assertEqual(
+            secret_validation_key(candidate({"eta": 2, "type": "centered_binomial"}, 0)),
+            secret_validation_key(candidate({"type": "centered_binomial", "eta": 2}, 0)),
+        )
+
     def test_prime_and_factor_helpers(self):
         self.assertTrue(is_prime(12289))
         self.assertFalse(is_prime(12291))
@@ -42,6 +243,19 @@ class ParameterSearchTests(unittest.TestCase):
             self.assertEqual((q - 1) % 256, 0)
             self.assertTrue(is_prime(q))
 
+    def test_structured_prime_generation_enforces_minimum_modulus_bits(self):
+        primes = ntt_prime_candidates(
+            512,
+            max_q_bits=10,
+            ntt_scale_power=1,
+            min_q_bits=10,
+            limit=20,
+        )
+
+        self.assertIn(769, primes)
+        self.assertNotIn(257, primes)
+        self.assertTrue(all(modulus_bits(q) == 10 for q in primes))
+
     def test_default_recommendation_has_rlwe_shape(self):
         result = recommend_rlwe({"targetSecurity": 128, "securityModel": "classical"})
         candidate = result["recommendation"]
@@ -56,6 +270,29 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(candidate["visual_scores"]["security"]["max_bits"], 512)
         self.assertGreater(candidate["visual_scores"]["compactness"]["score"], 0)
         self.assertEqual(candidate["visual_scores"]["performance"]["score"], 1.0)
+        self.assertEqual(candidate["selection"]["status"], "target_met")
+        self.assertEqual(candidate["security"]["source_code"], "fast_screen")
+        self.assertIn("screen_scheme_not_bound", candidate["warning_codes"])
+        self.assertEqual(result["validation"]["status"], "not_requested")
+        self.assertEqual(result["validation"]["profile"], "enhanced")
+        self.assertEqual(result["next_step_code"], "bind_scheme_constraints")
+
+    def test_fast_screen_quantum_bits_honor_selected_reduction_model(self):
+        for red_cost_model in ("matzov", "adps16"):
+            with self.subTest(red_cost_model=red_cost_model):
+                result = recommend_rlwe(
+                    small_validation_request(
+                        useEstimator=False,
+                        securityModel="quantum",
+                        redCostModel=red_cost_model,
+                    )
+                )
+                candidate = result["recommendation"]
+
+                self.assertEqual(
+                    candidate["selection"]["selected_security_bits"],
+                    candidate["security"]["quantum_bits"],
+                )
 
     def test_ntt_unfriendly_mode_does_not_require_n_q_divisibility(self):
         primes = ntt_prime_candidates(512, 12, ntt_scale_power=6, min_q_bits=2, limit=8)
@@ -233,35 +470,363 @@ class ParameterSearchTests(unittest.TestCase):
 
         self.assertEqual(request.estimator_timeout, 300)
 
-    def test_remote_estimator_is_used_when_configured(self):
-        result = recommend_rlwe({
-            "targetSecurity": 128,
-            "securityModel": "classical",
-            "nttScalePower": 1,
-            "maxQBits": 24,
-            "distribution": "auto",
+    def test_run_sage_estimator_routes_profiles_and_structured_payload_fields(self):
+        candidate = {
+            "ring": {"n": 512},
+            "modulus": {"q": 257},
+            "distribution": {
+                "name": "CBD(2)",
+                "secret": {"estimator": {"type": "centered_binomial", "eta": 2}},
+                "error": {"estimator": {"type": "centered_binomial", "eta": 2}},
+            },
+        }
+        expected_profiles = {
+            "lwe": "standard",
+            "lwr": "standard",
+            "rlwe": "enhanced",
+            "mlwe": "enhanced",
+            "rlwr": "enhanced",
+            "mlwr": "enhanced",
+        }
+
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value={"ok": False, "code": "estimator_timeout", "message": "timeout"},
+        ) as run:
+            for variant, expected_profile in expected_profiles.items():
+                with self.subTest(variant=variant):
+                    request = parse_request({
+                        "hardProblemCategory": "lwe",
+                        "hardProblemVariant": variant,
+                    })
+                    run_sage_estimator(candidate, 16, config=AppConfig(), request=request)
+                    payload, timeout, _, profile = run.call_args.args
+                    self.assertEqual(timeout, 16)
+                    self.assertEqual(profile, expected_profile)
+                    self.assertEqual(payload["hard_problem_variant"], variant)
+                    self.assertEqual(payload["ring_degree"], 512)
+
+    def test_standard_lwe_can_still_report_complete_validation(self):
+        request = parse_request({
+            "hardProblemCategory": "lwe",
+            "hardProblemVariant": "lwe",
         })
-        candidate = result["recommendation"]
-        remote_result = {"ok": True, "modes": {"classical": {}, "quantum": {}}}
-        config = AppConfig(
-            estimator=EstimatorConfig(
-                remote_url="https://example-estimator.hf.space",
-                remote_timeout_seconds=240,
-                remote_poll_interval_seconds=1.0,
-            )
+        response = estimator_success(
+            complete=True,
+            profile="standard",
+            variant="lwe",
         )
 
-        with patch("app.parameter_search.load_config", return_value=config):
-            with patch("app.parameter_search.estimate_remotely", return_value=remote_result) as remote:
-                self.assertIs(run_sage_estimator(candidate, 16), remote_result)
+        normalized, _ = normalize_estimator_response(
+            response,
+            request=request,
+            expected_profile="standard",
+        )
 
-        remote.assert_called_once()
-        _, kwargs = remote.call_args
-        self.assertEqual(kwargs["base_url"], "https://example-estimator.hf.space")
-        self.assertEqual(kwargs["timeout_seconds"], 240)
-        self.assertEqual(kwargs["payload"]["problem"], "lwe")
-        self.assertEqual(kwargs["payload"]["n"], candidate["ring"]["n"])
-        self.assertEqual(kwargs["payload"]["q"], candidate["modulus"]["q"])
+        self.assertIsNotNone(normalized)
+        self.assertTrue(normalized["complete"])
+
+    def test_mocked_validation_rotates_secrets_and_reports_partial_coverage(self):
+        returned_bits = iter((141.0, 151.0))
+
+        def estimate(*args):
+            return estimator_success(bits=next(returned_bits))
+
+        with patch("app.parameter_search.run_estimator", side_effect=estimate) as run:
+            result = recommend_rlwe(
+                small_validation_request(validationCount=2, validationAttempts=2),
+                config=AppConfig(),
+            )
+
+        secret_descriptors = [call.args[0]["secret_distribution"]["estimator"] for call in run.call_args_list]
+        self.assertEqual(len({str(sorted(descriptor.items())) for descriptor in secret_descriptors}), 2)
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertEqual(result["validation"]["attempted_candidates"], 2)
+        self.assertEqual(result["validation"]["successful_candidates"], 2)
+        self.assertEqual(result["validation"]["covered_candidates"], 2)
+        self.assertEqual(result["validation"]["eligible_candidates"], 7)
+        self.assertEqual(result["validation"]["estimator_commit"], "abc1234")
+        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 151.0)
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
+        self.assertIn("validation_applied", result["recommendation"]["warning_codes"])
+
+    def test_partial_estimator_models_preserve_finite_mode_results(self):
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value=estimator_partial_single_mode(),
+        ):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertEqual(result["validation"]["attempted_candidates"], 1)
+        self.assertEqual(result["validation"]["successful_candidates"], 1)
+        self.assertEqual(result["validation"]["covered_candidates"], 1)
+        self.assertEqual(result["validation"]["estimator_commit"], "partial123")
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
+        self.assertEqual(result["recommendation"]["security"]["matzov_bits"], 149.0)
+        self.assertIsNone(result["recommendation"]["security"]["adps16_core_svp_bits"])
+        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 149.0)
+        self.assertIn("validation_partial_attacks", result["validation"]["message_codes"])
+        self.assertFalse(result["estimator"]["validated"][0]["ok"])
+
+    def test_partial_estimator_requires_requested_reduction_model(self):
+        for available_model, requested_model in (
+            ("adps16", "matzov"),
+            ("matzov", "adps16"),
+        ):
+            with self.subTest(available_model=available_model, requested_model=requested_model):
+                with patch(
+                    "app.parameter_search.run_estimator",
+                    return_value=estimator_partial_single_mode(model=available_model),
+                ):
+                    result = recommend_rlwe(
+                        small_validation_request(
+                            redCostModel=requested_model,
+                            validationCount=1,
+                            validationAttempts=1,
+                        ),
+                        config=AppConfig(),
+                    )
+
+                self.assertEqual(result["validation"]["status"], "failed")
+                self.assertEqual(result["validation"]["successful_candidates"], 0)
+                self.assertEqual(result["validation"]["covered_candidates"], 0)
+                self.assertIn(
+                    f"{requested_model}/classical",
+                    result["validation"]["message"],
+                )
+                self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+
+    def test_estimator_metadata_is_deep_sanitized_without_losing_finite_fields(self):
+        response = estimator_success(bits=151.0)
+        response["diagnostics"] = {
+            "finite": 7.25,
+            "nan": float("nan"),
+            "nested": [float("inf"), {"value": float("-inf"), "keep": 3}],
+        }
+        response["models"]["matzov"]["classical"]["attacks"]["usvp"][
+            "diagnostics"
+        ] = {
+            "finite": 11.5,
+            "nan": float("nan"),
+        }
+
+        with patch("app.parameter_search.run_estimator", return_value=response):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        entry = result["estimator"]["validated"][0]
+        attack = result["recommendation"]["security"]["attacks"]["matzov"][
+            "classical"
+        ]["attacks"]["usvp"]
+        self.assertEqual(entry["diagnostics"]["finite"], 7.25)
+        self.assertIsNone(entry["diagnostics"]["nan"])
+        self.assertEqual(
+            entry["diagnostics"]["nested"],
+            [None, {"value": None, "keep": 3}],
+        )
+        self.assertEqual(attack["diagnostics"]["finite"], 11.5)
+        self.assertIsNone(attack["diagnostics"]["nan"])
+        json.dumps(result, allow_nan=False)
+
+    def test_deep_and_oversized_estimator_diagnostics_are_bounded(self):
+        response = estimator_success()
+        deep: dict[str, object] = {"leaf": 1}
+        for _ in range(40):
+            deep = {"next": deep}
+        response["diagnostics"] = {
+            "deep": deep,
+            "many": list(range(5000)),
+        }
+
+        with patch("app.parameter_search.run_estimator", return_value=response):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=1, validationAttempts=1),
+                config=AppConfig(),
+            )
+
+        serialized = json.dumps(result, allow_nan=False)
+        self.assertIn("<maximum-depth-exceeded>", serialized)
+        self.assertIn("<maximum-items-exceeded>", serialized)
+        self.assertLess(len(serialized), 100_000)
+
+    def test_malformed_estimator_responses_fail_without_candidate_mutation(self):
+        empty_models = {
+            "ok": True,
+            "complete": True,
+            "estimator_profile": "enhanced",
+            "models": {},
+            "modes": {},
+        }
+        wrong_profile = estimator_success(profile="standard")
+        non_dict_models = estimator_success()
+        non_dict_models["models"] = []
+        non_dict_modes = estimator_success()
+        non_dict_modes["modes"] = []
+        invalid_top_complete = estimator_success()
+        invalid_top_complete["complete"] = "yes"
+        invalid_mode_complete = estimator_success()
+        invalid_mode_complete["models"]["matzov"]["classical"]["complete"] = 1
+        malformed_bits = estimator_success()
+        malformed_bits["models"]["matzov"]["classical"]["min_bits"] = "149"
+        nonfinite_bits = estimator_success()
+        nonfinite_bits["models"]["matzov"]["classical"]["min_bits"] = float("inf")
+        nan_bits = estimator_success()
+        nan_bits["models"]["matzov"]["classical"]["min_bits"] = float("nan")
+        huge_integer_bits = estimator_success()
+        huge_integer_bits["models"]["matzov"]["classical"]["min_bits"] = 10**10000
+        near_float_max_bits = estimator_success()
+        near_float_max_bits["models"]["matzov"]["classical"]["min_bits"] = 1e308
+        fake_dual_correction = estimator_success()
+        fake_dual_correction["models"]["matzov"]["classical"]["attacks"][
+            "dual_hybrid"
+        ]["structure_correction"] = structure_correction_metadata(
+            "bdd_hybrid",
+            "enhanced",
+            "rlwr",
+        )
+        missing_bdd_correction = estimator_success()
+        del missing_bdd_correction["models"]["matzov"]["classical"]["attacks"][
+            "bdd_hybrid"
+        ]["structure_correction"]
+        dual_selected_as_best = estimator_success()
+        dual_selected_as_best["models"]["matzov"]["classical"].update(
+            {
+                "min_bits": 130.0,
+                "best_attack": "dual_hybrid",
+            }
+        )
+        forged_structure_complete = estimator_success()
+        forged_structure_complete["complete"] = True
+        forged_structure_complete["models"]["matzov"]["classical"]["complete"] = True
+        missing_variant = estimator_success()
+        del missing_variant["hard_problem_variant"]
+        mismatched_variant = estimator_success()
+        mismatched_variant["hard_problem_variant"] = "lwe"
+        mismatched_parameter_variant = estimator_success()
+        mismatched_parameter_variant["parameters"] = {
+            "estimator_profile": "enhanced",
+            "hard_problem_variant": "lwe",
+        }
+        cases = {
+            "non_object": "not an estimator response",
+            "list_code": {
+                "ok": False,
+                "code": ["sage_not_found"],
+                "message": "malformed machine code",
+            },
+            "object_code": {
+                "ok": False,
+                "code": {"kind": "sage_not_found"},
+                "message": "malformed machine code",
+            },
+            "empty_models": empty_models,
+            "wrong_profile": wrong_profile,
+            "non_dict_models": non_dict_models,
+            "non_dict_modes": non_dict_modes,
+            "invalid_top_complete": invalid_top_complete,
+            "invalid_mode_complete": invalid_mode_complete,
+            "malformed_bits": malformed_bits,
+            "nonfinite_bits": nonfinite_bits,
+            "nan_bits": nan_bits,
+            "huge_integer_bits": huge_integer_bits,
+            "near_float_max_bits": near_float_max_bits,
+            "fake_dual_correction": fake_dual_correction,
+            "missing_bdd_correction": missing_bdd_correction,
+            "dual_selected_as_best": dual_selected_as_best,
+            "forged_structure_complete": forged_structure_complete,
+            "missing_variant": missing_variant,
+            "mismatched_variant": mismatched_variant,
+            "mismatched_parameter_variant": mismatched_parameter_variant,
+        }
+
+        for name, response in cases.items():
+            with self.subTest(name=name):
+                with patch("app.parameter_search.run_estimator", return_value=response):
+                    result = recommend_rlwe(
+                        small_validation_request(validationCount=1, validationAttempts=1),
+                        config=AppConfig(),
+                    )
+
+                self.assertEqual(result["validation"]["status"], "failed")
+                self.assertEqual(result["validation"]["attempted_candidates"], 1)
+                self.assertEqual(result["validation"]["successful_candidates"], 0)
+                self.assertEqual(result["validation"]["covered_candidates"], 0)
+                self.assertIn("Invalid estimator response", result["validation"]["message"])
+                self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+                self.assertEqual(
+                    result["estimator"]["validated"][0]["code"],
+                    "invalid_estimator_response",
+                )
+
+    def test_estimator_failure_keeps_fast_screen_and_preserves_unknown_message(self):
+        failures = [
+            {
+                "ok": False,
+                "code": "sage_not_found",
+                "message": "Sage is not installed.",
+            },
+            {
+                "ok": False,
+                "code": "future_estimator_failure",
+                "message": "opaque estimator failure",
+            },
+        ]
+        with patch("app.parameter_search.run_estimator", side_effect=failures):
+            result = recommend_rlwe(
+                small_validation_request(validationCount=2, validationAttempts=2),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(result["validation"]["status"], "failed")
+        self.assertEqual(result["validation"]["attempted_candidates"], 2)
+        self.assertEqual(result["validation"]["successful_candidates"], 0)
+        self.assertEqual(result["validation"]["covered_candidates"], 0)
+        self.assertEqual(result["validation"]["message"], "opaque estimator failure")
+        self.assertEqual(result["validation"]["messages"], ["opaque estimator failure"])
+        self.assertIn("validation_config_missing", result["validation"]["message_codes"])
+        self.assertEqual(result["recommendation"]["security"]["source_code"], "fast_screen")
+        self.assertIn("validation_config_missing", result["recommendation"]["warning_codes"])
+        self.assertEqual(result["estimator"]["validated"][1]["message"], "opaque estimator failure")
+
+    def test_complete_coverage_with_partial_attacks_is_partial(self):
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value=estimator_success(complete=False),
+        ) as run:
+            result = recommend_rlwe(
+                small_validation_request(validationCount=7, validationAttempts=80),
+                config=AppConfig(),
+            )
+
+        self.assertEqual(run.call_count, 7)
+        self.assertEqual(result["validation"]["covered_candidates"], 7)
+        self.assertEqual(result["validation"]["eligible_candidates"], 7)
+        self.assertEqual(result["validation"]["status"], "partial")
+        self.assertIn("validation_partial_attacks", result["validation"]["message_codes"])
+        self.assertIn("validation_partial_attacks", result["recommendation"]["warning_codes"])
+
+    def test_target_unmet_candidate_is_explicit_analytical_result(self):
+        result = recommend_rlwe({
+            "targetSecurity": 512,
+            "minN": 512,
+            "maxN": 512,
+            "minQBits": 9,
+            "maxQBits": 9,
+            "nttScalePower": 1,
+            "secretDistribution": "centered_binomial",
+            "errorDistribution": "centered_binomial",
+            "useEstimator": False,
+        })
+
+        self.assertEqual(result["recommendation"]["selection"]["status"], "target_unmet")
+        self.assertFalse(result["recommendation"]["selection"]["meets_target"])
+        self.assertEqual(result["validation"]["status"], "not_requested")
 
     def test_hard_problem_taxonomy_is_preserved(self):
         request = parse_request({
@@ -279,6 +844,17 @@ class ParameterSearchTests(unittest.TestCase):
 
         self.assertEqual(request.hard_problem_category, "lwe")
         self.assertEqual(request.hard_problem_variant, "rlwe")
+
+        for category, variant in (("ntru", "ring"), ("sis", "sis")):
+            with self.subTest(category=category):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^LWE parameter search requires hard_problem_category=lwe\\.$",
+                ):
+                    recommend_rlwe({
+                        "hardProblemCategory": category,
+                        "hardProblemVariant": variant,
+                    })
 
         with self.assertRaises(ValueError):
             parse_request({

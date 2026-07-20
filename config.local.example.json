@@ -2,6 +2,7 @@
   "estimator": {
     "sage_binary": "sage",
     "lattice_estimator_path": "/absolute/path/to/lattice-estimator",
+    "enhanced_lattice_estimator_path": "/absolute/path/to/enhanced-lattice-estimator",
     "default_timeout_seconds": 16,
     "per_attack_timeout_seconds": 12,
     "remote_url": null,

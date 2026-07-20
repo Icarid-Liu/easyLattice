@@ -23,6 +23,7 @@ class EstimatorConfig:
     remote_url: str | None = None
     remote_timeout_seconds: int = 240
     remote_poll_interval_seconds: float = 2.0
+    enhanced_lattice_estimator_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ def load_config() -> AppConfig:
         lattice_estimator_path=os.environ.get(
             "LATTICE_ESTIMATOR_PATH",
             estimator_raw.get("lattice_estimator_path"),
+        ),
+        enhanced_lattice_estimator_path=os.environ.get(
+            "ENHANCED_LATTICE_ESTIMATOR_PATH",
+            estimator_raw.get("enhanced_lattice_estimator_path"),
         ),
         default_timeout_seconds=int(
             env_value(
@@ -189,6 +194,10 @@ def public_config(config: AppConfig | None = None) -> dict[str, Any]:
     config = config or load_config()
     data = asdict(config)
     data["estimator"]["version"] = estimator_version(config.estimator)
+    data["estimator"]["profiles"] = {
+        profile: estimator_profile_data(config.estimator, profile)
+        for profile in ("standard", "enhanced")
+    }
     data["estimator"]["remote_configured"] = bool(data["estimator"].get("remote_url"))
     api_key_env = data["llm"]["api_key_env"]
     api_key_present = bool(os.environ.get(api_key_env))
@@ -203,14 +212,33 @@ def public_config(config: AppConfig | None = None) -> dict[str, Any]:
 
 def estimator_version(estimator: EstimatorConfig) -> str | None:
     root = estimator_source_root(estimator)
-    if root:
+    if root and (root / "estimator" / "__init__.py").is_file():
         return read_git_version(root) or read_static_estimator_version(root)
+    if root:
+        return None
     return read_installed_estimator_version()
+
+
+def estimator_profile_data(estimator: EstimatorConfig, profile: str) -> dict[str, Any]:
+    if profile == "standard":
+        root = estimator_source_root(estimator)
+    elif profile == "enhanced":
+        root = configured_estimator_source_root(estimator.enhanced_lattice_estimator_path)
+    else:
+        raise ValueError("estimator profile must be standard or enhanced.")
+
+    available = bool(root and (root / "estimator" / "__init__.py").is_file())
+    revision = (read_git_version(root) or read_static_estimator_version(root)) if available else None
+    return {
+        "available": available,
+        "path": str(root) if root else None,
+        "revision": revision,
+    }
 
 
 def estimator_source_root(estimator: EstimatorConfig) -> Path | None:
     if estimator.lattice_estimator_path:
-        return normalize_estimator_root(Path(estimator.lattice_estimator_path).expanduser())
+        return configured_estimator_source_root(estimator.lattice_estimator_path)
 
     spec = importlib.util.find_spec("estimator")
     if not spec or not spec.origin:
@@ -226,14 +254,46 @@ def estimator_source_root(estimator: EstimatorConfig) -> Path | None:
     return normalize_estimator_root(origin.parent)
 
 
+def configured_estimator_source_root(path: str | None) -> Path | None:
+    if not path:
+        return None
+    return normalize_estimator_root(Path(path).expanduser())
+
+
 def normalize_estimator_root(path: Path) -> Path:
-    if path.name == "estimator":
+    try:
+        path = path.resolve()
+    except OSError:
+        path = path.absolute()
+    if (path / "estimator" / "__init__.py").is_file():
+        return path
+    if path.name == "estimator" and (path / "__init__.py").is_file():
         return path.parent
     return path
 
 
 def read_git_version(root: Path) -> str | None:
+    root = normalize_estimator_root(root)
     if not root.exists():
+        return None
+
+    try:
+        top_level = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    if top_level.returncode != 0:
+        return None
+    try:
+        git_root = Path(top_level.stdout.strip()).resolve()
+    except OSError:
+        return None
+    if git_root != root:
         return None
 
     for command in (

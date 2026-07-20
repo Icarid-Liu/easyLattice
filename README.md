@@ -45,8 +45,95 @@ The same agent API also includes an initial NTRU selector:
   estimator moment approximations capped by the Gaussian calibration;
 - HPS-like and HRSS-like comparison candidates;
 - optional local NTRU validation with MATZOV and ADPS16 classical and quantum
-  cost models. A quantum NTRU target therefore requires Sage estimation rather
-  than the classical-only fast reference screen.
+  cost models. The power-of-two, HPS, and HRSS fast/reference screens contain
+  only classical bits, so those families require Sage for a finite quantum
+  estimate. SNTRUP presets include both classical and quantum reference bits
+  and can therefore return `target_met` for a quantum request with
+  `useEstimator=false`; their validation status remains `not_requested` until
+  estimator validation is enabled.
+
+Streamlined NTRU Prime is available through the following six fixed presets.
+The security selector uses the listed reference bits and NIST category, while
+estimator validation still follows the validation contract below.
+
+| Preset | n | q | Fixed weight | Classical bits | Quantum bits | NIST category |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sntrup653` | 653 | 4621 | 288 | 129 | 117 | 1 |
+| `sntrup761` | 761 | 4591 | 286 | 153 | 139 | 2 |
+| `sntrup857` | 857 | 5167 | 322 | 175 | 159 | 3 |
+| `sntrup953` | 953 | 6343 | 396 | 196 | 178 | 4 |
+| `sntrup1013` | 1013 | 7177 | 448 | 209 | 190 | 4 |
+| `sntrup1277` | 1277 | 7879 | 492 | 270 | 245 | 5 |
+
+For power-of-two NTRU security assessment, the selected ring choice maps
+directly to the estimator: `matrix` uses `ntru_type="matrix"`, while `ring`
+uses `ntru_type="circulant"`. HPS, HRSS, and NTRU Prime are always passed to
+the standard estimator as `circulant` NTRU instances, even if `matrix` was
+requested. This security-estimator classification does not replace the scheme
+ring used for correctness: NTRU Prime DFR products are reduced modulo the
+trinomial `x^n - x - 1`.
+
+## Estimator Validation
+
+easyLattice uses two estimator profiles:
+
+- LWE and LWR use the standard
+  [`malb/lattice-estimator`](https://github.com/malb/lattice-estimator) profile.
+- RLWE, MLWE, RLWR, and MLWR use the
+  [`identitymapping/enhanced_lattice-estimator`](https://github.com/identitymapping/enhanced_lattice-estimator)
+  profile. All three attacks run in that profile. At the pinned revision,
+  explicit ring-structure correction is available only for `bdd_hybrid`, which
+  receives `deg_ring` and `structure_leverage=true`, plus `Grover=true` in
+  quantum mode. Enhanced `dual_hybrid` remains useful output from the fork, but
+  it has no explicit ring-structure correction and is never labeled as such.
+- NTRU uses the standard estimator profile and its NTRU estimator.
+
+Every LWE-family validation evaluates `usvp`, `dual_hybrid`, and `bdd_hybrid`.
+Both profiles evaluate MATZOV and ADPS16 in classical and quantum modes:
+`MATZOV()`, `MATZOV(nn="quantum")`, `ADPS16()`, and
+`ADPS16(mode="quantum")`. The enhanced profile also runs `usvp`, but no
+ring-specific arguments are added to that attack. NTRU validation calls the
+standard estimator's complete NTRU attack dispatcher under the same four
+reduction-model/mode combinations.
+
+Each LWE attack result includes a JSON-safe `structure_correction` object with
+stable `requested`, `available`, `applied`, `code`, and `message` fields. For a
+structured enhanced request, `dual_hybrid` is reported with correction
+requested but unavailable and unapplied; `bdd_hybrid` is reported as applied;
+`usvp` is not applicable. The unavailable dual result remains visible for
+inspection but is excluded from the security-bit minimum. Because one requested
+attack lacks its required correction, structured validation is `partial` at
+the pinned revision even when every attack returns a finite cost, and
+`dual_hybrid` cannot certify the target by itself. The stable codes are
+`structure_correction_not_applicable`, `structure_correction_unavailable`, and
+`structure_correction_applied`.
+
+The two repositories both expose a top-level Python package named `estimator`.
+easyLattice therefore launches each profile in a separate Sage subprocess,
+sets an isolated `PYTHONPATH`, disables the user site, and verifies the imported
+package origin before estimating. Do not put both repositories into one Python
+import path and expect profile selection to be reliable.
+
+Estimator payloads and responses must carry an exact route. Accepted
+combinations are `standard` with LWE/LWR, `enhanced` with
+RLWE/MLWE/RLWR/MLWR, and `standard` with NTRU `matrix`/`ring`. Missing,
+unknown, or mismatched variants fail closed with `invalid_estimator_route`
+before attacks run. Remote response metadata is recursively bounded and made
+strictly JSON-safe; non-finite diagnostics become `null`, while non-finite
+security fields still fail validation. NTRU routes additionally require
+`matrix -> ntru_type=matrix` and all supported circulant variants
+(`ring`, HPS, HRSS, and NTRU Prime) to use `ntru_type=circulant`. Lone Unicode
+surrogates in untrusted metadata are escaped before UTF-8 serialization.
+
+Recommendation responses distinguish selection from validation:
+
+| Status | Meaning |
+| --- | --- |
+| `validated` | Every eligible candidate was successfully covered and every required attack/model/mode result was complete. |
+| `partial` | At least one estimate succeeded, but candidate coverage or required attack results were incomplete. Recommendation ranking is restricted to candidates with a usable estimator result; unvalidated candidates are not mixed back into that ranking. |
+| `failed` | Validation was requested, but no candidate produced a usable estimate. The recommendation falls back to the deterministic fast-screen/reference ranking and is explicitly identified by `validation.status="failed"`, its security `source_code`, and validation warnings/messages. |
+| `not_requested` | Estimator validation was not requested; values come from the deterministic screen/reference data. |
+| `target_unmet` | Selection status, not validation status: the returned best available candidate is below the requested security target. |
 
 ## Search Model
 
@@ -99,6 +186,14 @@ Open `http://127.0.0.1:8000`. The setup script creates `config.local.json`,
 detects local Sage/lattice-estimator paths where possible, and keeps optional
 LLM settings local. Manual startup is also supported with `python3 -m app.server`.
 
+Changing any relevant search or DFR input increments that workspace's input
+revision, marks its previous result stale, and disables actions such as JSON
+copying. Submitting the same unchanged inputs does not increment the revision,
+so the previous result may remain current and copyable while the replacement
+request is pending. Every submission still receives a new request token; only
+the latest active token at the current revision may update the UI, so an older
+response cannot overwrite it.
+
 The following representative prototype settings are examples only; use the
 local server for live output. They are not parameter certifications.
 
@@ -112,18 +207,24 @@ Controls used for the table:
 - NTT scale: `n/2 | q - 1`;
 - estimator validation: off.
 
-| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Status |
-| --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- |
-| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder |
-| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder |
+| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Estimator commit | Status |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- | --- |
+| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | not used | example |
+| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | not used | example |
+| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | taxonomy placeholder |
+| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | taxonomy placeholder |
+
+These rows use only the deterministic fast screen, so no estimator commit
+contributes to their values. When optional validation is enabled, the standard
+profile (LWE/LWR/NTRU) uses `malb/lattice-estimator` commit `3e48ef42`; the
+enhanced profile (RLWE/MLWE/RLWR/MLWR) uses
+`identitymapping/enhanced_lattice-estimator` commit `876b6617`.
 
 `SIS / SIS` and `SIS / MSIS` are visible in the current UI taxonomy, but a
 real SIS/MSIS selector is not implemented yet. Their rows reuse the current
@@ -137,11 +238,20 @@ following pre-error-correction coefficient models:
 - NTRU: `p0*(g*s)_n + p1*(f*e)_n + p2*(f*m)_n + p3*e`;
 - LWE: `((e1 + ec1)*s)_m + (e*r)_m + e2 + ec2`.
 
-The success boundary is `|E| <= Delta`. DFR is reported as `log2(DFR)` for a
-single coefficient and for the vector union bound. Explicit raw-probability
-fields remain in the API and copied JSON for external ECC calculations. The
-default working precision is 512 bits, and discrete Gaussians use a
-configurable 128-bit tail bound.
+The success boundary is `|E| <= Delta`; failure mass is summed only where
+`|E| > Delta`. DFR is reported as `log2(DFR)`. For ring-aware NTRU models, the
+single-coefficient value is the worst coefficient marginal. For the LWE model,
+all output coefficients use the same coefficient model. The vector value is
+the capped sum of coefficient failure probabilities, i.e. a union bound. It
+does not assume that output coefficients are independent. Explicit raw-
+probability fields remain in the API and copied JSON for external ECC
+calculations. The default working precision is 512 bits, and discrete
+Gaussians use a configurable 128-bit tail bound.
+
+NTRU products support cyclic reduction modulo `x^n - 1`, negacyclic reduction
+modulo `x^n + 1`, and NTRU Prime trinomial reduction modulo `x^n - x - 1`.
+The NTRU Prime result reports coefficient-marginal approximation warnings; its
+vector aggregation remains a union bound and makes no joint-independence claim.
 
 Inputs support common `lattice-estimator` distribution families, LWR floor
 compression, Kyber nearest-integer compression, and a custom finite PMF JSON
@@ -172,15 +282,25 @@ To create local configuration without starting the server:
 ./scripts/setup-local.sh
 ```
 
-To clone `malb/lattice-estimator` into `.external/lattice-estimator` when no
-local estimator path is detected:
+To detect both estimator profiles and clone either missing repository into
+`.external/lattice-estimator` and `.external/enhanced-lattice-estimator`:
 
 ```bash
 ./scripts/setup-local.sh --with-estimator
 ```
 
-Sage remains optional for fast-screen mode and is required only when
-`useEstimator=true`. Manual startup is also supported:
+When creating a new `config.local.json`, the script records both detected or
+cloned paths as `lattice_estimator_path` and
+`enhanced_lattice_estimator_path`. If the config already exists, add `--force`
+to regenerate it with those paths.
+
+Sage remains optional for fast-screen mode. Local estimator mode
+(`useEstimator=true` with no `estimator.remote_url`) requires Sage and the
+source path for the selected profile: the standard path for LWE/LWR/NTRU, or
+the enhanced path for RLWE/MLWE/RLWR/MLWR. Configure both source paths to
+support every variant locally. When `estimator.remote_url` is configured,
+estimator requests are sent to that worker, so the local server does not need
+Sage or either estimator source path. Manual startup is also supported:
 
 ```bash
 python3 -m app.server
@@ -202,11 +322,38 @@ cp config.local.example.json config.local.json
 
 `config.local.json` is ignored by git. Relevant settings include:
 
-- `estimator.sage_binary`: `sage` or an absolute Sage executable path;
-- `estimator.lattice_estimator_path`: absolute path to `malb/lattice-estimator`
-  when Sage cannot already import `estimator`;
-- `estimator.default_timeout_seconds`: request-level estimator timeout;
-- `estimator.remote_url`: optional Hugging Face estimator worker URL;
+```json
+{
+  "estimator": {
+    "sage_binary": "sage",
+    "lattice_estimator_path": "/path/to/malb/lattice-estimator",
+    "enhanced_lattice_estimator_path": "/path/to/identitymapping/enhanced-lattice-estimator",
+    "default_timeout_seconds": 16,
+    "per_attack_timeout_seconds": 12,
+    "remote_url": null,
+    "remote_timeout_seconds": 240,
+    "remote_poll_interval_seconds": 2
+  }
+}
+```
+
+Sage and both estimator source trees may be installed in any directories that
+are visible to the same runtime environment as easyLattice. Supply their paths
+through this file or the environment variables below; no particular parent
+directory is required.
+
+- `estimator.sage_binary`: `sage` or an absolute Sage executable path, required
+  only for local estimator mode;
+- `estimator.lattice_estimator_path`: absolute path to
+  `malb/lattice-estimator`, required for local standard-profile validation;
+- `estimator.enhanced_lattice_estimator_path`: absolute path to
+  `identitymapping/enhanced_lattice-estimator`, required for local structured
+  RLWE/MLWE/RLWR/MLWR validation;
+- `estimator.default_timeout_seconds`: local estimator request timeout;
+- `estimator.per_attack_timeout_seconds`: timeout applied to each estimator
+  attack before the outer local request timeout;
+- `estimator.remote_url`: optional estimator worker URL; when set, it bypasses
+  local Sage and both local source paths;
 - `estimator.remote_timeout_seconds`: remote-worker timeout, intended for
   180-300 second runs;
 - `estimator.remote_poll_interval_seconds`: remote-job polling interval;
@@ -219,8 +366,11 @@ cp config.local.example.json config.local.json
 Equivalent environment variables:
 
 ```bash
+EASYLATTICE_ESTIMATOR_TIMEOUT=240 \
+EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60 \
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
+ENHANCED_LATTICE_ESTIMATOR_PATH=/path/to/enhanced-lattice-estimator \
 python3 -m app.server
 ```
 
@@ -312,8 +462,31 @@ The worker accepts only validated estimator payloads and forwards them to
 
 ## Tests
 
+Run the complete Python and standalone browser-model test suites:
+
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -v
+node --test tests/js/app-model.test.cjs
+```
+
+Run compilation and syntax checks:
+
+```bash
+python3 -m py_compile app/*.py deploy/huggingface-estimator/space_app.py
+bash -n scripts/setup-local.sh
+node --check static/app-model.js
+node --check static/app.js
+node --check static/preview-data.js
+```
+
+The pinned enhanced-estimator checkout smoke is opt-in because it uses Git and
+network access. It verifies the exact pinned source tree but does not run Sage
+attacks:
+
+```bash
+EASYLATTICE_RUN_PINNED_ESTIMATOR_SMOKE=1 \
+python3 -m unittest discover -s tests -p 'test_estimator_runner.py' \
+  -k test_pinned_enhanced_estimator_checkout_has_expected_package_origin -v
 ```
 
 ## Scope
@@ -323,10 +496,13 @@ DFR calculator is not bound to a concrete encryption/signature encoding or an
 error-correction code, and it does not compute rejection-sampling times,
 smoothing-parameter conditions, or complete reduction-loss accounting.
 
-The `matzov` cost option means the classical ADPS16 Matzov-style dual-hybrid
-estimate. The `adps16` option reports the ADPS16 CoreSVP/uSVP estimate. With
-Sage validation enabled, easyLattice calls `lattice-estimator` and rounds bit
-counts downward to avoid overstating a lower bound.
+The `matzov` and `adps16` options select reduction-cost models, not individual
+attack aliases. For LWE-family validation, the selected model is applied to
+each of `usvp`, `dual_hybrid`, and `bdd_hybrid`; the estimator evaluates both
+MATZOV and ADPS16 in classical and quantum modes as described above. With
+estimator validation enabled, easyLattice ranks only attacks whose requested
+structure correction is covered and rounds selected bit counts downward to
+avoid overstating a lower bound.
 
 ## Planned Extension Points
 

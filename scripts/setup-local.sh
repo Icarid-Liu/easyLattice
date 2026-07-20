@@ -18,11 +18,11 @@ Options:
   --host HOST          Host for --start. Default: 127.0.0.1.
   --port PORT          Port for --start. Default: 8000.
   --force              Regenerate config.local.json even if it already exists.
-  --with-estimator     Clone malb/lattice-estimator into .external/ if missing.
+  --with-estimator     Clone standard and enhanced estimators into .external/ if missing.
   -h, --help           Show this help.
 
 Default setup is lightweight: it creates config.local.json, detects optional
-Sage/lattice-estimator if present, and keeps LLM disabled.
+Sage and both lattice-estimator profiles if present, and keeps LLM disabled.
 EOF
 }
 
@@ -97,14 +97,41 @@ if [[ -z "$ESTIMATOR_PATH" ]]; then
   done
 fi
 
-if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ESTIMATOR_PATH" ]]; then
+ENHANCED_ESTIMATOR_PATH="${ENHANCED_LATTICE_ESTIMATOR_PATH:-}"
+if [[ -z "$ENHANCED_ESTIMATOR_PATH" ]]; then
+  for candidate in \
+    "$ROOT_DIR/.external/enhanced-lattice-estimator" \
+    "$ROOT_DIR/.external/enhanced_lattice-estimator" \
+    "$ROOT_DIR/enhanced_lattice-estimator" \
+    "$ROOT_DIR/enhanced-lattice-estimator" \
+    "$ROOT_DIR/../enhanced_lattice-estimator" \
+    "$ROOT_DIR/../enhanced-lattice-estimator" \
+    "$HOME/enhanced_lattice-estimator" \
+    "$HOME/enhanced-lattice-estimator" \
+    "/opt/enhanced-lattice-estimator"; do
+    if [[ -d "$candidate/estimator" ]]; then
+      ENHANCED_ESTIMATOR_PATH="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ "$WITH_ESTIMATOR" -eq 1 && ( -z "$ESTIMATOR_PATH" || -z "$ENHANCED_ESTIMATOR_PATH" ) ]]; then
   if ! command -v git >/dev/null 2>&1; then
     echo "git is required for --with-estimator but was not found." >&2
     exit 1
   fi
   mkdir -p "$ROOT_DIR/.external"
+fi
+
+if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ESTIMATOR_PATH" ]]; then
   git clone --depth=1 https://github.com/malb/lattice-estimator.git "$ROOT_DIR/.external/lattice-estimator"
   ESTIMATOR_PATH="$ROOT_DIR/.external/lattice-estimator"
+fi
+
+if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ENHANCED_ESTIMATOR_PATH" ]]; then
+  git clone --depth=1 https://github.com/identitymapping/enhanced_lattice-estimator.git "$ROOT_DIR/.external/enhanced-lattice-estimator"
+  ENHANCED_ESTIMATOR_PATH="$ROOT_DIR/.external/enhanced-lattice-estimator"
 fi
 
 if [[ -f "$CONFIG_PATH" && "$FORCE_CONFIG" -ne 1 ]]; then
@@ -114,6 +141,7 @@ else
   EASYLATTICE_SETUP_CONFIG="$CONFIG_PATH" \
   EASYLATTICE_SETUP_SAGE="$SAGE_BIN" \
   EASYLATTICE_SETUP_ESTIMATOR="$ESTIMATOR_PATH" \
+  EASYLATTICE_SETUP_ENHANCED_ESTIMATOR="$ENHANCED_ESTIMATOR_PATH" \
   "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -121,10 +149,12 @@ from pathlib import Path
 
 config_path = Path(os.environ["EASYLATTICE_SETUP_CONFIG"])
 estimator_path = os.environ.get("EASYLATTICE_SETUP_ESTIMATOR") or None
+enhanced_estimator_path = os.environ.get("EASYLATTICE_SETUP_ENHANCED_ESTIMATOR") or None
 config = {
     "estimator": {
         "sage_binary": os.environ["EASYLATTICE_SETUP_SAGE"],
         "lattice_estimator_path": estimator_path,
+        "enhanced_lattice_estimator_path": enhanced_estimator_path,
         "default_timeout_seconds": 16,
         "per_attack_timeout_seconds": 12,
         "remote_url": None,
@@ -154,9 +184,14 @@ fi
 echo "Python: $PYTHON_BIN"
 echo "Sage: $SAGE_BIN"
 if [[ -n "$ESTIMATOR_PATH" ]]; then
-  echo "lattice-estimator: $ESTIMATOR_PATH"
+  echo "Standard lattice-estimator: $ESTIMATOR_PATH"
 else
-  echo "lattice-estimator: not configured; fast-screen mode still works."
+  echo "Standard lattice-estimator: not configured; fast-screen mode still works."
+fi
+if [[ -n "$ENHANCED_ESTIMATOR_PATH" ]]; then
+  echo "Enhanced lattice-estimator: $ENHANCED_ESTIMATOR_PATH"
+else
+  echo "Enhanced lattice-estimator: not configured; enhanced validation is unavailable."
 fi
 
 "$PYTHON_BIN" - <<'PY'
