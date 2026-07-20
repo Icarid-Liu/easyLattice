@@ -207,18 +207,24 @@ Controls used for the table:
 - NTT scale: `n/2 | q - 1`;
 - estimator validation: off.
 
-| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Status |
-| --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- |
-| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | example |
-| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | example |
-| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | example |
-| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder |
-| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | taxonomy placeholder |
+| Public UI option | n | q | NTT condition | Secret distribution | Error distribution | LWR p | Classical bits | Estimator commit | Status |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: | --- | --- |
+| NTRU / matrix | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | not used | example |
+| NTRU / ring | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2) + ST(l0=4,l1=0) + ST(l0=4,l1=0)` | same | - | 128.0 | not used | example |
+| LWE / LWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / RLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / LWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| LWE / RLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| LWE / MLWE | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | example |
+| LWE / MLWR | 512 | 257 | `n/2 \| q - 1` | `ST(l0=4,l1=2)` | `CompressNoise(p=3)` | 3 | 528.3 | not used | example |
+| SIS / SIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | taxonomy placeholder |
+| SIS / MSIS | 512 | 257 | `n/2 \| q - 1` | `ST(l0=1,l1=0)` | `ST(l0=3,l1=2)` | - | 129.6 | not used | taxonomy placeholder |
+
+These rows use only the deterministic fast screen, so no estimator commit
+contributes to their values. When optional validation is enabled, the standard
+profile (LWE/LWR/NTRU) uses `malb/lattice-estimator` commit `3e48ef42`; the
+enhanced profile (RLWE/MLWE/RLWR/MLWR) uses
+`identitymapping/enhanced_lattice-estimator` commit `876b6617`.
 
 `SIS / SIS` and `SIS / MSIS` are visible in the current UI taxonomy, but a
 real SIS/MSIS selector is not implemented yet. Their rows reuse the current
@@ -321,10 +327,20 @@ cp config.local.example.json config.local.json
   "estimator": {
     "sage_binary": "sage",
     "lattice_estimator_path": "/path/to/malb/lattice-estimator",
-    "enhanced_lattice_estimator_path": "/path/to/identitymapping/enhanced-lattice-estimator"
+    "enhanced_lattice_estimator_path": "/path/to/identitymapping/enhanced-lattice-estimator",
+    "default_timeout_seconds": 16,
+    "per_attack_timeout_seconds": 12,
+    "remote_url": null,
+    "remote_timeout_seconds": 240,
+    "remote_poll_interval_seconds": 2
   }
 }
 ```
+
+Sage and both estimator source trees may be installed in any directories that
+are visible to the same runtime environment as easyLattice. Supply their paths
+through this file or the environment variables below; no particular parent
+directory is required.
 
 - `estimator.sage_binary`: `sage` or an absolute Sage executable path, required
   only for local estimator mode;
@@ -334,6 +350,8 @@ cp config.local.example.json config.local.json
   `identitymapping/enhanced_lattice-estimator`, required for local structured
   RLWE/MLWE/RLWR/MLWR validation;
 - `estimator.default_timeout_seconds`: local estimator request timeout;
+- `estimator.per_attack_timeout_seconds`: timeout applied to each estimator
+  attack before the outer local request timeout;
 - `estimator.remote_url`: optional estimator worker URL; when set, it bypasses
   local Sage and both local source paths;
 - `estimator.remote_timeout_seconds`: remote-worker timeout, intended for
@@ -348,6 +366,8 @@ cp config.local.example.json config.local.json
 Equivalent environment variables:
 
 ```bash
+EASYLATTICE_ESTIMATOR_TIMEOUT=240 \
+EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60 \
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
 ENHANCED_LATTICE_ESTIMATOR_PATH=/path/to/enhanced-lattice-estimator \
@@ -442,8 +462,31 @@ The worker accepts only validated estimator payloads and forwards them to
 
 ## Tests
 
+Run the complete Python and standalone browser-model test suites:
+
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -v
+node --test tests/js/app-model.test.cjs
+```
+
+Run compilation and syntax checks:
+
+```bash
+python3 -m py_compile app/*.py deploy/huggingface-estimator/space_app.py
+bash -n scripts/setup-local.sh
+node --check static/app-model.js
+node --check static/app.js
+node --check static/preview-data.js
+```
+
+The pinned enhanced-estimator checkout smoke is opt-in because it uses Git and
+network access. It verifies the exact pinned source tree but does not run Sage
+attacks:
+
+```bash
+EASYLATTICE_RUN_PINNED_ESTIMATOR_SMOKE=1 \
+python3 -m unittest discover -s tests -p 'test_estimator_runner.py' \
+  -k test_pinned_enhanced_estimator_checkout_has_expected_package_origin -v
 ```
 
 ## Scope
