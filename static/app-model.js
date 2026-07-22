@@ -16,6 +16,8 @@
     { value: "ntru_prime", label: "Streamlined NTRU Prime: x^n - x - 1" },
   ];
   const FORCED_RING_FAMILIES = new Set(["hps", "hrss", "ntru_prime"]);
+  const STANDARD_ESTIMATOR_VARIANTS = new Set(["lwe", "lwr"]);
+  const ENHANCED_ESTIMATOR_VARIANTS = new Set(["rlwe", "mlwe", "rlwr", "mlwr"]);
 
   function ringOptions(category) {
     return (category === "ntru" ? NTRU_RINGS : LWE_RINGS).map((item) => ({ ...item }));
@@ -28,6 +30,25 @@
       variant: matrixAllowed ? variant : category === "ntru" ? "ring" : variant,
       matrixAllowed,
     };
+  }
+
+  function requiredEstimatorProfile(category, variant) {
+    if (category === "ntru" && (variant === "matrix" || variant === "ring")) {
+      return "standard";
+    }
+    if (category !== "lwe") return null;
+    if (STANDARD_ESTIMATOR_VARIANTS.has(variant)) return "standard";
+    if (ENHANCED_ESTIMATOR_VARIANTS.has(variant)) return "enhanced";
+    return null;
+  }
+
+  function jobStagePresentation(stage) {
+    const stages = {
+      candidate_search: { key: "jobStageCandidateSearch", estimatorRunning: false },
+      estimator_running: { key: "jobStageEstimatorRunning", estimatorRunning: true },
+      finalizing: { key: "jobStageFinalizing", estimatorRunning: false },
+    };
+    return stages[stage] ? { ...stages[stage] } : null;
   }
 
   function resultPresentation(validationStatus, selectionStatus) {
@@ -152,6 +173,8 @@
   return {
     ringOptions,
     normalizeRingSelection,
+    requiredEstimatorProfile,
+    jobStagePresentation,
     resultPresentation,
     compactRows,
     nextRevision,

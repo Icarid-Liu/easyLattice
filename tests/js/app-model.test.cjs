@@ -8,12 +8,42 @@ test("exports the exact browser model API", () => {
     "acceptsResponse",
     "compactRows",
     "createRequestState",
+    "jobStagePresentation",
     "nextRevision",
     "normalizeRingSelection",
+    "requiredEstimatorProfile",
     "resultPresentation",
     "ringOptions",
   ]);
   assert.equal(globalThis.EasyLatticeModel, undefined);
+});
+
+test("estimator profiles follow the selected hard problem", () => {
+  assert.equal(model.requiredEstimatorProfile("ntru", "ring"), "standard");
+  assert.equal(model.requiredEstimatorProfile("ntru", "matrix"), "standard");
+  assert.equal(model.requiredEstimatorProfile("lwe", "lwe"), "standard");
+  assert.equal(model.requiredEstimatorProfile("lwe", "lwr"), "standard");
+  for (const variant of ["rlwe", "mlwe", "rlwr", "mlwr"]) {
+    assert.equal(model.requiredEstimatorProfile("lwe", variant), "enhanced");
+  }
+  assert.equal(model.requiredEstimatorProfile("lwe", "sis"), null);
+  assert.equal(model.requiredEstimatorProfile("unknown", "rlwe"), null);
+});
+
+test("job stages map to stable translation keys", () => {
+  assert.deepEqual(model.jobStagePresentation("candidate_search"), {
+    key: "jobStageCandidateSearch",
+    estimatorRunning: false,
+  });
+  assert.deepEqual(model.jobStagePresentation("estimator_running"), {
+    key: "jobStageEstimatorRunning",
+    estimatorRunning: true,
+  });
+  assert.deepEqual(model.jobStagePresentation("finalizing"), {
+    key: "jobStageFinalizing",
+    estimatorRunning: false,
+  });
+  assert.equal(model.jobStagePresentation("unknown"), null);
 });
 
 test("ring options follow the hard problem", () => {
