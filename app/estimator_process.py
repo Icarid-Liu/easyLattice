@@ -1,56 +1,27 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .config import AppConfig, EstimatorConfig, configured_estimator_source_root
 from .estimator_contract import EstimatorRouteError, validate_estimator_route
+from .job_progress import report_progress
 from .json_safety import reject_json_constant, sanitize_json_value
+from .local_profile import (
+    ESTIMATOR_ORIGIN_PREFLIGHT,
+    LocalProfileError,
+    git_metadata,
+    prepare_estimator_runtime,
+    run_origin_preflight,
+)
 from .remote_estimator import estimate_remotely
 
 
 STANDARD_LWE_VARIANTS = {"lwe", "lwr"}
 ENHANCED_LWE_VARIANTS = {"rlwe", "mlwe", "rlwr", "mlwr"}
 NTRU_VARIANTS = {"matrix", "ring"}
-
-ESTIMATOR_ORIGIN_PREFLIGHT = r"""
-import json
-import sys
-from pathlib import Path
-
-expected_root = Path(sys.argv[1]).resolve()
-application_root = Path(sys.argv[2]).resolve()
-if str(application_root) not in sys.path:
-    sys.path.insert(0, str(application_root))
-
-try:
-    import estimator
-
-    origin = Path(estimator.__file__).resolve()
-    actual_root = origin.parent.parent if origin.parent.name == "estimator" else origin.parent
-    actual_root = actual_root.resolve()
-except Exception as exc:
-    result = {
-        "ok": False,
-        "code": "estimator_origin_mismatch",
-        "message": f"Could not import the selected estimator: {type(exc).__name__}: {exc}",
-    }
-else:
-    if actual_root == expected_root:
-        result = {"ok": True}
-    else:
-        result = {
-            "ok": False,
-            "code": "estimator_origin_mismatch",
-            "message": f"Estimator imported from {actual_root}, expected {expected_root}.",
-        }
-
-print(json.dumps(result))
-"""
 
 
 def estimator_profile_for(category: str, variant: str) -> str:
@@ -92,6 +63,7 @@ def run_estimator(
     except EstimatorRouteError as exc:
         return exc.as_result()
     if config.estimator.remote_url:
+        report_progress("estimator_running", profile, None)
         return estimate_remotely(
             base_url=config.estimator.remote_url,
             payload=normalized,
@@ -107,75 +79,48 @@ def run_local_estimator(
     config: EstimatorConfig,
     profile: str,
 ) -> dict[str, Any]:
-    sage = shutil.which(config.sage_binary) or (
-        config.sage_binary if Path(config.sage_binary).exists() else None
-    )
-    if not sage:
-        return {
-            "ok": False,
-            "code": "sage_not_found",
-            "message": f"Sage binary '{config.sage_binary}' not found.",
-        }
-
-    root = estimator_root(config, profile)
-    if not root:
-        return {
-            "ok": False,
-            "code": f"{profile}_estimator_not_configured",
-            "message": f"{profile} estimator path is not configured.",
-        }
-
-    root_path = Path(root)
-    if not (root_path / "estimator" / "__init__.py").is_file():
-        return {
-            "ok": False,
-            "code": "estimator_path_invalid",
-            "message": f"{profile} estimator path does not contain estimator/__init__.py.",
-        }
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(root_path)
-    env["PYTHONNOUSERSITE"] = "1"
-    env["EASYLATTICE_ESTIMATOR_ROOT"] = str(root_path)
-    runner = Path(__file__).with_name("estimator_runner.py")
-    application_root = Path(__file__).resolve().parents[1]
     try:
-        preflight = subprocess.run(
-            [
-                sage,
-                "-python",
-                "-c",
-                ESTIMATOR_ORIGIN_PREFLIGHT,
-                str(root_path),
-                str(application_root),
-            ],
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-        if preflight.returncode != 0:
-            return process_failed(preflight)
-        preflight_data = decode_json_object(preflight.stdout)
-        if preflight_data is None:
+        runtime = prepare_estimator_runtime(config, profile)
+    except LocalProfileError as exc:
+        if exc.code == "estimator_path_invalid" and estimator_root(config, profile) is None:
             return {
                 "ok": False,
-                "code": "estimator_process_failed",
-                "message": "Estimator origin preflight returned invalid output.",
+                "code": f"{profile}_estimator_not_configured",
+                "message": f"{profile} estimator path is not configured.",
             }
+        return exc.as_result()
+
+    metadata = git_metadata(runtime.root)
+    report_progress("estimator_running", profile, metadata.commit)
+    runner = Path(__file__).with_name("estimator_runner.py")
+    try:
+        preflight_data = run_origin_preflight(runtime, timeout)
         if not preflight_data.get("ok"):
             return preflight_data
 
         completed = subprocess.run(
-            [sage, "-python", str(runner)],
+            [runtime.sage_binary, "-python", str(runner)],
             input=json.dumps(payload, allow_nan=False),
             text=True,
             capture_output=True,
             timeout=timeout,
             check=False,
-            env=env,
+            env=runtime.environment,
         )
+    except LocalProfileError as exc:
+        if exc.code == "estimator_preflight_timeout":
+            return {
+                "ok": False,
+                "code": "estimator_timeout",
+                "message": f"Estimator timed out after {timeout}s.",
+            }
+        if exc.code == "estimator_preflight_failed":
+            return {
+                "ok": False,
+                "code": "estimator_process_failed",
+                "message": exc.message,
+            }
+        return exc.as_result()
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
