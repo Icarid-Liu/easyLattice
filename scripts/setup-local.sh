@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_PATH="$ROOT_DIR/config.local.json"
+CONFIG_PATH="${EASYLATTICE_CONFIG:-$ROOT_DIR/config.local.json}"
 HOST_VALUE="127.0.0.1"
 PORT_VALUE="8000"
 START_SERVER=0
@@ -135,7 +135,7 @@ if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ENHANCED_ESTIMATOR_PATH" ]]; then
 fi
 
 if [[ -f "$CONFIG_PATH" && "$FORCE_CONFIG" -ne 1 ]]; then
-  echo "Keeping existing config.local.json. Use --force to regenerate it."
+  echo "Keeping existing configuration: $CONFIG_PATH. Use --force to regenerate it."
 else
   EASYLATTICE_SETUP_ROOT="$ROOT_DIR" \
   EASYLATTICE_SETUP_CONFIG="$CONFIG_PATH" \
@@ -178,7 +178,7 @@ config = {
 }
 config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 PY
-  echo "Wrote config.local.json."
+  echo "Wrote configuration: $CONFIG_PATH"
 fi
 
 echo "Python: $PYTHON_BIN"
@@ -186,12 +186,12 @@ echo "Sage: $SAGE_BIN"
 if [[ -n "$ESTIMATOR_PATH" ]]; then
   echo "Standard lattice-estimator: $ESTIMATOR_PATH"
 else
-  echo "Standard lattice-estimator: not configured; fast-screen mode still works."
+  echo "Standard lattice-estimator: not configured; add its path in the browser."
 fi
 if [[ -n "$ENHANCED_ESTIMATOR_PATH" ]]; then
   echo "Enhanced lattice-estimator: $ENHANCED_ESTIMATOR_PATH"
 else
-  echo "Enhanced lattice-estimator: not configured; enhanced validation is unavailable."
+  echo "Enhanced lattice-estimator: not configured; optionally add its path in the browser."
 fi
 
 "$PYTHON_BIN" - <<'PY'
@@ -204,8 +204,9 @@ PY
 
 if [[ "$START_SERVER" -eq 1 ]]; then
   echo "Starting easyLattice at http://$HOST_VALUE:$PORT_VALUE"
+  echo "Estimator paths can be configured or modified in the browser."
   exec env HOST="$HOST_VALUE" PORT="$PORT_VALUE" "$PYTHON_BIN" -m app.server
 fi
 
 echo "Setup complete. Start the app with:"
-echo "  HOST=$HOST_VALUE PORT=$PORT_VALUE $PYTHON_BIN -m app.server"
+echo "  ./start.sh --host $HOST_VALUE --port $PORT_VALUE"
