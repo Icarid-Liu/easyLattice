@@ -25,12 +25,20 @@ const errorDistributionLabel = document.querySelector("#error-distribution-label
 const languageSelect = document.querySelector("#language-select");
 const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
+const estimatorProfileControl = document.querySelector("#estimator-profile-control");
+const estimatorProfileDialog = document.querySelector("#estimator-profile-dialog");
+const estimatorProfileForm = document.querySelector("#estimator-profile-form");
+const modifyEstimatorProfile = document.querySelector("#modify-estimator-profile");
+const saveEstimatorProfileButton = document.querySelector("#save-estimator-profile");
 const searchSubmit = form.querySelector('button[type="submit"]');
 const dfrSubmit = dfrForm.querySelector('button[type="submit"]');
 
 const searchState = EasyLatticeModel.createRequestState();
 const dfrState = EasyLatticeModel.createRequestState();
 let publicConfig = null;
+let estimatorProfileState = null;
+let estimatorProfileDialogMessage = null;
+let estimatorProfileDialogOpener = null;
 let currentLanguage = supportedLanguage(localStorage.getItem("easyLatticeLanguage") || navigator.language || "en");
 let activeWorkspace = "search";
 let renderedDfrType = null;
@@ -131,6 +139,18 @@ const ESTIMATOR_CONFIG_ERROR_CODES = new Set([
   "estimator_path_invalid",
   "estimator_origin_mismatch",
 ]);
+const PROFILE_ERROR_KEYS = {
+  local_configuration_disabled: "profileErrorLocalOnly",
+  invalid_profile_request: "profileErrorInvalidRequest",
+  sage_not_found: "profileErrorSageNotFound",
+  sage_not_executable: "profileErrorSageNotExecutable",
+  estimator_path_invalid: "profileErrorPathInvalid",
+  estimator_origin_mismatch: "profileErrorOriginMismatch",
+  estimator_preflight_timeout: "profileErrorPreflightTimeout",
+  estimator_preflight_failed: "profileErrorPreflightFailed",
+  estimator_profile_not_configured: "profileErrorNotConfigured",
+  config_write_failed: "profileErrorWriteFailed",
+};
 const SECURITY_LEGACY_MESSAGE_CODES = {
   "This is an RLWE/LWE fast screen. It is not bound to a concrete scheme, so decryption error or rejection sampling times are not computed.": "screen_scheme_not_bound",
   "This is an NTRU lattice-hardness prototype. It is not yet bound to scheme-specific correctness, encoding, failure-rate, or key-invertibility checks.": "screen_scheme_not_bound",
@@ -195,6 +215,9 @@ const TRANSLATIONS = {
     generatingSubtitle: "Generating NTT-friendly moduli and screening security estimates.",
     estimatorSubtitle: "Running lattice-estimator validation. This can take several minutes.",
     estimatorWaiting: "Estimator job {status}. Waiting for Sage/lattice-estimator.",
+    jobStageCandidateSearch: "Searching and ranking candidate parameters.",
+    jobStageEstimatorRunning: "Running {profile} estimator{commit}.",
+    jobStageFinalizing: "Normalizing estimator results and preparing the recommendation.",
     estimatorStatusQueued: "Queued",
     estimatorStatusRunning: "Running",
     estimatorStatusSucceeded: "Completed",
@@ -282,6 +305,34 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm: auth missing · {provider} / {model}",
     configLlmDisabled: "llm: disabled",
     configEstimator: "estimator: {parts}",
+    modifyConfiguration: "Modify configuration",
+    estimatorProfileTitle: "Local estimator configuration",
+    estimatorProfileDescription: "Paths are validated in isolated Sage processes and saved only on this machine.",
+    sageExecutable: "Sage executable",
+    standardEstimatorPath: "Standard estimator path",
+    enhancedEstimatorPathOptional: "Enhanced estimator path (optional)",
+    close: "Close",
+    cancel: "Cancel",
+    saveConfiguration: "Save configuration",
+    savingConfiguration: "Validating paths and saving configuration...",
+    standardProfileRequired: "Standard estimator is required for local validation.",
+    enhancedProfileRequired: "Enhanced estimator is required for the selected problem.",
+    standardProfileReady: "Standard: ready · {path} · {commit}{dirty}",
+    enhancedProfileReady: "Enhanced: ready · {path} · {commit}{dirty}",
+    standardProfileMissing: "Standard: not configured",
+    enhancedProfileMissing: "Enhanced: optional, not configured",
+    dirtyWorktree: " · modified worktree",
+    profileSaved: "Estimator configuration saved.",
+    profileErrorLocalOnly: "Configuration can only be changed from the local application page.",
+    profileErrorInvalidRequest: "Check the three configuration fields and try again.",
+    profileErrorSageNotFound: "The Sage executable was not found in the server environment.",
+    profileErrorSageNotExecutable: "The selected Sage path is not executable.",
+    profileErrorPathInvalid: "The estimator path must contain estimator/__init__.py.",
+    profileErrorOriginMismatch: "Sage imported estimator from a different path.",
+    profileErrorPreflightTimeout: "Estimator import validation timed out.",
+    profileErrorPreflightFailed: "Estimator import validation failed.",
+    profileErrorNotConfigured: "The required estimator profile is not configured.",
+    profileErrorWriteFailed: "The local configuration file could not be updated.",
     workspace: "Workspace",
     parameterSearch: "Parameter search",
     decryptionFailure: "Decryption failure",
@@ -403,6 +454,9 @@ const TRANSLATIONS = {
     generatingSubtitle: "正在生成适合 NTT 的模数并筛选安全估计。",
     estimatorSubtitle: "正在运行 lattice-estimator 验证，可能需要几分钟。",
     estimatorWaiting: "Estimator 任务 {status}，等待 Sage/lattice-estimator。",
+    jobStageCandidateSearch: "正在搜索并排序候选参数。",
+    jobStageEstimatorRunning: "正在运行 {profile} estimator{commit}。",
+    jobStageFinalizing: "正在整理 estimator 结果并生成推荐。",
     estimatorStatusQueued: "排队中",
     estimatorStatusRunning: "运行中",
     estimatorStatusSucceeded: "已完成",
@@ -490,6 +544,34 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm：缺少认证 · {provider} / {model}",
     configLlmDisabled: "llm：已禁用",
     configEstimator: "estimator：{parts}",
+    modifyConfiguration: "修改配置",
+    estimatorProfileTitle: "Estimator 本地配置",
+    estimatorProfileDescription: "路径会在隔离的 Sage 进程中验证，并且只保存在本机。",
+    sageExecutable: "Sage 可执行文件",
+    standardEstimatorPath: "Standard estimator 路径",
+    enhancedEstimatorPathOptional: "Enhanced estimator 路径（可选）",
+    close: "关闭",
+    cancel: "取消",
+    saveConfiguration: "保存配置",
+    savingConfiguration: "正在验证路径并保存配置...",
+    standardProfileRequired: "本地验证必须配置 Standard estimator。",
+    enhancedProfileRequired: "当前困难问题必须配置 Enhanced estimator。",
+    standardProfileReady: "Standard：可用 · {path} · {commit}{dirty}",
+    enhancedProfileReady: "Enhanced：可用 · {path} · {commit}{dirty}",
+    standardProfileMissing: "Standard：未配置",
+    enhancedProfileMissing: "Enhanced：可选，未配置",
+    dirtyWorktree: " · 工作区有修改",
+    profileSaved: "Estimator 配置已保存。",
+    profileErrorLocalOnly: "只能从本地应用页面修改配置。",
+    profileErrorInvalidRequest: "请检查三个配置字段后重试。",
+    profileErrorSageNotFound: "服务运行环境中找不到 Sage 可执行文件。",
+    profileErrorSageNotExecutable: "所选 Sage 路径不可执行。",
+    profileErrorPathInvalid: "Estimator 路径必须包含 estimator/__init__.py。",
+    profileErrorOriginMismatch: "Sage 从其它路径导入了 estimator。",
+    profileErrorPreflightTimeout: "Estimator 导入验证超时。",
+    profileErrorPreflightFailed: "Estimator 导入验证失败。",
+    profileErrorNotConfigured: "尚未配置所需的 estimator profile。",
+    profileErrorWriteFailed: "无法更新本地配置文件。",
     workspace: "工作区",
     parameterSearch: "参数搜索",
     decryptionFailure: "解密错误率",
@@ -632,6 +714,8 @@ languageSelect.addEventListener("change", () => {
   updateNttScaleLabel();
   syncDfrForm();
   if (publicConfig) renderPublicConfig(publicConfig);
+  if (estimatorProfileState) renderEstimatorProfile(estimatorProfileState);
+  renderEstimatorProfileMessage();
   syncWorkspace();
 });
 document.querySelectorAll('input[name="hardProblem"]').forEach((input) => {
@@ -654,6 +738,14 @@ dfrDistributionEditors.addEventListener("change", (event) => {
     renderDfrDistributionEditors();
   }
 });
+modifyEstimatorProfile?.addEventListener("click", () => openEstimatorProfileDialog());
+estimatorProfileForm?.addEventListener("submit", saveEstimatorProfile);
+document.querySelector("#close-estimator-profile")?.addEventListener("click", closeEstimatorProfileDialog);
+document.querySelector("#cancel-estimator-profile")?.addEventListener("click", closeEstimatorProfileDialog);
+estimatorProfileDialog?.addEventListener("close", () => {
+  estimatorProfileDialogOpener?.focus();
+  estimatorProfileDialogOpener = null;
+});
 form.addEventListener("input", markSearchInputsChanged);
 dfrForm.addEventListener("input", markDfrInputsChanged);
 
@@ -662,6 +754,35 @@ async function requestRecommendation() {
   syncPreviewSecurityForm();
   const data = new FormData(form);
   const useEstimator = form.elements.namedItem("useEstimator")?.checked === true;
+  const hardProblem = selectedHardProblem(data);
+  const ringSelection = EasyLatticeModel.normalizeRingSelection(
+    hardProblem.category,
+    String(data.get("ringFamily") || "power2"),
+    hardProblem.variant,
+  );
+  const secretDistribution = secretDistributionSelect.value;
+  const errorDistribution = errorDistributionSelect.value;
+  const payload = {
+    problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
+    hardProblemCategory: hardProblem.category,
+    hardProblemVariant: ringSelection.variant,
+    ringFamily: ringSelection.family,
+    targetSecurity: Number(form.elements.namedItem("targetSecurity")?.value),
+    securityModel: form.elements.namedItem("securityModel")?.value,
+    redCostModel: form.elements.namedItem("redCostModel")?.value,
+    nttScalePower: Number(nttScale.value),
+    minQBits: Number(form.elements.namedItem("minQBits")?.value),
+    maxQBits: Number(form.elements.namedItem("maxQBits")?.value),
+    distribution: secretDistribution,
+    secretDistribution,
+    errorDistribution,
+    useEstimator,
+    estimatorTimeout: useEstimator ? 240 : undefined,
+    intent: String(form.elements.namedItem("intent")?.value || ""),
+    useLLM: useLLM.checked,
+  };
+  if (!PREVIEW_MODE && !ensureEstimatorProfile(payload)) return;
+
   const request = searchState.begin({
     subtitleKey: useEstimator ? "estimatorSubtitle" : "generatingSubtitle",
     subtitleValues: {},
@@ -670,34 +791,6 @@ async function requestRecommendation() {
   if (activeWorkspace === "search") renderSearchState();
 
   try {
-    const hardProblem = selectedHardProblem(data);
-    const ringSelection = EasyLatticeModel.normalizeRingSelection(
-      hardProblem.category,
-      String(data.get("ringFamily") || "power2"),
-      hardProblem.variant,
-    );
-    const secretDistribution = secretDistributionSelect.value;
-    const errorDistribution = errorDistributionSelect.value;
-    const payload = {
-      problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
-      hardProblemCategory: hardProblem.category,
-      hardProblemVariant: ringSelection.variant,
-      ringFamily: ringSelection.family,
-      targetSecurity: Number(form.elements.namedItem("targetSecurity")?.value),
-      securityModel: form.elements.namedItem("securityModel")?.value,
-      redCostModel: form.elements.namedItem("redCostModel")?.value,
-      nttScalePower: Number(nttScale.value),
-      minQBits: Number(form.elements.namedItem("minQBits")?.value),
-      maxQBits: Number(form.elements.namedItem("maxQBits")?.value),
-      distribution: secretDistribution,
-      secretDistribution,
-      errorDistribution,
-      useEstimator,
-      estimatorTimeout: useEstimator ? 240 : undefined,
-      intent: String(form.elements.namedItem("intent")?.value || ""),
-      useLLM: useLLM.checked,
-    };
-
     const result = PREVIEW_MODE
       ? previewRecommendation(payload)
       : useEstimator
@@ -705,6 +798,14 @@ async function requestRecommendation() {
         : await postJson("/api/agent/recommend", payload);
     searchState.acceptResult(request, result);
   } catch (error) {
+    if (error.code === "estimator_profile_not_configured") {
+      try {
+        await loadEstimatorProfile();
+      } catch (_profileError) {
+        estimatorProfileState = null;
+      }
+      openEstimatorProfileDialog({ requiredProfile: error.requiredProfile });
+    }
     searchState.acceptError(request, {
       titleKey: "requestFailed",
       message: error.message,
@@ -878,10 +979,7 @@ async function requestRecommendationJob(payload, request) {
     if (job.status === "failed") {
       throw errorWithFallback(job.error, "errorEstimatorJobFailed");
     }
-    if (searchState.update(request, {
-      subtitleKey: "estimatorWaiting",
-      subtitleValues: { statusCode: job.status },
-    }) && activeWorkspace === "search") {
+    if (searchState.update(request, estimatorJobMetadata(job)) && activeWorkspace === "search") {
       renderSearchState();
     }
     await sleep(2000);
@@ -898,7 +996,7 @@ async function postJson(path, payload, options = {}) {
   });
   const result = await response.json();
   if (!response.ok && !(options.accepted && response.status === 202)) {
-    throw errorWithFallback(result.error, "errorRequestFailed");
+    throw apiError(result, "errorRequestFailed");
   }
   return result;
 }
@@ -907,9 +1005,16 @@ async function getJson(path) {
   const response = await fetch(apiUrl(path), { headers: apiHeaders() });
   const result = await response.json();
   if (!response.ok) {
-    throw errorWithFallback(result.error, "errorRequestFailed");
+    throw apiError(result, "errorRequestFailed");
   }
   return result;
+}
+
+function apiError(result, fallbackKey) {
+  const error = errorWithFallback(result?.error, fallbackKey);
+  error.code = result?.code || null;
+  error.requiredProfile = result?.required_profile || null;
+  return error;
 }
 
 function localizedError(translationKey) {
@@ -1228,6 +1333,24 @@ function estimatorJobStatusText(status) {
     failed: "estimatorStatusFailed",
   };
   return status == null ? null : t(keys[status] || status);
+}
+
+function estimatorJobMetadata(job) {
+  const stage = EasyLatticeModel.jobStagePresentation(job.stage);
+  if (!stage) {
+    return {
+      subtitleKey: "estimatorWaiting",
+      subtitleValues: { statusCode: job.status },
+    };
+  }
+  const profile = job.estimator_profile === "enhanced" ? "Enhanced" : "Standard";
+  return {
+    subtitleKey: stage.key,
+    subtitleValues: {
+      profile,
+      commit: job.estimator_commit ? ` @ ${job.estimator_commit}` : "",
+    },
+  };
 }
 
 function localizeErrorMessage(message) {
@@ -1923,6 +2046,17 @@ async function initializeApp() {
     return;
   }
   await loadPublicConfig();
+  try {
+    await loadEstimatorProfile();
+    if (
+      !publicConfig?.estimator?.remote_configured
+      && estimatorProfileState?.profiles?.standard?.available !== true
+    ) {
+      openEstimatorProfileDialog({ requiredProfile: "standard" });
+    }
+  } catch (_error) {
+    estimatorProfileState = null;
+  }
   await requestRecommendation();
 }
 
@@ -1964,4 +2098,127 @@ function renderPublicConfig(config) {
   document.querySelector("#config-estimator").textContent = t("configEstimator", {
     parts: estimatorParts.join(" · "),
   });
+}
+
+async function loadEstimatorProfile() {
+  if (!hasLiveApi()) return null;
+  estimatorProfileState = await getJson("/api/config/estimator-profile");
+  renderEstimatorProfile(estimatorProfileState);
+  return estimatorProfileState;
+}
+
+function renderEstimatorProfile(profile) {
+  if (!estimatorProfileControl || !hasLiveApi()) return;
+  estimatorProfileControl.classList.remove("hidden");
+  const standard = profile?.profiles?.standard || {};
+  const enhanced = profile?.profiles?.enhanced || {};
+  document.querySelector("#standard-profile-summary").textContent = profileSummary(
+    "standard",
+    standard,
+  );
+  document.querySelector("#enhanced-profile-summary").textContent = profileSummary(
+    "enhanced",
+    enhanced,
+  );
+}
+
+function profileSummary(profileName, profile) {
+  if (!profile?.available) {
+    return t(profileName === "standard" ? "standardProfileMissing" : "enhancedProfileMissing");
+  }
+  const commit = profile.commit || t("notAvailable");
+  return t(profileName === "standard" ? "standardProfileReady" : "enhancedProfileReady", {
+    path: profile.path || t("notAvailable"),
+    commit,
+    dirty: profile.dirty ? t("dirtyWorktree") : "",
+  });
+}
+
+function openEstimatorProfileDialog(options = {}) {
+  if (!estimatorProfileDialog || !hasLiveApi()) return;
+  estimatorProfileDialogOpener = document.activeElement;
+  estimatorProfileForm.elements.namedItem("sage_binary").value =
+    estimatorProfileState?.sage_binary || publicConfig?.estimator?.sage_binary || "sage";
+  estimatorProfileForm.elements.namedItem("lattice_estimator_path").value =
+    estimatorProfileState?.profiles?.standard?.path || "";
+  estimatorProfileForm.elements.namedItem("enhanced_lattice_estimator_path").value =
+    estimatorProfileState?.profiles?.enhanced?.path || "";
+
+  const requiredProfile = options.requiredProfile;
+  estimatorProfileDialogMessage = requiredProfile
+    ? {
+        key: requiredProfile === "enhanced" ? "enhancedProfileRequired" : "standardProfileRequired",
+        type: "error",
+      }
+    : null;
+  renderEstimatorProfileMessage();
+  if (!estimatorProfileDialog.open) estimatorProfileDialog.showModal();
+  setTimeout(() => {
+    const selector = requiredProfile === "enhanced"
+      ? "#enhanced-estimator-path"
+      : requiredProfile === "standard"
+        ? "#standard-estimator-path"
+        : "#sage-binary";
+    estimatorProfileDialog.querySelector(selector)?.focus();
+  }, 0);
+}
+
+function closeEstimatorProfileDialog() {
+  if (estimatorProfileDialog?.open) estimatorProfileDialog.close();
+}
+
+async function saveEstimatorProfile(event) {
+  event.preventDefault();
+  if (!estimatorProfileForm || saveEstimatorProfileButton?.disabled) return;
+  const data = new FormData(estimatorProfileForm);
+  const enhancedPath = String(data.get("enhanced_lattice_estimator_path") || "").trim();
+  const payload = {
+    sage_binary: String(data.get("sage_binary") || "").trim(),
+    lattice_estimator_path: String(data.get("lattice_estimator_path") || "").trim(),
+    enhanced_lattice_estimator_path: enhancedPath || null,
+  };
+  saveEstimatorProfileButton.disabled = true;
+  estimatorProfileDialogMessage = { key: "savingConfiguration", type: "" };
+  renderEstimatorProfileMessage();
+  try {
+    estimatorProfileState = await postJson("/api/config/estimator-profile", payload);
+    renderEstimatorProfile(estimatorProfileState);
+    await loadPublicConfig();
+    estimatorProfileDialogMessage = { key: "profileSaved", type: "success" };
+    renderEstimatorProfileMessage();
+    closeEstimatorProfileDialog();
+  } catch (error) {
+    estimatorProfileDialogMessage = {
+      key: PROFILE_ERROR_KEYS[error.code] || null,
+      fallback: error.message,
+      type: "error",
+    };
+    renderEstimatorProfileMessage();
+  } finally {
+    saveEstimatorProfileButton.disabled = false;
+  }
+}
+
+function renderEstimatorProfileMessage() {
+  const node = document.querySelector("#estimator-profile-message");
+  if (!node) return;
+  const message = estimatorProfileDialogMessage;
+  node.className = `profile-message${message?.type ? ` ${message.type}` : ""}`;
+  node.textContent = message?.key ? t(message.key) : message?.fallback || "";
+}
+
+function localProfileAvailable(profileName) {
+  if (publicConfig?.estimator?.remote_configured) return true;
+  return estimatorProfileState?.profiles?.[profileName]?.available === true;
+}
+
+function ensureEstimatorProfile(payload) {
+  if (!payload.useEstimator || publicConfig?.estimator?.remote_configured) return true;
+  const required = EasyLatticeModel.requiredEstimatorProfile(
+    payload.hardProblemCategory,
+    payload.hardProblemVariant,
+  );
+  if (required == null || localProfileAvailable(required)) return true;
+  openEstimatorProfileDialog({ requiredProfile: required });
+  return false;
 }

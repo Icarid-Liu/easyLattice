@@ -27,6 +27,13 @@
           <small id="config-agent"></small>
           <small id="config-llm"></small>
           <small id="config-estimator"></small>
+          <div id="estimator-profile-control" class="estimator-profile-control hidden">
+            <small id="standard-profile-summary"></small>
+            <small id="enhanced-profile-summary"></small>
+            <button id="modify-estimator-profile" type="button" class="secondary-button compact-button" data-i18n="modifyConfiguration">
+              Modify configuration
+            </button>
+          </div>
         </div>
 
         <fieldset class="workspace-mode">
@@ -330,6 +337,37 @@
 
       </main>
     </div>
+
+    <dialog id="estimator-profile-dialog" class="estimator-profile-dialog" aria-labelledby="estimator-profile-title">
+      <form id="estimator-profile-form" class="estimator-profile-form">
+        <div class="dialog-heading">
+          <div>
+            <h2 id="estimator-profile-title" data-i18n="estimatorProfileTitle">Local estimator configuration</h2>
+            <p data-i18n="estimatorProfileDescription">Paths are validated in isolated Sage processes and saved only on this machine.</p>
+          </div>
+          <button id="close-estimator-profile" type="button" class="secondary-button compact-button" data-i18n="close">Close</button>
+        </div>
+
+        <label for="sage-binary">
+          <span data-i18n="sageExecutable">Sage executable</span>
+          <input id="sage-binary" name="sage_binary" type="text" value="sage" maxlength="4096" autocomplete="off" required />
+        </label>
+        <label for="standard-estimator-path">
+          <span data-i18n="standardEstimatorPath">Standard estimator path</span>
+          <input id="standard-estimator-path" name="lattice_estimator_path" type="text" maxlength="4096" autocomplete="off" required />
+        </label>
+        <label for="enhanced-estimator-path">
+          <span data-i18n="enhancedEstimatorPathOptional">Enhanced estimator path (optional)</span>
+          <input id="enhanced-estimator-path" name="enhanced_lattice_estimator_path" type="text" maxlength="4096" autocomplete="off" />
+        </label>
+
+        <p id="estimator-profile-message" class="profile-message" role="status" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="cancel-estimator-profile" type="button" class="secondary-button" data-i18n="cancel">Cancel</button>
+          <button id="save-estimator-profile" type="submit" class="primary-button" data-i18n="saveConfiguration">Save configuration</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="preview-data.js"></script>
     <script src="app-model.js"></script>

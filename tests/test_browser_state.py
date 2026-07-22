@@ -136,9 +136,37 @@ FETCH_HOOK = r"""
       version: null,
     },
   };
+  const missingStandard = new URLSearchParams(location.search).get("missing-profile") === "1";
+  const missingEnhanced = new URLSearchParams(location.search).get("missing-enhanced") === "1";
+  window.__profileResponse = {
+    ok: true,
+    sage_binary: "sage",
+    remote_configured: false,
+    profiles: {
+      standard: {
+        available: !missingStandard,
+        path: missingStandard ? null : "/opt/lattice-estimator",
+        commit: missingStandard ? null : "3e48ef42",
+        dirty: false,
+        error_code: missingStandard ? "estimator_profile_not_configured" : null,
+        message: null,
+      },
+      enhanced: {
+        available: !missingStandard && !missingEnhanced,
+        path: missingStandard || missingEnhanced ? null : "/opt/enhanced-lattice-estimator",
+        commit: missingStandard || missingEnhanced ? null : "876b6617",
+        dirty: false,
+        error_code: missingStandard || missingEnhanced ? "estimator_profile_not_configured" : null,
+        message: null,
+      },
+    },
+  };
   window.__requests = [];
   window.fetch = (url, options = {}) => {
     if (String(url) === "/api/config/public") return Promise.resolve(response(config));
+    if (String(url) === "/api/config/estimator-profile" && (!options.method || options.method === "GET")) {
+      return Promise.resolve(response(window.__profileResponse));
+    }
     return new Promise((resolve, reject) => {
       const entry = {
         url: String(url),
@@ -925,6 +953,159 @@ class BrowserRequestStateTests(unittest.TestCase):
                 "level": "低于 NIST-I",
                 "status": "未达到目标",
                 "target": "128 比特（量子）",
+            },
+        )
+
+    def test_estimator_profile_first_run_save_and_modify(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("?missing-profile=1")
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && document.querySelector('#estimator-profile-dialog')?.open"
+            " && window.__requests.length === 1"
+        )
+
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  focus: document.activeElement?.id,
+                  standardRequired: document.querySelector('#standard-estimator-path')?.required,
+                  enhancedRequired: document.querySelector('#enhanced-estimator-path')?.required,
+                  modifyHidden: document.querySelector('#modify-estimator-profile')?.hidden,
+                }))()"""
+            ),
+            {
+                "focus": "standard-estimator-path",
+                "standardRequired": True,
+                "enhancedRequired": False,
+                "modifyHidden": False,
+            },
+        )
+        self.assert_viewport_layout(1440, 1000)
+        self.set_viewport(390, 844, mobile=True)
+        self.assert_viewport_layout(390, 844)
+        self.set_viewport(1440, 1000, mobile=False)
+
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('#sage-binary').value = '/usr/local/bin/sage';
+              document.querySelector('#standard-estimator-path').value = '/srv/lattice-estimator';
+              document.querySelector('#enhanced-estimator-path').value = '';
+              document.querySelector('#estimator-profile-form').requestSubmit();
+            })()"""
+        )
+        self.page.wait_for(
+            "window.__requests.length === 2"
+            " && window.__requests[1].url === '/api/config/estimator-profile'"
+        )
+        self.assertEqual(
+            self.page.evaluate("window.__requests[1].body"),
+            {
+                "sage_binary": "/usr/local/bin/sage",
+                "lattice_estimator_path": "/srv/lattice-estimator",
+                "enhanced_lattice_estimator_path": None,
+            },
+        )
+
+        self.page.evaluate(
+            """window.__profileResponse = {
+              ok: true,
+              sage_binary: '/usr/local/bin/sage',
+              remote_configured: false,
+              profiles: {
+                standard: {
+                  available: true,
+                  path: '/srv/lattice-estimator',
+                  commit: '01234567',
+                  dirty: false,
+                  error_code: null,
+                  message: null,
+                },
+                enhanced: {
+                  available: false,
+                  path: null,
+                  commit: null,
+                  dirty: null,
+                  error_code: 'estimator_profile_not_configured',
+                  message: null,
+                },
+              },
+            }"""
+        )
+        self.page.evaluate("window.__requests[1].resolveResult(window.__profileResponse)")
+        self.page.wait_for(
+            "!document.querySelector('#estimator-profile-dialog').open"
+            " && document.querySelector('#standard-profile-summary').textContent.includes('01234567')"
+        )
+
+        self.page.evaluate("document.querySelector('#modify-estimator-profile').click()")
+        self.page.wait_for("document.querySelector('#estimator-profile-dialog').open")
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  sage: document.querySelector('#sage-binary').value,
+                  standard: document.querySelector('#standard-estimator-path').value,
+                  enhanced: document.querySelector('#enhanced-estimator-path').value,
+                }))()"""
+            ),
+            {
+                "sage": "/usr/local/bin/sage",
+                "standard": "/srv/lattice-estimator",
+                "enhanced": "",
+            },
+        )
+
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'zh';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  title: document.querySelector('#estimator-profile-title').textContent,
+                  save: document.querySelector('#save-estimator-profile').textContent,
+                  modify: document.querySelector('#modify-estimator-profile').textContent,
+                }))()"""
+            ),
+            {"title": "Estimator 本地配置", "save": "保存配置", "modify": "修改配置"},
+        )
+
+    def test_missing_enhanced_profile_blocks_estimator_job(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("?missing-enhanced=1")
+        self.page.wait_for("document.readyState === 'complete' && window.__requests.length === 1")
+        self.page.evaluate(
+            """window.__requests[0].resolveResult({
+              recommendation: {},
+              request: { target_security: 128 },
+              validation: { status: 'not_requested' },
+              alternatives: [],
+              search: {},
+            })"""
+        )
+        self.page.wait_for("!searchState.snapshot().inFlight")
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('#use-estimator').checked = true;
+              document.querySelector('#parameter-form').requestSubmit();
+            })()"""
+        )
+        self.page.wait_for("document.querySelector('#estimator-profile-dialog')?.open")
+
+        self.assertEqual(self.page.evaluate("window.__requests.length"), 1)
+        self.assertEqual(
+            self.page.evaluate(
+                """(() => ({
+                  focus: document.activeElement?.id,
+                  message: document.querySelector('#estimator-profile-message').textContent,
+                }))()"""
+            ),
+            {
+                "focus": "enhanced-estimator-path",
+                "message": "Enhanced estimator is required for the selected problem.",
             },
         )
 
