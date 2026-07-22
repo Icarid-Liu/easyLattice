@@ -179,12 +179,13 @@ the local service:
 ```bash
 git clone https://github.com/Icarid-Liu/easyLattice.git
 cd easyLattice
-./scripts/setup-local.sh --start
+./start.sh
 ```
 
-Open `http://127.0.0.1:8000`. The setup script creates `config.local.json`,
-detects local Sage/lattice-estimator paths where possible, and keeps optional
-LLM settings local. Manual startup is also supported with `python3 -m app.server`.
+The browser opens automatically when the platform supports it. The first-run
+form stores Sage and estimator paths in the local `config.local.json`; the
+public preview remains read-only. Manual startup is also supported with
+`python3 -m app.server`.
 
 Changing any relevant search or DFR input increments that workspace's input
 revision, marks its previous result stale, and disables actions such as JSON
@@ -269,12 +270,28 @@ correction-probability script.
 For a fresh local checkout, the simplest start is:
 
 ```bash
-./scripts/setup-local.sh --start
+./start.sh
 ```
 
-The script creates `config.local.json`, keeps LLM disabled, detects optional
-Sage/lattice-estimator paths, runs a small smoke test, and starts the service
-at `http://127.0.0.1:8000`.
+The script prepares `config.local.json`, runs a small smoke test, starts the
+service at `http://127.0.0.1:8000`, and opens that address in a browser when the
+platform supports it. Useful variants are:
+
+```bash
+./start.sh --no-open
+./start.sh --host 127.0.0.1 --port 8003
+./start.sh --with-estimator
+```
+
+`--no-open` leaves browser launch to the user. `--with-estimator` retains the
+setup helper's opt-in behavior of cloning missing Standard and Enhanced
+repositories under `.external/`.
+
+On first live use, the browser opens an estimator profile form. Sage defaults
+to `sage`; the Standard estimator path is required, while the Enhanced path is
+optional. Saving validates each configured repository in its own Sage
+subprocess and writes the values to `config.local.json`. The **Modify
+configuration** button remains available after setup.
 
 To create local configuration without starting the server:
 
@@ -294,13 +311,17 @@ cloned paths as `lattice_estimator_path` and
 `enhanced_lattice_estimator_path`. If the config already exists, add `--force`
 to regenerate it with those paths.
 
-Sage remains optional for fast-screen mode. Local estimator mode
-(`useEstimator=true` with no `estimator.remote_url`) requires Sage and the
-source path for the selected profile: the standard path for LWE/LWR/NTRU, or
-the enhanced path for RLWE/MLWE/RLWR/MLWR. Configure both source paths to
-support every variant locally. When `estimator.remote_url` is configured,
-estimator requests are sent to that worker, so the local server does not need
-Sage or either estimator source path. Manual startup is also supported:
+Sage remains optional for fast-screen mode. Local estimator routing is exact:
+
+```text
+Standard: LWE, LWR, NTRU
+Enhanced: RLWE, MLWE, RLWR, MLWR
+```
+
+With `useEstimator=true` and no `estimator.remote_url`, Sage and the selected
+profile must be available. Configure both source paths to support every variant
+locally. A configured remote worker bypasses local Sage and estimator-path
+checks. Manual startup is also supported:
 
 ```bash
 python3 -m app.server
@@ -314,7 +335,11 @@ PORT=8010 python3 -m app.server
 
 ## Local Configuration
 
-The setup script is preferred. For manual configuration, copy the example:
+The browser form is the preferred way to configure a local estimator profile.
+It persists only the Sage, Standard, and Enhanced path fields; existing timeout,
+remote-worker, LLM, and script settings in `config.local.json` are preserved.
+Use **Modify configuration** to reopen the form. For manual configuration, copy
+the example:
 
 ```bash
 cp config.local.example.json config.local.json
@@ -341,6 +366,14 @@ Sage and both estimator source trees may be installed in any directories that
 are visible to the same runtime environment as easyLattice. Supply their paths
 through this file or the environment variables below; no particular parent
 directory is required.
+
+Paths must use the syntax visible inside the environment that runs the server.
+For example, a server running in WSL should use Linux paths such as
+`/usr/local/bin/sage` and `/home/user/lattice-estimator`, not Windows UNC paths
+such as `\\wsl.localhost\Ubuntu-22.04\usr\local\bin\sage`. Standard and
+Enhanced both expose a package named `estimator`, so easyLattice never imports
+them together: each configured profile is preflighted and executed in a
+separate, isolated Sage subprocess.
 
 - `estimator.sage_binary`: `sage` or an absolute Sage executable path, required
   only for local estimator mode;
@@ -417,7 +450,38 @@ GET /api/agent/jobs/{job_id}
 ```
 
 The browser uses those endpoints when `useEstimator=true`, so 3-5 minute Sage
-or lattice-estimator runs do not depend on one long HTTP request.
+or lattice-estimator runs do not depend on one long HTTP request. Job `status`
+remains `queued`, `running`, `succeeded`, or `failed`; the separate `stage`
+field reports `candidate_search`, `estimator_running`, or `finalizing`:
+
+```json
+{
+  "status": "running",
+  "stage": "estimator_running",
+  "estimator_profile": "enhanced",
+  "estimator_commit": "876b6617"
+}
+```
+
+Before creating a local estimator job, the server verifies that its exact
+profile is available. A missing profile returns HTTP 409 with code
+`estimator_profile_not_configured` and a `required_profile` field instead of
+silently falling back to the fast screen. A configured remote worker bypasses
+this local preflight.
+
+The browser-managed local profile API is:
+
+```text
+GET  /api/config/estimator-profile
+POST /api/config/estimator-profile
+```
+
+GET returns the editable Sage value plus separate Standard and Enhanced status,
+path, eight-character commit, dirty-state, and error fields. POST accepts only
+the three profile fields and persists them to `config.local.json` (or the file
+selected by `EASYLATTICE_CONFIG`). Profile writes are allowed only when the
+server is bound to a loopback address and the JSON request is same-origin; the
+writable endpoint does not grant permissive CORS access.
 
 The synchronous decryption-failure endpoint is:
 
@@ -469,11 +533,19 @@ python3 -m unittest discover -s tests -v
 node --test tests/js/app-model.test.cjs
 ```
 
+Run the focused profile, progress, and startup tests:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_local_profile.py' -v
+python3 -m unittest discover -s tests -p 'test_job_progress.py' -v
+python3 -m unittest discover -s tests -p 'test_start_script.py' -v
+```
+
 Run compilation and syntax checks:
 
 ```bash
 python3 -m py_compile app/*.py deploy/huggingface-estimator/space_app.py
-bash -n scripts/setup-local.sh
+bash -n start.sh scripts/setup-local.sh
 node --check static/app-model.js
 node --check static/app.js
 node --check static/preview-data.js
