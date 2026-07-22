@@ -4,15 +4,628 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
+import app.agent as agent_module
 import app.server as server_module
+from app.config import AppConfig, EstimatorConfig, LLMConfig
+from app.job_progress import progress_reporting, report_progress
+from app.local_profile import LocalProfileError
 from app.server import EasyLatticeHandler
 
 
 class ServerTests(unittest.TestCase):
+    @contextmanager
+    def running_server(self, host="127.0.0.1"):
+        server = ThreadingHTTPServer((host, 0), EasyLatticeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def request_json(self, server, method, path, body=None, headers=None):
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+        encoded = body
+        if isinstance(body, dict):
+            encoded = json.dumps(body).encode("utf-8")
+        try:
+            connection.request(method, path, body=encoded, headers=headers or {})
+            response = connection.getresponse()
+            raw = response.read().decode("utf-8")
+            return response, json.loads(raw) if raw else None
+        finally:
+            connection.close()
+
+    def profile_headers(self, server, **overrides):
+        host = f"127.0.0.1:{server.server_address[1]}"
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": f"http://{host}",
+        }
+        headers.update(overrides)
+        return headers
+
+    def clear_jobs(self):
+        with server_module.jobs_lock:
+            server_module.jobs.clear()
+
+    def test_profile_origin_helpers_require_loopback_and_exact_http_origin(self):
+        for host in ("127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"):
+            with self.subTest(host=host):
+                self.assertTrue(server_module.is_loopback_host(host))
+        for host in ("0.0.0.0", "192.0.2.1", "example.test", "localhost:8000"):
+            with self.subTest(host=host):
+                self.assertFalse(server_module.is_loopback_host(host))
+
+        self.assertTrue(
+            server_module.same_origin(
+                "http://127.0.0.1:8000",
+                "127.0.0.1:8000",
+            )
+        )
+        self.assertFalse(
+            server_module.same_origin(
+                "https://127.0.0.1:8000",
+                "127.0.0.1:8000",
+            )
+        )
+        self.assertFalse(
+            server_module.same_origin(
+                "http://localhost:8000",
+                "127.0.0.1:8000",
+            )
+        )
+        self.assertFalse(
+            server_module.same_origin(
+                "http://127.0.0.1:8000/path?query=1",
+                "127.0.0.1:8000",
+            )
+        )
+
+    def test_profile_get_returns_stable_state_without_cors_or_error_leakage(self):
+        state = {
+            "ok": True,
+            "sage_binary": "sage",
+            "remote_configured": False,
+            "profiles": {
+                "standard": {
+                    "available": True,
+                    "path": "/standard",
+                    "commit": "01234567",
+                    "dirty": False,
+                    "error_code": None,
+                    "message": None,
+                },
+                "enhanced": {
+                    "available": False,
+                    "path": None,
+                    "commit": None,
+                    "dirty": None,
+                    "error_code": "estimator_profile_not_configured",
+                    "message": "enhanced estimator path is not configured.",
+                },
+            },
+        }
+        with self.running_server() as server:
+            with (
+                mock.patch.dict(os.environ, {"EASYLATTICE_ALLOWED_ORIGINS": "*"}),
+                mock.patch("app.server.local_profile_state", return_value=state),
+            ):
+                response, payload = self.request_json(
+                    server,
+                    "GET",
+                    "/api/config/estimator-profile",
+                    headers={"Origin": "https://attacker.example"},
+                )
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, state)
+            self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
+
+            with mock.patch(
+                "app.server.local_profile_state",
+                side_effect=RuntimeError("secret local path /private/estimator"),
+            ):
+                response, payload = self.request_json(
+                    server,
+                    "GET",
+                    "/api/config/estimator-profile",
+                )
+
+            self.assertEqual(response.status, 500)
+            self.assertEqual(payload["code"], "config_read_failed")
+            self.assertNotIn("secret", json.dumps(payload))
+            self.assertNotIn("Traceback", json.dumps(payload))
+
+    def test_profile_post_persists_only_profile_fields_on_same_origin(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.local.json"
+            standard = root / "standard"
+            (standard / "estimator").mkdir(parents=True)
+            (standard / "estimator" / "__init__.py").write_text("", encoding="utf-8")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "estimator": {
+                            "remote_timeout_seconds": 99,
+                            "remote_url": None,
+                        },
+                        "llm": {"enabled": False},
+                        "unrelated": {"keep": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = {
+                "sage_binary": "sage",
+                "lattice_estimator_path": str(standard),
+                "enhanced_lattice_estimator_path": None,
+            }
+
+            def available_record(estimator, profile):
+                path = (
+                    estimator.lattice_estimator_path
+                    if profile == "standard"
+                    else estimator.enhanced_lattice_estimator_path
+                )
+                if path is None:
+                    return {
+                        "available": False,
+                        "path": None,
+                        "commit": None,
+                        "dirty": None,
+                        "error_code": "estimator_profile_not_configured",
+                        "message": "not configured",
+                    }
+                return {
+                    "available": True,
+                    "path": path,
+                    "commit": "01234567",
+                    "dirty": False,
+                    "error_code": None,
+                    "message": None,
+                }
+
+            with self.running_server() as server:
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "EASYLATTICE_CONFIG": str(config_path),
+                            "EASYLATTICE_ALLOWED_ORIGINS": "*",
+                        },
+                    ),
+                    mock.patch(
+                        "app.local_profile.profile_record",
+                        side_effect=available_record,
+                    ),
+                ):
+                    response, payload = self.request_json(
+                        server,
+                        "POST",
+                        "/api/config/estimator-profile",
+                        request,
+                        self.profile_headers(server),
+                    )
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["profiles"]["standard"]["commit"], "01234567")
+            self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["estimator"]["sage_binary"], "sage")
+            self.assertEqual(
+                saved["estimator"]["lattice_estimator_path"],
+                str(standard.resolve()),
+            )
+            self.assertIsNone(saved["estimator"]["enhanced_lattice_estimator_path"])
+            self.assertEqual(saved["estimator"]["remote_timeout_seconds"], 99)
+            self.assertEqual(saved["llm"], {"enabled": False})
+            self.assertEqual(saved["unrelated"], {"keep": True})
+
+    def test_profile_post_rejects_non_loopback_and_unsafe_request_metadata(self):
+        cases = (
+            ("missing-origin", {}, 403, "local_configuration_disabled"),
+            (
+                "https-origin",
+                {"Origin": "https://127.0.0.1:{port}"},
+                403,
+                "local_configuration_disabled",
+            ),
+            (
+                "mismatched-origin",
+                {"Origin": "http://localhost:{port}"},
+                403,
+                "local_configuration_disabled",
+            ),
+            (
+                "non-json",
+                {"Content-Type": "text/plain"},
+                400,
+                "invalid_profile_request",
+            ),
+        )
+        request = {
+            "sage_binary": "sage",
+            "lattice_estimator_path": "/unused",
+            "enhanced_lattice_estimator_path": None,
+        }
+        with self.running_server() as server:
+            with (
+                mock.patch.dict(os.environ, {"EASYLATTICE_ALLOWED_ORIGINS": "*"}),
+                mock.patch("app.server.save_local_profile") as save,
+            ):
+                for name, overrides, expected_status, expected_code in cases:
+                    with self.subTest(name=name):
+                        headers = self.profile_headers(server)
+                        if name == "missing-origin":
+                            headers.pop("Origin")
+                        headers.update(
+                            {
+                                key: value.format(port=server.server_address[1])
+                                for key, value in overrides.items()
+                            }
+                        )
+                        response, payload = self.request_json(
+                            server,
+                            "POST",
+                            "/api/config/estimator-profile",
+                            request,
+                            headers,
+                        )
+                        self.assertEqual(response.status, expected_status)
+                        self.assertEqual(payload["code"], expected_code)
+                        self.assertIsNone(
+                            response.getheader("Access-Control-Allow-Origin")
+                        )
+                save.assert_not_called()
+
+        with self.running_server("0.0.0.0") as server:
+            with mock.patch("app.server.save_local_profile") as save:
+                response, payload = self.request_json(
+                    server,
+                    "POST",
+                    "/api/config/estimator-profile",
+                    request,
+                    self.profile_headers(server),
+                )
+            self.assertEqual(response.status, 403)
+            self.assertEqual(payload["code"], "local_configuration_disabled")
+            save.assert_not_called()
+
+    def test_profile_post_enforces_16_kib_limit_before_profile_logic(self):
+        with self.running_server() as server:
+            connection = HTTPConnection(
+                "127.0.0.1",
+                server.server_address[1],
+                timeout=2,
+            )
+            host = f"127.0.0.1:{server.server_address[1]}"
+            try:
+                with mock.patch("app.server.save_local_profile") as save:
+                    connection.putrequest(
+                        "POST",
+                        "/api/config/estimator-profile",
+                    )
+                    connection.putheader("Content-Type", "application/json")
+                    connection.putheader("Origin", f"http://{host}")
+                    connection.putheader(
+                        "Content-Length",
+                        str(server_module.PROFILE_MAX_REQUEST_BODY_BYTES + 1),
+                    )
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    payload = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(response.status, 413)
+                self.assertIn("16384", payload["error"])
+                self.assertIsNone(response.getheader("Access-Control-Allow-Origin"))
+                save.assert_not_called()
+            finally:
+                connection.close()
+
+    def test_profile_errors_use_stable_statuses_without_tracebacks(self):
+        cases = (
+            ("invalid_profile_request", 400),
+            ("sage_not_found", 400),
+            ("config_write_failed", 500),
+        )
+        request = {
+            "sage_binary": "sage",
+            "lattice_estimator_path": "/unused",
+            "enhanced_lattice_estimator_path": None,
+        }
+        with self.running_server() as server:
+            for code, expected_status in cases:
+                with self.subTest(code=code):
+                    error = LocalProfileError(
+                        code,
+                        "validation failed",
+                        field="lattice_estimator_path",
+                    )
+                    with mock.patch(
+                        "app.server.save_local_profile",
+                        side_effect=error,
+                    ):
+                        response, payload = self.request_json(
+                            server,
+                            "POST",
+                            "/api/config/estimator-profile",
+                            request,
+                            self.profile_headers(server),
+                        )
+                    self.assertEqual(response.status, expected_status)
+                    self.assertEqual(
+                        payload,
+                        {
+                            "ok": False,
+                            "code": code,
+                            "error": "validation failed",
+                            "field": "lattice_estimator_path",
+                        },
+                    )
+                    self.assertNotIn("Traceback", json.dumps(payload))
+
+            with mock.patch(
+                "app.server.save_local_profile",
+                side_effect=RuntimeError("secret /private/estimator"),
+            ):
+                response, payload = self.request_json(
+                    server,
+                    "POST",
+                    "/api/config/estimator-profile",
+                    request,
+                    self.profile_headers(server),
+                )
+            self.assertEqual(response.status, 500)
+            self.assertEqual(payload["code"], "config_write_failed")
+            self.assertNotIn("secret", json.dumps(payload))
+
+    def test_profile_options_never_emits_cors_headers(self):
+        with self.running_server() as server:
+            with mock.patch.dict(
+                os.environ,
+                {"EASYLATTICE_ALLOWED_ORIGINS": "*"},
+            ):
+                response, payload = self.request_json(
+                    server,
+                    "OPTIONS",
+                    "/api/config/estimator-profile",
+                    headers={
+                        "Origin": "https://attacker.example",
+                        "Access-Control-Request-Method": "POST",
+                    },
+                )
+            self.assertEqual(response.status, 204)
+            self.assertIsNone(payload)
+            for header in (
+                "Access-Control-Allow-Origin",
+                "Access-Control-Allow-Methods",
+                "Access-Control-Allow-Headers",
+            ):
+                self.assertIsNone(response.getheader(header))
+
+    def test_agent_job_preflight_rejects_missing_standard_and_enhanced_profiles(self):
+        self.clear_jobs()
+        cases = (
+            (
+                "standard",
+                {"problem": "ntru", "useEstimator": True},
+            ),
+            (
+                "enhanced",
+                {
+                    "request": {
+                        "problem": "rlwe",
+                        "hardProblemCategory": "lwe",
+                        "hardProblemVariant": "mlwe",
+                        "useEstimator": True,
+                    }
+                },
+            ),
+        )
+        try:
+            with self.running_server() as server:
+                for expected_profile, request in cases:
+                    with self.subTest(profile=expected_profile):
+                        with mock.patch(
+                            "app.local_profile.load_config",
+                            return_value=AppConfig(estimator=EstimatorConfig()),
+                        ):
+                            response, payload = self.request_json(
+                                server,
+                                "POST",
+                                "/api/agent/jobs",
+                                request,
+                                {"Content-Type": "application/json"},
+                            )
+                        self.assertEqual(response.status, 409)
+                        self.assertEqual(
+                            payload["code"],
+                            "estimator_profile_not_configured",
+                        )
+                        self.assertEqual(payload["required_profile"], expected_profile)
+                        self.assertNotIn(payload.get("job_id"), server_module.jobs)
+        finally:
+            self.clear_jobs()
+
+    def test_agent_job_preflight_bypasses_disabled_remote_and_unknown_variants(self):
+        self.clear_jobs()
+        cases = (
+            (
+                "disabled",
+                {"problem": "rlwe", "useEstimator": False},
+                AppConfig(estimator=EstimatorConfig()),
+            ),
+            (
+                "remote",
+                {"problem": "rlwe", "useEstimator": True},
+                AppConfig(
+                    estimator=EstimatorConfig(remote_url="http://worker.example")
+                ),
+            ),
+            (
+                "unknown",
+                {
+                    "request": {
+                        "problem": "unsupported",
+                        "hardProblemVariant": "unknown",
+                        "useEstimator": True,
+                    }
+                },
+                AppConfig(estimator=EstimatorConfig()),
+            ),
+        )
+        try:
+            with self.running_server() as server:
+                with mock.patch("app.server.submit_job") as submit:
+                    for name, request, config in cases:
+                        with self.subTest(name=name):
+                            with mock.patch(
+                                "app.local_profile.load_config",
+                                return_value=config,
+                            ):
+                                response, payload = self.request_json(
+                                    server,
+                                    "POST",
+                                    "/api/agent/jobs",
+                                    request,
+                                    {"Content-Type": "application/json"},
+                                )
+                            self.assertEqual(response.status, 202)
+                            self.assertEqual(payload["status"], "queued")
+                            self.assertIsNone(payload["stage"])
+                            self.assertIsNone(payload["estimator_profile"])
+                            self.assertIsNone(payload["estimator_commit"])
+                            with server_module.jobs_lock:
+                                server_module.jobs.pop(payload["job_id"], None)
+                    self.assertEqual(submit.call_count, len(cases))
+        finally:
+            self.clear_jobs()
+
+    def test_run_job_tracks_stages_and_does_not_leak_progress_between_jobs(self):
+        first = server_module.RecommendationJob(id="first", payload={})
+        snapshots = []
+
+        def successful_recommend(_payload):
+            report_progress("candidate_search")
+            snapshots.append((first.stage, first.estimator_profile, first.estimator_commit))
+            report_progress("estimator_running", "enhanced", "89abcdef")
+            snapshots.append((first.stage, first.estimator_profile, first.estimator_commit))
+            report_progress("finalizing")
+            snapshots.append((first.stage, first.estimator_profile, first.estimator_commit))
+            return {"ok": True}
+
+        with mock.patch(
+            "app.server.recommend_with_agent",
+            side_effect=successful_recommend,
+        ):
+            server_module.run_job(first)
+
+        self.assertEqual(
+            snapshots,
+            [
+                ("candidate_search", None, None),
+                ("estimator_running", "enhanced", "89abcdef"),
+                ("finalizing", "enhanced", "89abcdef"),
+            ],
+        )
+        self.assertEqual(first.status, "succeeded")
+        self.assertEqual(first.result, {"ok": True})
+        self.assertEqual(first.stage, "finalizing")
+        self.assertEqual(first.estimator_profile, "enhanced")
+        self.assertEqual(first.estimator_commit, "89abcdef")
+
+        second = server_module.RecommendationJob(id="second", payload={})
+
+        def second_recommend(_payload):
+            report_progress("candidate_search")
+            report_progress("finalizing")
+            return {"ok": True, "job": 2}
+
+        with mock.patch(
+            "app.server.recommend_with_agent",
+            side_effect=second_recommend,
+        ):
+            server_module.run_job(second)
+
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(second.stage, "finalizing")
+        self.assertIsNone(second.estimator_profile)
+        self.assertIsNone(second.estimator_commit)
+
+        failed = server_module.RecommendationJob(id="failed", payload={})
+
+        def failing_recommend(_payload):
+            report_progress("candidate_search")
+            raise RuntimeError("search failed")
+
+        with mock.patch(
+            "app.server.recommend_with_agent",
+            side_effect=failing_recommend,
+        ):
+            server_module.run_job(failed)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.stage, "candidate_search")
+        self.assertIn("RuntimeError: search failed", failed.error)
+        self.assertIsNone(failed.result)
+
+    def test_agent_reports_search_and_finalizing_for_deterministic_and_llm_paths(self):
+        deterministic_events = []
+        with (
+            progress_reporting(deterministic_events.append),
+            mock.patch(
+                "app.agent.run_deterministic_search",
+                return_value={"ok": True},
+            ),
+        ):
+            result = agent_module.recommend_with_agent({}, config=AppConfig())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [event.stage for event in deterministic_events],
+            ["candidate_search", "finalizing"],
+        )
+
+        llm_events = []
+        llm = mock.Mock()
+        llm.interpret_request.return_value = SimpleNamespace(
+            overrides={"targetSecurityBits": 192},
+            explanation="parsed",
+        )
+        config = AppConfig(llm=LLMConfig(enabled=True))
+        with (
+            progress_reporting(llm_events.append),
+            mock.patch("app.agent.OpenAICompatibleLLM", return_value=llm),
+            mock.patch(
+                "app.agent.run_deterministic_search",
+                return_value={"ok": True},
+            ) as search,
+        ):
+            result = agent_module.recommend_with_agent(
+                {"intent": "stronger", "useLLM": True},
+                config=config,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [event.stage for event in llm_events],
+            ["candidate_search", "finalizing"],
+        )
+        self.assertEqual(search.call_args.args[0]["targetSecurityBits"], 192)
+
     def assert_no_new_handler_threads(self, existing_threads):
         deadline = time.monotonic() + 1
         handlers = []

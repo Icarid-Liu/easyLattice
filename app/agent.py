@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .config import AppConfig, load_config
+from .job_progress import report_progress
 from .llm_provider import LLMConfigurationError, OpenAICompatibleLLM
 from .ntru_search import recommend_ntru
 from .parameter_search import recommend_rlwe
@@ -37,7 +38,9 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
     use_llm = bool(payload.get("use_llm", payload.get("useLLM", payload.get("useLlm", False))))
 
     if not use_llm:
+        report_progress("candidate_search")
         result = run_deterministic_search(deterministic_request, config=config)
+        report_progress("finalizing")
         result["agent"] = {
             **asdict(DETERMINISTIC_MODE),
             "intent_present": bool(intent),
@@ -55,7 +58,9 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
 
     interpretation = OpenAICompatibleLLM(config.llm).interpret_request(intent, deterministic_request)
     merged_request = {**deterministic_request, **interpretation.overrides}
+    report_progress("candidate_search")
     result = run_deterministic_search(merged_request, config=config)
+    report_progress("finalizing")
     result["agent"] = {
         **asdict(LLM_ASSISTED_MODE),
         "provider": config.llm.provider,

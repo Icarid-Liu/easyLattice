@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import mimetypes
 import os
@@ -18,7 +19,14 @@ from urllib.parse import urlparse
 from .agent import recommend_with_agent
 from .config import public_config
 from .decryption_failure import calculate_decryption_failure
+from .job_progress import ProgressEvent, progress_reporting
 from .json_safety import reject_json_constant, sanitize_json_value
+from .local_profile import (
+    LocalProfileError,
+    local_profile_state,
+    require_available_profile,
+    save_local_profile,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +35,7 @@ API_WORKERS = max(1, min(4, int(os.environ.get("EASYLATTICE_API_WORKERS", "1")))
 MAX_API_JOBS = max(8, int(os.environ.get("EASYLATTICE_API_MAX_JOBS", "128")))
 API_JOB_TTL_SECONDS = max(60, int(os.environ.get("EASYLATTICE_API_JOB_TTL_SECONDS", "3600")))
 MAX_REQUEST_BODY_BYTES = 1_048_576
+PROFILE_MAX_REQUEST_BODY_BYTES = 16_384
 REQUEST_HEADER_READ_DEADLINE_SECONDS = 5.0
 POST_BODY_READ_DEADLINE_SECONDS = 5.0
 POST_BODY_READ_CHUNK_BYTES = 65_536
@@ -148,6 +157,9 @@ class RecommendationJob:
     finished_at: float | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    stage: str | None = None
+    estimator_profile: str | None = None
+    estimator_commit: str | None = None
 
 
 jobs: dict[str, RecommendationJob] = {}
@@ -168,6 +180,36 @@ def cors_origin_for(origin: str, allowed: list[str]) -> str | None:
     return None
 
 
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def same_origin(origin: str, host_header: str) -> bool:
+    parsed = urlparse(origin)
+    return (
+        parsed.scheme == "http"
+        and parsed.netloc == host_header
+        and not parsed.path
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def local_profile_error_status(error: LocalProfileError) -> HTTPStatus:
+    return {
+        "local_configuration_disabled": HTTPStatus.FORBIDDEN,
+        "estimator_profile_not_configured": HTTPStatus.CONFLICT,
+        "config_write_failed": HTTPStatus.INTERNAL_SERVER_ERROR,
+    }.get(error.code, HTTPStatus.BAD_REQUEST)
+
+
 def create_job(payload: dict[str, Any]) -> RecommendationJob:
     job = RecommendationJob(id=uuid.uuid4().hex, payload=payload)
     with jobs_lock:
@@ -183,8 +225,17 @@ def run_job(job: RecommendationJob) -> None:
     with jobs_lock:
         job.status = "running"
         job.started_at = time.time()
+
+    def update_job_progress(event: ProgressEvent) -> None:
+        with jobs_lock:
+            job.stage = event.stage
+            if event.estimator_profile is not None:
+                job.estimator_profile = event.estimator_profile
+                job.estimator_commit = event.estimator_commit
+
     try:
-        result = recommend_with_agent(job.payload)
+        with progress_reporting(update_job_progress):
+            result = recommend_with_agent(job.payload)
         with jobs_lock:
             job.status = "succeeded"
             job.result = result
@@ -217,6 +268,9 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
         "created_at": round(job.created_at, 3),
         "started_at": round(job.started_at, 3) if job.started_at else None,
         "finished_at": round(job.finished_at, 3) if job.finished_at else None,
+        "stage": job.stage,
+        "estimator_profile": job.estimator_profile,
+        "estimator_commit": job.estimator_commit,
     }
     if job.result is not None:
         payload["result"] = job.result
@@ -259,8 +313,10 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             self.request_reader.clear_deadline()
 
     def do_OPTIONS(self) -> None:
+        parsed = urlparse(self.path)
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.write_cors_headers()
+        if parsed.path != "/api/config/estimator-profile":
+            self.write_cors_headers()
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -281,6 +337,29 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config/public":
             self.write_json(public_config())
             return
+        if parsed.path == "/api/config/estimator-profile":
+            try:
+                state = local_profile_state()
+            except LocalProfileError as exc:
+                self.write_json(
+                    exc.as_api_payload(),
+                    local_profile_error_status(exc),
+                    allow_cors=False,
+                )
+                return
+            except Exception:
+                self.write_json(
+                    {
+                        "ok": False,
+                        "code": "config_read_failed",
+                        "error": "Could not load local estimator configuration.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    allow_cors=False,
+                )
+                return
+            self.write_json(state, allow_cors=False)
+            return
         if parsed.path.startswith("/api/agent/jobs/"):
             job_id = parsed.path.removeprefix("/api/agent/jobs/").strip("/")
             with jobs_lock:
@@ -294,6 +373,10 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/config/estimator-profile":
+            self.handle_profile_post()
+            return
+
         if parsed.path == "/api/decryption-failure/calculate":
             try:
                 payload = self.read_json(preserve_numeric_lexemes=True)
@@ -333,6 +416,25 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
                 self.write_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
 
+            try:
+                require_available_profile(payload)
+            except LocalProfileError as exc:
+                self.write_json(
+                    exc.as_api_payload(),
+                    local_profile_error_status(exc),
+                )
+                return
+            except Exception:
+                self.write_json(
+                    {
+                        "ok": False,
+                        "code": "config_read_failed",
+                        "error": "Could not verify the local estimator configuration.",
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+
             cleanup_jobs()
             with jobs_lock:
                 job_count = len(jobs)
@@ -370,8 +472,101 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         self.write_json(result)
 
-    def read_json(self, *, preserve_numeric_lexemes: bool = False) -> dict[str, Any]:
-        length = self.request_content_length()
+    def handle_profile_post(self) -> None:
+        try:
+            self.authorize_profile_post()
+            payload = self.read_json(maximum=PROFILE_MAX_REQUEST_BODY_BYTES)
+            state = save_local_profile(payload)
+        except RequestBodyReadTimeout as exc:
+            self.write_request_timeout(str(exc), allow_cors=False)
+            return
+        except RequestBodyTooLarge as exc:
+            self.write_error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                str(exc),
+                allow_cors=False,
+            )
+            return
+        except json.JSONDecodeError:
+            self.write_json(
+                LocalProfileError(
+                    "invalid_profile_request",
+                    "Invalid JSON body.",
+                ).as_api_payload(),
+                HTTPStatus.BAD_REQUEST,
+                allow_cors=False,
+            )
+            return
+        except LocalProfileError as exc:
+            self.write_json(
+                exc.as_api_payload(),
+                local_profile_error_status(exc),
+                allow_cors=False,
+            )
+            return
+        except ValueError as exc:
+            self.write_json(
+                LocalProfileError(
+                    "invalid_profile_request",
+                    str(exc),
+                ).as_api_payload(),
+                HTTPStatus.BAD_REQUEST,
+                allow_cors=False,
+            )
+            return
+        except Exception:
+            self.write_json(
+                {
+                    "ok": False,
+                    "code": "config_write_failed",
+                    "error": "Could not save local estimator configuration.",
+                },
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                allow_cors=False,
+            )
+            return
+
+        self.write_json(state, allow_cors=False)
+
+    def authorize_profile_post(self) -> None:
+        bound_host = str(self.server.server_address[0])
+        if not is_loopback_host(bound_host):
+            raise LocalProfileError(
+                "local_configuration_disabled",
+                "Local estimator configuration is available only on a loopback-bound server.",
+            )
+
+        origins = self.headers.get_all("Origin", [])
+        hosts = self.headers.get_all("Host", [])
+        if (
+            len(origins) != 1
+            or len(hosts) != 1
+            or not same_origin(origins[0], hosts[0])
+        ):
+            raise LocalProfileError(
+                "local_configuration_disabled",
+                "Local estimator configuration requires an exact same-origin request.",
+            )
+
+        content_types = self.headers.get_all("Content-Type", [])
+        media_type = (
+            content_types[0].split(";", 1)[0].strip().lower()
+            if len(content_types) == 1
+            else ""
+        )
+        if media_type != "application/json":
+            raise LocalProfileError(
+                "invalid_profile_request",
+                "Content-Type must be application/json.",
+            )
+
+    def read_json(
+        self,
+        *,
+        preserve_numeric_lexemes: bool = False,
+        maximum: int = MAX_REQUEST_BODY_BYTES,
+    ) -> dict[str, Any]:
+        length = self.request_content_length(maximum=maximum)
         body_bytes = self.read_request_body(length)
         try:
             body = body_bytes.decode("utf-8")
@@ -401,7 +596,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             raise ValueError("Request body ended before Content-Length bytes were received.")
         return body
 
-    def request_content_length(self) -> int:
+    def request_content_length(self, *, maximum: int = MAX_REQUEST_BODY_BYTES) -> int:
         values = self.headers.get_all("Content-Length", [])
         if not values:
             raise ValueError("Content-Length header is required.")
@@ -411,13 +606,19 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         if not raw or not raw.isascii() or not raw.isdigit():
             raise ValueError("Content-Length must be a positive decimal integer.")
         normalized = raw.lstrip("0") or "0"
-        maximum = str(MAX_REQUEST_BODY_BYTES)
-        if len(normalized) > len(maximum) or (
-            len(normalized) == len(maximum) and normalized > maximum
+        maximum_text = str(maximum)
+        if len(normalized) > len(maximum_text) or (
+            len(normalized) == len(maximum_text) and normalized > maximum_text
         ):
+            if maximum == MAX_REQUEST_BODY_BYTES:
+                message = (
+                    f"Content-Length exceeds {MAX_REQUEST_BODY_BYTES} "
+                    "(MAX_REQUEST_BODY_BYTES)."
+                )
+            else:
+                message = f"Content-Length exceeds {maximum} bytes."
             raise RequestBodyTooLarge(
-                f"Content-Length exceeds {MAX_REQUEST_BODY_BYTES} "
-                "(MAX_REQUEST_BODY_BYTES)."
+                message
             )
         length = int(normalized)
         if length < 1:
@@ -444,26 +645,47 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def write_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        allow_cors: bool = True,
+    ) -> None:
         data = json.dumps(
             sanitize_json_value(payload),
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
         self.send_response(status)
-        self.write_cors_headers()
+        if allow_cors:
+            self.write_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def write_error(self, status: HTTPStatus, message: str) -> None:
-        self.write_json({"ok": False, "error": message}, status)
+    def write_error(
+        self,
+        status: HTTPStatus,
+        message: str,
+        *,
+        allow_cors: bool = True,
+    ) -> None:
+        self.write_json(
+            {"ok": False, "error": message},
+            status,
+            allow_cors=allow_cors,
+        )
 
-    def write_request_timeout(self, message: str) -> None:
+    def write_request_timeout(self, message: str, *, allow_cors: bool = True) -> None:
         self.close_connection = True
         try:
-            self.write_error(HTTPStatus.REQUEST_TIMEOUT, message)
+            self.write_error(
+                HTTPStatus.REQUEST_TIMEOUT,
+                message,
+                allow_cors=allow_cors,
+            )
         except OSError:
             pass
 
@@ -482,7 +704,11 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             f"Content-Length: {len(data)}",
             "Connection: close",
         ]
-        if "*" in allowed_origins():
+        request_path = urlparse(getattr(self, "path", "")).path
+        if (
+            request_path != "/api/config/estimator-profile"
+            and "*" in allowed_origins()
+        ):
             headers.extend((
                 "Access-Control-Allow-Origin: *",
                 "Access-Control-Allow-Methods: GET, POST, OPTIONS",
