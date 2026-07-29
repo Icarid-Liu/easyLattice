@@ -1109,6 +1109,87 @@ class BrowserRequestStateTests(unittest.TestCase):
             },
         )
 
+    def test_local_estimator_status_never_uses_pythonpath_default(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("?missing-profile=1")
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && document.querySelector('#estimator-profile-dialog')?.open"
+        )
+        self.page.evaluate(
+            """(() => {
+              window.__profileResponse.profiles.standard.error_code = 'sage_not_found';
+              window.__profileResponse.profiles.standard.message = 'Sage was not found.';
+              renderEstimatorProfile(window.__profileResponse);
+            })()"""
+        )
+
+        english = self.page.evaluate(
+            """(() => ({
+              estimator: document.querySelector('#config-estimator').textContent,
+              standard: document.querySelector('#standard-profile-summary').textContent,
+              body: document.body.innerText,
+            }))()"""
+        )
+        self.assertEqual(english["estimator"], "estimator: local profiles")
+        self.assertIn("Sage executable was not found", english["standard"])
+        self.assertNotIn("PYTHONPATH/default", english["body"])
+
+        self.page.evaluate(
+            """(() => {
+              const language = document.querySelector('#language-select');
+              language.value = 'zh';
+              language.dispatchEvent(new Event('change', { bubbles: true }));
+            })()"""
+        )
+        chinese = self.page.evaluate(
+            "document.querySelector('#standard-profile-summary').textContent"
+        )
+        self.assertIn("找不到 Sage 可执行文件", chinese)
+
+    def test_api_profile_error_cause_is_shown_in_required_profile_dialog(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("")
+        self.page.wait_for(
+            "document.readyState === 'complete' && window.__requests.length === 1"
+        )
+        self.page.evaluate(
+            """window.__requests[0].resolveResult({
+              recommendation: {},
+              request: { target_security: 128 },
+              validation: { status: 'not_requested' },
+              alternatives: [],
+              search: {},
+            })"""
+        )
+        self.page.wait_for("!searchState.snapshot().inFlight")
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('#use-estimator').checked = true;
+              document.querySelector('#parameter-form').requestSubmit();
+            })()"""
+        )
+        self.page.wait_for("window.__requests.length === 2")
+        self.page.evaluate(
+            """window.__requests[1].resolveResult({
+              ok: false,
+              code: 'estimator_profile_not_configured',
+              error: 'The enhanced estimator profile is not available.',
+              required_profile: 'enhanced',
+              profile_error_code: 'estimator_origin_mismatch',
+            }, 409)"""
+        )
+        self.page.wait_for(
+            "document.querySelector('#estimator-profile-dialog')?.open"
+        )
+        message = self.page.evaluate(
+            "document.querySelector('#estimator-profile-message').textContent"
+        )
+        self.assertEqual(
+            message,
+            "Sage imported estimator from a different path.",
+        )
+
     def test_request_state_interactions(self):
         self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?request-state-test=1")

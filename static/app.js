@@ -305,6 +305,7 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm: auth missing · {provider} / {model}",
     configLlmDisabled: "llm: disabled",
     configEstimator: "estimator: {parts}",
+    configEstimatorLocalProfiles: "estimator: local profiles",
     modifyConfiguration: "Modify configuration",
     estimatorProfileTitle: "Local estimator configuration",
     estimatorProfileDescription: "Paths are validated in isolated Sage processes and saved only on this machine.",
@@ -319,6 +320,8 @@ const TRANSLATIONS = {
     enhancedProfileRequired: "Enhanced estimator is required for the selected problem.",
     standardProfileReady: "Standard: ready · {path} · {commit}{dirty}",
     enhancedProfileReady: "Enhanced: ready · {path} · {commit}{dirty}",
+    standardProfileUnavailable: "Standard: unavailable · {reason}",
+    enhancedProfileUnavailable: "Enhanced: unavailable · {reason}",
     standardProfileMissing: "Standard: not configured",
     enhancedProfileMissing: "Enhanced: optional, not configured",
     dirtyWorktree: " · modified worktree",
@@ -544,6 +547,7 @@ const TRANSLATIONS = {
     configLlmAuthMissing: "llm：缺少认证 · {provider} / {model}",
     configLlmDisabled: "llm：已禁用",
     configEstimator: "estimator：{parts}",
+    configEstimatorLocalProfiles: "estimator：本地 profiles",
     modifyConfiguration: "修改配置",
     estimatorProfileTitle: "Estimator 本地配置",
     estimatorProfileDescription: "路径会在隔离的 Sage 进程中验证，并且只保存在本机。",
@@ -558,6 +562,8 @@ const TRANSLATIONS = {
     enhancedProfileRequired: "当前困难问题必须配置 Enhanced estimator。",
     standardProfileReady: "Standard：可用 · {path} · {commit}{dirty}",
     enhancedProfileReady: "Enhanced：可用 · {path} · {commit}{dirty}",
+    standardProfileUnavailable: "Standard：不可用 · {reason}",
+    enhancedProfileUnavailable: "Enhanced：不可用 · {reason}",
     standardProfileMissing: "Standard：未配置",
     enhancedProfileMissing: "Enhanced：可选，未配置",
     dirtyWorktree: " · 工作区有修改",
@@ -804,7 +810,10 @@ async function requestRecommendation() {
       } catch (_profileError) {
         estimatorProfileState = null;
       }
-      openEstimatorProfileDialog({ requiredProfile: error.requiredProfile });
+      openEstimatorProfileDialog({
+        requiredProfile: error.requiredProfile,
+        profileErrorCode: error.profileErrorCode,
+      });
     }
     searchState.acceptError(request, {
       titleKey: "requestFailed",
@@ -1014,6 +1023,7 @@ function apiError(result, fallbackKey) {
   const error = errorWithFallback(result?.error, fallbackKey);
   error.code = result?.code || null;
   error.requiredProfile = result?.required_profile || null;
+  error.profileErrorCode = result?.profile_error_code || null;
   return error;
 }
 
@@ -2084,20 +2094,18 @@ function renderPublicConfig(config) {
           model: config.llm.model,
         })
       : t("configLlmDisabled");
-    const estimatorPath = config.estimator.remote_configured
-      ? config.estimator.remote_url
-      : config.estimator.lattice_estimator_path || "PYTHONPATH/default";
-    const estimatorParts = [config.estimator.remote_configured ? "remote" : config.estimator.sage_binary];
-    if (config.estimator.version) {
-      estimatorParts.push(`version ${config.estimator.version}`);
-    }
-    if (config.estimator.remote_configured) {
-      estimatorParts.push(`timeout ${config.estimator.remote_timeout_seconds}s`);
-    }
-    estimatorParts.push(estimatorPath);
-  document.querySelector("#config-estimator").textContent = t("configEstimator", {
-    parts: estimatorParts.join(" · "),
-  });
+  if (config.estimator.remote_configured) {
+    document.querySelector("#config-estimator").textContent = t("configEstimator", {
+      parts: [
+        "remote",
+        `timeout ${config.estimator.remote_timeout_seconds}s`,
+        config.estimator.remote_url,
+      ].join(" · "),
+    });
+  } else {
+    document.querySelector("#config-estimator").textContent =
+      t("configEstimatorLocalProfiles");
+  }
 }
 
 async function loadEstimatorProfile() {
@@ -2124,7 +2132,16 @@ function renderEstimatorProfile(profile) {
 
 function profileSummary(profileName, profile) {
   if (!profile?.available) {
-    return t(profileName === "standard" ? "standardProfileMissing" : "enhancedProfileMissing");
+    const errorKey = PROFILE_ERROR_KEYS[profile?.error_code];
+    const reason = errorKey
+      ? t(errorKey)
+      : profile?.message || t("profileErrorNotConfigured");
+    return t(
+      profileName === "standard"
+        ? "standardProfileUnavailable"
+        : "enhancedProfileUnavailable",
+      { reason },
+    );
   }
   const commit = profile.commit || t("notAvailable");
   return t(profileName === "standard" ? "standardProfileReady" : "enhancedProfileReady", {
@@ -2145,12 +2162,19 @@ function openEstimatorProfileDialog(options = {}) {
     estimatorProfileState?.profiles?.enhanced?.path || "";
 
   const requiredProfile = options.requiredProfile;
-  estimatorProfileDialogMessage = requiredProfile
-    ? {
-        key: requiredProfile === "enhanced" ? "enhancedProfileRequired" : "standardProfileRequired",
-        type: "error",
-      }
-    : null;
+  const profileErrorKey = options.profileErrorCode === "estimator_profile_not_configured"
+    ? null
+    : PROFILE_ERROR_KEYS[options.profileErrorCode];
+  estimatorProfileDialogMessage = profileErrorKey
+    ? { key: profileErrorKey, type: "error" }
+    : requiredProfile
+      ? {
+          key: requiredProfile === "enhanced"
+            ? "enhancedProfileRequired"
+            : "standardProfileRequired",
+          type: "error",
+        }
+      : null;
   renderEstimatorProfileMessage();
   if (!estimatorProfileDialog.open) estimatorProfileDialog.showModal();
   setTimeout(() => {
@@ -2219,6 +2243,10 @@ function ensureEstimatorProfile(payload) {
     payload.hardProblemVariant,
   );
   if (required == null || localProfileAvailable(required)) return true;
-  openEstimatorProfileDialog({ requiredProfile: required });
+  const record = estimatorProfileState?.profiles?.[required];
+  openEstimatorProfileDialog({
+    requiredProfile: required,
+    profileErrorCode: record?.error_code,
+  });
   return false;
 }
