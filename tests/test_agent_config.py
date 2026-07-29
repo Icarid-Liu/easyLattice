@@ -99,6 +99,29 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(data["estimator"]["version"], "1.2.3")
 
+    def test_public_config_ignores_ambient_estimator_source(self):
+        with TemporaryDirectory() as directory:
+            ambient = Path(directory)
+            package = ambient / "estimator"
+            package.mkdir()
+            (package / "__init__.py").write_text(
+                '__version__ = "ambient-should-not-appear"\n',
+                encoding="utf-8",
+            )
+            with patch("app.config.estimator_source_root", return_value=ambient):
+                data = public_config(AppConfig(estimator=EstimatorConfig()))
+
+        self.assertIsNone(data["estimator"]["version"])
+        self.assertEqual(
+            data["estimator"]["profiles"]["standard"],
+            {
+                "configured": False,
+                "source_present": False,
+                "path": None,
+                "revision": None,
+            },
+        )
+
     def test_nested_non_git_estimator_uses_static_version(self):
         repository = Path(__file__).resolve().parents[1]
         with TemporaryDirectory(dir=repository, prefix=".nested-estimator-") as tmpdir:
@@ -160,8 +183,10 @@ class AgentConfigTests(unittest.TestCase):
             data["estimator"]["profiles"]["enhanced"]["revision"],
             "enhanced-test",
         )
-        self.assertTrue(data["estimator"]["profiles"]["standard"]["available"])
-        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["available"])
+        self.assertTrue(data["estimator"]["profiles"]["standard"]["configured"])
+        self.assertTrue(data["estimator"]["profiles"]["standard"]["source_present"])
+        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["configured"])
+        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["source_present"])
 
     def test_estimator_root_distinguishes_named_repo_from_package_path(self):
         with TemporaryDirectory() as tmpdir:
@@ -195,8 +220,10 @@ class AgentConfigTests(unittest.TestCase):
             data["estimator"]["profiles"]["enhanced"]["path"],
             str(direct_root),
         )
-        self.assertTrue(data["estimator"]["profiles"]["standard"]["available"])
-        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["available"])
+        self.assertTrue(data["estimator"]["profiles"]["standard"]["configured"])
+        self.assertTrue(data["estimator"]["profiles"]["standard"]["source_present"])
+        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["configured"])
+        self.assertTrue(data["estimator"]["profiles"]["enhanced"]["source_present"])
 
     def test_enhanced_path_preserves_legacy_estimator_config_positions(self):
         config = EstimatorConfig(

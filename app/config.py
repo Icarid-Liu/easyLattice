@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import ast
-import importlib.metadata
-import importlib.util
 import json
 import os
 import subprocess
@@ -211,47 +209,37 @@ def public_config(config: AppConfig | None = None) -> dict[str, Any]:
 
 
 def estimator_version(estimator: EstimatorConfig) -> str | None:
-    root = estimator_source_root(estimator)
+    root = configured_estimator_source_root(estimator.lattice_estimator_path)
     if root and (root / "estimator" / "__init__.py").is_file():
         return read_git_version(root) or read_static_estimator_version(root)
-    if root:
-        return None
-    return read_installed_estimator_version()
+    return None
 
 
 def estimator_profile_data(estimator: EstimatorConfig, profile: str) -> dict[str, Any]:
     if profile == "standard":
-        root = estimator_source_root(estimator)
+        configured_path = estimator.lattice_estimator_path
     elif profile == "enhanced":
-        root = configured_estimator_source_root(estimator.enhanced_lattice_estimator_path)
+        configured_path = estimator.enhanced_lattice_estimator_path
     else:
         raise ValueError("estimator profile must be standard or enhanced.")
 
-    available = bool(root and (root / "estimator" / "__init__.py").is_file())
-    revision = (read_git_version(root) or read_static_estimator_version(root)) if available else None
+    root = configured_estimator_source_root(configured_path)
+    source_present = bool(root and (root / "estimator" / "__init__.py").is_file())
+    revision = (
+        read_git_version(root) or read_static_estimator_version(root)
+        if source_present and root is not None
+        else None
+    )
     return {
-        "available": available,
+        "configured": bool(configured_path),
+        "source_present": source_present,
         "path": str(root) if root else None,
         "revision": revision,
     }
 
 
 def estimator_source_root(estimator: EstimatorConfig) -> Path | None:
-    if estimator.lattice_estimator_path:
-        return configured_estimator_source_root(estimator.lattice_estimator_path)
-
-    spec = importlib.util.find_spec("estimator")
-    if not spec or not spec.origin:
-        return None
-
-    try:
-        origin = Path(spec.origin).resolve()
-    except OSError:
-        return None
-
-    if origin.name == "__init__.py" and origin.parent.name == "estimator":
-        return origin.parent.parent
-    return normalize_estimator_root(origin.parent)
+    return configured_estimator_source_root(estimator.lattice_estimator_path)
 
 
 def configured_estimator_source_root(path: str | None) -> Path | None:
@@ -338,10 +326,3 @@ def read_static_estimator_version(root: Path) -> str | None:
             return None
         return str(value) if value else None
     return None
-
-
-def read_installed_estimator_version() -> str | None:
-    try:
-        return importlib.metadata.version("lattice-estimator")
-    except importlib.metadata.PackageNotFoundError:
-        return None
