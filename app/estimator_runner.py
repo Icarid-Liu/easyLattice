@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -35,8 +36,10 @@ class EstimatorOriginMismatch(Exception):
 
 
 @contextmanager
-def time_limit(seconds: int):
-    import signal
+def time_limit(seconds: int | None):
+    if seconds is None:
+        yield
+        return
 
     def handler(_signum, _frame):
         raise AttackTimeout(f"attack exceeded {seconds}s")
@@ -268,7 +271,12 @@ def run_lwe(payload: dict) -> dict:
     q = int(payload["q"])
     ring_degree = int(payload.get("ring_degree", n))
     distribution = payload["distribution"]
-    per_attack_timeout = int(payload.get("per_attack_timeout", 8))
+    raw_attack_timeout = payload.get("per_attack_timeout")
+    per_attack_timeout = (
+        int(raw_attack_timeout)
+        if raw_attack_timeout is not None
+        else None
+    )
     secret_distribution = payload.get("secret_distribution", distribution)
     error_distribution = payload.get("error_distribution", distribution)
     Xs = estimator_distribution(ND, secret_distribution, n)
@@ -359,7 +367,12 @@ def run_ntru(payload: dict) -> dict:
     q = int(payload["q"])
     ntru_type = payload["ntru_type"]
     ring_degree = int(payload.get("ring_degree", n))
-    per_attack_timeout = int(payload.get("per_attack_timeout", 20))
+    raw_attack_timeout = payload.get("per_attack_timeout")
+    per_attack_timeout = (
+        int(raw_attack_timeout)
+        if raw_attack_timeout is not None
+        else None
+    )
     Xs = estimator_distribution(ND, payload["secret_distribution"], n)
     Xe = estimator_distribution(ND, payload["error_distribution"], n)
     params = NTRU.Parameters(

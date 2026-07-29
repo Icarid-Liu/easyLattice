@@ -850,11 +850,12 @@ def run_ntru_estimator(
         "secret_distribution": candidate["distribution"]["secret"],
         "error_distribution": candidate["distribution"]["error"],
         **provenance,
-        "per_attack_timeout": max(
+    }
+    if config.estimator.remote_url:
+        payload["per_attack_timeout"] = max(
             5,
             min(90, config.estimator.per_attack_timeout_seconds * 2),
-        ),
-    }
+        )
     return run_estimator(payload, timeout, config, NTRU_ESTIMATOR_PROFILE)
 
 

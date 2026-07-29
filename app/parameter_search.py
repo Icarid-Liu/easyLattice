@@ -1719,8 +1719,15 @@ def run_sage_estimator(
         "error_distribution": candidate["distribution"]["error"],
         "hard_problem_variant": variant,
         "ring_degree": candidate["ring"]["n"],
-        "per_attack_timeout": max(3, min(90, config.estimator.per_attack_timeout_seconds or timeout // 2)),
     }
+    if config.estimator.remote_url:
+        payload["per_attack_timeout"] = max(
+            3,
+            min(
+                90,
+                config.estimator.per_attack_timeout_seconds or timeout // 2,
+            ),
+        )
     return run_estimator(payload, timeout, config, profile)
 
 

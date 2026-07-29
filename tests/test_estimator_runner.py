@@ -18,6 +18,7 @@ from app.estimator_runner import (
     run_lwe_attack,
     run_ntru,
     summarize_attacks,
+    time_limit,
 )
 from app.estimator_contract import (
     EstimatorRouteError,
@@ -113,6 +114,54 @@ class EstimatorRunnerTests(unittest.TestCase):
         FakeLWE.calls.clear()
         FakeLWE.costs.clear()
         FakeLWE.failures.clear()
+
+    def test_time_limit_none_does_not_install_an_alarm(self) -> None:
+        with (
+            patch("signal.signal") as install,
+            patch("signal.alarm") as alarm,
+        ):
+            with time_limit(None):
+                pass
+
+        install.assert_not_called()
+        alarm.assert_not_called()
+
+    def test_lwe_without_per_attack_timeout_uses_unbounded_contexts(self) -> None:
+        payload = self.fake_lwe_payload()
+        payload.pop("per_attack_timeout")
+        estimator_module = types.ModuleType("estimator")
+        estimator_module.LWE = FakeLWE
+        estimator_module.ND = FakeND
+        models = {
+            "matzov": {"classical": "mc", "quantum": "mq"},
+            "adps16": {"classical": "ac", "quantum": "aq"},
+        }
+        with (
+            patch.dict(sys.modules, {"estimator": estimator_module}),
+            patch(
+                "app.estimator_runner.reduction_model_variants",
+                return_value=models,
+            ),
+            patch(
+                "app.estimator_runner.cost_to_json",
+                side_effect=fake_cost_to_json,
+            ),
+            patch(
+                "app.estimator_runner.estimator_commit",
+                return_value="abc1234",
+            ),
+            patch(
+                "app.estimator_runner.time_limit",
+                wraps=time_limit,
+            ) as limit,
+        ):
+            result = run_lwe(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call.args[0] for call in limit.call_args_list],
+            [None] * 12,
+        )
 
     def test_baseline_attacks_receive_exact_arguments(self):
         params = object()

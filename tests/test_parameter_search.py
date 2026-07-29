@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from app.config import AppConfig
+from app.config import AppConfig, EstimatorConfig
 from app.parameter_search import (
     compression_noise_spec,
     factor_integer,
@@ -505,6 +505,47 @@ class ParameterSearchTests(unittest.TestCase):
                     self.assertEqual(profile, expected_profile)
                     self.assertEqual(payload["hard_problem_variant"], variant)
                     self.assertEqual(payload["ring_degree"], 512)
+
+    def test_lwe_attack_timeout_is_only_sent_to_remote_worker(self):
+        candidate = {
+            "ring": {"n": 512},
+            "modulus": {"q": 257},
+            "distribution": {
+                "name": "CBD(2)",
+                "secret": {
+                    "estimator": {"type": "centered_binomial", "eta": 2}
+                },
+                "error": {
+                    "estimator": {"type": "centered_binomial", "eta": 2}
+                },
+            },
+        }
+        request = parse_request(
+            {
+                "hardProblemCategory": "lwe",
+                "hardProblemVariant": "rlwe",
+                "useEstimator": True,
+            }
+        )
+        local = AppConfig(estimator=EstimatorConfig())
+        remote = AppConfig(
+            estimator=EstimatorConfig(
+                remote_url="https://worker.example",
+                per_attack_timeout_seconds=13,
+            )
+        )
+
+        with patch(
+            "app.parameter_search.run_estimator",
+            return_value={"ok": False},
+        ) as run:
+            run_sage_estimator(candidate, 240, config=local, request=request)
+            local_payload = run.call_args.args[0]
+            run_sage_estimator(candidate, 240, config=remote, request=request)
+            remote_payload = run.call_args.args[0]
+
+        self.assertNotIn("per_attack_timeout", local_payload)
+        self.assertEqual(remote_payload["per_attack_timeout"], 13)
 
     def test_standard_lwe_can_still_report_complete_validation(self):
         request = parse_request({

@@ -526,6 +526,41 @@ class NTRUSearchTests(unittest.TestCase):
         self.assertIn("secret_distribution", payload)
         self.assertIn("error_distribution", payload)
 
+    def test_ntru_attack_timeout_is_only_sent_to_remote_worker(self):
+        candidate = recommend_ntru(
+            {
+                "targetSecurity": 128,
+                "ringFamily": "power2",
+                "useEstimator": False,
+            }
+        )["recommendation"]
+        request = parse_ntru_request(
+            {
+                "hardProblemVariant": "ring",
+                "ringFamily": "power2",
+                "useEstimator": True,
+            }
+        )
+        local = AppConfig(estimator=EstimatorConfig())
+        remote = AppConfig(
+            estimator=EstimatorConfig(
+                remote_url="https://worker.example",
+                per_attack_timeout_seconds=13,
+            )
+        )
+
+        with patch(
+            "app.ntru_search.run_estimator",
+            return_value={"ok": False},
+        ) as run:
+            run_ntru_estimator(candidate, 240, config=local, request=request)
+            local_payload = run.call_args.args[0]
+            run_ntru_estimator(candidate, 240, config=remote, request=request)
+            remote_payload = run.call_args.args[0]
+
+        self.assertNotIn("per_attack_timeout", local_payload)
+        self.assertEqual(remote_payload["per_attack_timeout"], 26)
+
     def test_forced_circulant_families_use_effective_ring_variant(self):
         cases = {
             "hps": {"minN": 592, "maxN": 592},
