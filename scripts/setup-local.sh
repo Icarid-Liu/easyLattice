@@ -77,10 +77,13 @@ find_python() {
 
 PYTHON_BIN="$(find_python)"
 
-SAGE_BIN="sage"
-if command -v sage >/dev/null 2>&1; then
+SAGE_BIN="${SAGE_BINARY:-sage}"
+if [[ "$SAGE_BIN" == "sage" ]] && command -v sage >/dev/null 2>&1; then
   SAGE_BIN="$(command -v sage)"
 fi
+
+STANDARD_ESTIMATOR_REPOSITORY="${EASYLATTICE_STANDARD_ESTIMATOR_REPOSITORY:-https://github.com/malb/lattice-estimator.git}"
+ENHANCED_ESTIMATOR_REPOSITORY="${EASYLATTICE_ENHANCED_ESTIMATOR_REPOSITORY:-https://github.com/identitymapping/enhanced_lattice-estimator.git}"
 
 ESTIMATOR_PATH="${LATTICE_ESTIMATOR_PATH:-}"
 if [[ -z "$ESTIMATOR_PATH" ]]; then
@@ -125,61 +128,21 @@ if [[ "$WITH_ESTIMATOR" -eq 1 && ( -z "$ESTIMATOR_PATH" || -z "$ENHANCED_ESTIMAT
 fi
 
 if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ESTIMATOR_PATH" ]]; then
-  git clone --depth=1 https://github.com/malb/lattice-estimator.git "$ROOT_DIR/.external/lattice-estimator"
+  git clone --depth=1 "$STANDARD_ESTIMATOR_REPOSITORY" "$ROOT_DIR/.external/lattice-estimator"
   ESTIMATOR_PATH="$ROOT_DIR/.external/lattice-estimator"
 fi
 
 if [[ "$WITH_ESTIMATOR" -eq 1 && -z "$ENHANCED_ESTIMATOR_PATH" ]]; then
-  git clone --depth=1 https://github.com/identitymapping/enhanced_lattice-estimator.git "$ROOT_DIR/.external/enhanced-lattice-estimator"
+  git clone --depth=1 "$ENHANCED_ESTIMATOR_REPOSITORY" "$ROOT_DIR/.external/enhanced-lattice-estimator"
   ENHANCED_ESTIMATOR_PATH="$ROOT_DIR/.external/enhanced-lattice-estimator"
 fi
 
-if [[ -f "$CONFIG_PATH" && "$FORCE_CONFIG" -ne 1 ]]; then
-  echo "Keeping existing configuration: $CONFIG_PATH. Use --force to regenerate it."
-else
-  EASYLATTICE_SETUP_ROOT="$ROOT_DIR" \
-  EASYLATTICE_SETUP_CONFIG="$CONFIG_PATH" \
-  EASYLATTICE_SETUP_SAGE="$SAGE_BIN" \
-  EASYLATTICE_SETUP_ESTIMATOR="$ESTIMATOR_PATH" \
-  EASYLATTICE_SETUP_ENHANCED_ESTIMATOR="$ENHANCED_ESTIMATOR_PATH" \
-  "$PYTHON_BIN" - <<'PY'
-import json
-import os
-from pathlib import Path
-
-config_path = Path(os.environ["EASYLATTICE_SETUP_CONFIG"])
-estimator_path = os.environ.get("EASYLATTICE_SETUP_ESTIMATOR") or None
-enhanced_estimator_path = os.environ.get("EASYLATTICE_SETUP_ENHANCED_ESTIMATOR") or None
-config = {
-    "estimator": {
-        "sage_binary": os.environ["EASYLATTICE_SETUP_SAGE"],
-        "lattice_estimator_path": estimator_path,
-        "enhanced_lattice_estimator_path": enhanced_estimator_path,
-        "default_timeout_seconds": 16,
-        "per_attack_timeout_seconds": 12,
-        "remote_url": None,
-        "remote_timeout_seconds": 240,
-        "remote_poll_interval_seconds": 2,
-    },
-    "llm": {
-        "enabled": False,
-        "provider": "openai-compatible",
-        "base_url": "http://localhost:11434/v1",
-        "model": "local-model",
-        "api_key_env": "EASYLATTICE_LLM_API_KEY",
-        "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
-        "timeout_seconds": 30,
-    },
-    "scripts": {
-        "decrypt_error": [],
-        "signature_smoothing": [],
-    },
-}
-config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-PY
-  echo "Wrote configuration: $CONFIG_PATH"
-fi
+EASYLATTICE_SETUP_CONFIG="$CONFIG_PATH" \
+EASYLATTICE_SETUP_SAGE="$SAGE_BIN" \
+EASYLATTICE_SETUP_ESTIMATOR="$ESTIMATOR_PATH" \
+EASYLATTICE_SETUP_ENHANCED_ESTIMATOR="$ENHANCED_ESTIMATOR_PATH" \
+EASYLATTICE_SETUP_FORCE="$FORCE_CONFIG" \
+"$PYTHON_BIN" -m app.setup_config
 
 echo "Python: $PYTHON_BIN"
 echo "Sage: $SAGE_BIN"
