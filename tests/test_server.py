@@ -460,6 +460,116 @@ class ServerTests(unittest.TestCase):
         finally:
             self.clear_jobs()
 
+    def test_all_recommendation_routes_fail_closed_on_missing_profiles(self):
+        self.clear_jobs()
+        cases = (
+            (
+                "/api/agent/jobs",
+                {"problem": "ntru", "useEstimator": True},
+                "standard",
+            ),
+            (
+                "/api/agent/recommend",
+                {
+                    "problem": "rlwe",
+                    "hardProblemCategory": "lwe",
+                    "hardProblemVariant": "rlwe",
+                    "useEstimator": True,
+                },
+                "enhanced",
+            ),
+            (
+                "/api/rlwe/recommend",
+                {
+                    "problem": "rlwe",
+                    "hardProblemCategory": "lwe",
+                    "hardProblemVariant": "lwe",
+                    "useEstimator": True,
+                },
+                "standard",
+            ),
+        )
+        try:
+            with self.running_server() as server:
+                with (
+                    mock.patch(
+                        "app.local_profile.load_config",
+                        return_value=AppConfig(estimator=EstimatorConfig()),
+                    ),
+                    mock.patch("app.server.recommend_with_agent") as recommend,
+                ):
+                    for path, request, expected_profile in cases:
+                        with self.subTest(path=path):
+                            response, payload = self.request_json(
+                                server,
+                                "POST",
+                                path,
+                                request,
+                                {"Content-Type": "application/json"},
+                            )
+                            self.assertEqual(response.status, 409)
+                            self.assertEqual(
+                                payload["code"],
+                                "estimator_profile_not_configured",
+                            )
+                            self.assertEqual(
+                                payload["required_profile"],
+                                expected_profile,
+                            )
+                            self.assertEqual(
+                                payload["profile_error_code"],
+                                "estimator_profile_not_configured",
+                            )
+                recommend.assert_not_called()
+                with server_module.jobs_lock:
+                    self.assertEqual(server_module.jobs, {})
+        finally:
+            self.clear_jobs()
+
+    def test_synchronous_recommendation_preflight_bypasses_disabled_and_remote(self):
+        cases = (
+            (
+                {"problem": "rlwe", "useEstimator": False},
+                AppConfig(estimator=EstimatorConfig()),
+            ),
+            (
+                {
+                    "problem": "rlwe",
+                    "hardProblemCategory": "lwe",
+                    "hardProblemVariant": "rlwe",
+                    "useEstimator": True,
+                },
+                AppConfig(
+                    estimator=EstimatorConfig(
+                        remote_url="https://worker.example"
+                    )
+                ),
+            ),
+        )
+        with self.running_server() as server:
+            for request, config in cases:
+                with (
+                    self.subTest(request=request),
+                    mock.patch(
+                        "app.local_profile.load_config",
+                        return_value=config,
+                    ),
+                    mock.patch(
+                        "app.server.recommend_with_agent",
+                        return_value={"ok": True},
+                    ) as recommend,
+                ):
+                    response, payload = self.request_json(
+                        server,
+                        "POST",
+                        "/api/agent/recommend",
+                        request,
+                        {"Content-Type": "application/json"},
+                    )
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(payload, {"ok": True})
+                    recommend.assert_called_once_with(request)
+
     def test_agent_job_preflight_bypasses_disabled_remote_and_unknown_variants(self):
         self.clear_jobs()
         cases = (

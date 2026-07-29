@@ -416,23 +416,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
                 self.write_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
 
-            try:
-                require_available_profile(payload)
-            except LocalProfileError as exc:
-                self.write_json(
-                    exc.as_api_payload(),
-                    local_profile_error_status(exc),
-                )
-                return
-            except Exception:
-                self.write_json(
-                    {
-                        "ok": False,
-                        "code": "config_read_failed",
-                        "error": "Could not verify the local estimator configuration.",
-                    },
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
+            if not self.ensure_recommendation_profile(payload):
                 return
 
             cleanup_jobs()
@@ -453,6 +437,8 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self.read_json()
+            if not self.ensure_recommendation_profile(payload):
+                return
             result = recommend_with_agent(payload)
         except RequestBodyReadTimeout as exc:
             self.write_request_timeout(str(exc))
@@ -471,6 +457,27 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
             return
 
         self.write_json(result)
+
+    def ensure_recommendation_profile(self, payload: dict[str, Any]) -> bool:
+        try:
+            require_available_profile(payload)
+        except LocalProfileError as exc:
+            self.write_json(
+                exc.as_api_payload(),
+                local_profile_error_status(exc),
+            )
+            return False
+        except Exception:
+            self.write_json(
+                {
+                    "ok": False,
+                    "code": "config_read_failed",
+                    "error": "Could not verify the local estimator configuration.",
+                },
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return False
+        return True
 
     def handle_profile_post(self) -> None:
         try:
