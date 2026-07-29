@@ -17,7 +17,8 @@ not part of the security calculation.
 3. `app.estimator_process`: estimator profile and subprocess boundary. It
    selects the standard or enhanced source tree, launches Sage with an isolated
    `PYTHONPATH` and disabled user site, and verifies the imported `estimator`
-   package origin before running `app.estimator_runner`.
+   package origin before running `app.estimator_runner`. Local subprocesses
+   have no elapsed-time deadline; remote dispatch remains bounded.
 4. `app.local_profile`: strict browser-profile parsing, path normalization,
    isolated Sage import preflight, Git metadata, atomic `config.local.json`
    persistence, and required-profile availability checks.
@@ -47,7 +48,7 @@ not part of the security calculation.
    union bound.
 13. `app.server`: HTTP routing, guarded local-profile writes, unified
     synchronous/asynchronous estimator-profile preflight, job status storage,
-    and static UI serving for a local checkout.
+    admitted-config snapshots, and static UI serving for a local checkout.
 14. `static/app-model.js`: browser request-state model. Search and DFR have
     independent input revisions and monotonic request tokens. Input changes
     advance the revision, making prior results stale and disabling their
@@ -113,6 +114,12 @@ found through ambient `PYTHONPATH` cannot make a profile ready.
 filling only absent, `null`, or empty Standard/Enhanced paths unless the user
 explicitly requests a forced regeneration.
 
+Execution policy follows the configured boundary. Without `remote_url`, local
+origin preflight, estimator attacks, Sage subprocess execution, and browser
+polling have no easyLattice time limit. With `remote_url`, requests retain the
+configured remote whole-job and per-attack limits. Legacy local timeout fields
+remain parseable but do not impose a local deadline.
+
 ## Default Path
 
 `POST /api/agent/recommend` with no `useLLM` field, or with `useLLM=false`,
@@ -144,7 +151,11 @@ bypasses the local preflight.
 The job status lifecycle remains `queued`, `running`, `succeeded`, and `failed`.
 While running, `app.job_progress` independently reports `candidate_search`,
 `estimator_running`, and `finalizing`; the job response also carries the
-selected estimator profile and eight-character commit when known.
+selected estimator profile and eight-character commit when known. Admission
+stores one config snapshot on the job and reuses it for execution. The response
+reports `execution_mode`, `timeout_seconds`, and `elapsed_seconds`, so the
+browser applies no local polling deadline and keeps remote polling bounded.
+Repeated job `GET` requests are status checks and do not restart computation.
 
 ## Public Preview and Local Server
 
@@ -160,10 +171,12 @@ Live interaction starts from a local checkout with:
 
 `start.sh` delegates setup and foreground service execution, waits for
 `/api/health`, and opens the local URL in a browser when supported; `--no-open`
-disables that last step. `app.server` serves `static/index.html` and its API on
-the same local origin. The first-run form stores browser-managed estimator
-paths in `config.local.json`, and **Modify configuration** reopens it. Paths,
-estimator output, and optional API credentials remain on the user's machine.
+disables that last step. Its empty-argument branch avoids the Bash 3.2
+`set -u` empty-array expansion used by macOS. `app.server` serves
+`static/index.html` and its API on the same local origin. The first-run form
+stores browser-managed estimator paths in `config.local.json`, and **Modify
+configuration** reopens it. Paths, estimator output, and optional API
+credentials remain on the user's machine.
 `./start.sh --with-estimator` clones missing profile trees and supplements only
 missing or empty profile paths in an existing configuration. `SAGE_BINARY` may
 name an explicit executable, including a path containing spaces.

@@ -242,7 +242,8 @@ NTRU 乘积支持按 `x^n - 1` 的循环约化、按 `x^n + 1` 的负循环约�
 ```
 
 `--no-open` 表示不自动打开浏览器。`--with-estimator` 保留 setup helper 的可选
-行为，将缺少的 Standard 和 Enhanced 仓库 clone 到 `.external/`。
+行为，将缺少的 Standard 和 Enhanced 仓库 clone 到 `.external/`。无参数启动路径
+已显式兼容 macOS Bash 3.2 在 `set -u` 下的行为。
 
 若新的 checkout 需要支持所有本地 estimator 路由，使用：
 
@@ -282,7 +283,8 @@ Enhanced: RLWE, MLWE, RLWR, MLWR
 
 当 `useEstimator=true` 且未配置 `estimator.remote_url` 时，Sage 和对应 profile 必须
 可用。若要在本地支持全部变体，应同时配置两条源码路径。配置远程 worker 后，会绕过
-本地 Sage 和 estimator 路径检查。也可手动启动：
+本地 Sage 和 estimator 路径检查。本地 Sage 预检、攻击、runner 执行及浏览器轮询
+均不设置 easyLattice 运行时限；一次本地评估可能正常运行许多分钟。也可手动启动：
 
 ```bash
 python3 -m app.server
@@ -349,9 +351,8 @@ SAGE_BINARY="/Applications/SageMath-10-7.app/Contents/Frameworks/Sage.framework/
 - `estimator.enhanced_lattice_estimator_path`：
   `identitymapping/enhanced_lattice-estimator` 的绝对路径；本地结构化
   RLWE/MLWE/RLWR/MLWR 验证需要该路径；
-- `estimator.default_timeout_seconds`：本地 estimator 请求超时；
-- `estimator.per_attack_timeout_seconds`：每项 estimator 攻击的超时，受外层本地请求
-  超时共同限制；
+- `estimator.default_timeout_seconds`：为兼容已有配置而保留，不再作为本地执行时限；
+- `estimator.per_attack_timeout_seconds`：仅发送给已配置远程 worker 的单项攻击超时；
 - `estimator.remote_url`：可选的 estimator worker URL；设置后会绕过本地 Sage 和
   两条本地源码路径；
 - `estimator.remote_timeout_seconds`：远程 worker 超时，面向 180-300 秒运行；
@@ -365,7 +366,8 @@ SAGE_BINARY="/Applications/SageMath-10-7.app/Contents/Frameworks/Sage.framework/
 等价环境变量：
 
 ```bash
-EASYLATTICE_ESTIMATOR_TIMEOUT=240 \
+EASYLATTICE_ESTIMATOR_REMOTE_URL=https://worker.example \
+EASYLATTICE_ESTIMATOR_REMOTE_TIMEOUT=240 \
 EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60 \
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
@@ -422,10 +424,18 @@ lattice-estimator 运行不依赖单个长 HTTP 请求。任务 `status` 仍为 
 {
   "status": "running",
   "stage": "estimator_running",
+  "execution_mode": "local",
+  "timeout_seconds": null,
+  "elapsed_seconds": 601.25,
   "estimator_profile": "enhanced",
   "estimator_commit": "876b6617"
 }
 ```
+
+本地执行时 `timeout_seconds` 为 `null`，浏览器会持续轮询，直到任务成功、失败、输入
+失效或发生网络错误。后台重复出现的 `GET /api/agent/jobs/{job_id}` 是正常的两秒一次
+状态检查，不会重新启动 estimator。远程任务会报告配置的时限，并继续受
+`remote_timeout_seconds` 限制。
 
 开始搜索或创建任务前，所有启用 estimator 的推荐路由
 （`/api/agent/jobs`、`/api/agent/recommend` 和 `/api/rlwe/recommend`）都会检查请求

@@ -285,7 +285,8 @@ platform supports it. Useful variants are:
 
 `--no-open` leaves browser launch to the user. `--with-estimator` retains the
 setup helper's opt-in behavior of cloning missing Standard and Enhanced
-repositories under `.external/`.
+repositories under `.external/`. The no-option path is guarded explicitly for
+the `set -u` behaviour of macOS Bash 3.2.
 
 For a fresh checkout that should support every local estimator route, use:
 
@@ -329,7 +330,9 @@ Enhanced: RLWE, MLWE, RLWR, MLWR
 With `useEstimator=true` and no `estimator.remote_url`, Sage and the selected
 profile must be available. Configure both source paths to support every variant
 locally. A configured remote worker bypasses local Sage and estimator-path
-checks. Manual startup is also supported:
+checks. Local Sage preflight, attacks, runner execution, and browser polling
+have no easyLattice elapsed-time limit; a local estimate may legitimately run
+for many minutes. Manual startup is also supported:
 
 ```bash
 python3 -m app.server
@@ -403,9 +406,10 @@ available.
 - `estimator.enhanced_lattice_estimator_path`: absolute path to
   `identitymapping/enhanced_lattice-estimator`, required for local structured
   RLWE/MLWE/RLWR/MLWR validation;
-- `estimator.default_timeout_seconds`: local estimator request timeout;
-- `estimator.per_attack_timeout_seconds`: timeout applied to each estimator
-  attack before the outer local request timeout;
+- `estimator.default_timeout_seconds`: retained for configuration
+  compatibility; it is not an active local execution deadline;
+- `estimator.per_attack_timeout_seconds`: per-attack timeout sent only to a
+  configured remote worker;
 - `estimator.remote_url`: optional estimator worker URL; when set, it bypasses
   local Sage and both local source paths;
 - `estimator.remote_timeout_seconds`: remote-worker timeout, intended for
@@ -420,7 +424,8 @@ available.
 Equivalent environment variables:
 
 ```bash
-EASYLATTICE_ESTIMATOR_TIMEOUT=240 \
+EASYLATTICE_ESTIMATOR_REMOTE_URL=https://worker.example \
+EASYLATTICE_ESTIMATOR_REMOTE_TIMEOUT=240 \
 EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT=60 \
 SAGE_BINARY=/path/to/sage \
 LATTICE_ESTIMATOR_PATH=/path/to/lattice-estimator \
@@ -479,10 +484,19 @@ field reports `candidate_search`, `estimator_running`, or `finalizing`:
 {
   "status": "running",
   "stage": "estimator_running",
+  "execution_mode": "local",
+  "timeout_seconds": null,
+  "elapsed_seconds": 601.25,
   "estimator_profile": "enhanced",
   "estimator_commit": "876b6617"
 }
 ```
+
+For local execution, `timeout_seconds` is `null` and the browser keeps polling
+until the job succeeds, fails, its inputs are invalidated, or a network error
+occurs. Repeated `GET /api/agent/jobs/{job_id}` log entries are the expected
+two-second status checks; they do not restart the estimator. Remote jobs report
+their configured timeout and remain bounded by `remote_timeout_seconds`.
 
 Before search or job creation, every estimator-enabled recommendation route
 (`/api/agent/jobs`, `/api/agent/recommend`, and `/api/rlwe/recommend`) verifies
