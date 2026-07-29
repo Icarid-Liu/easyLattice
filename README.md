@@ -287,6 +287,12 @@ platform supports it. Useful variants are:
 setup helper's opt-in behavior of cloning missing Standard and Enhanced
 repositories under `.external/`.
 
+For a fresh checkout that should support every local estimator route, use:
+
+```bash
+./start.sh --with-estimator
+```
+
 On first live use, the browser opens an estimator profile form. Sage defaults
 to `sage`; the Standard estimator path is required, while the Enhanced path is
 optional. Saving validates each configured repository in its own Sage
@@ -306,10 +312,12 @@ To detect both estimator profiles and clone either missing repository into
 ./scripts/setup-local.sh --with-estimator
 ```
 
-When creating a new `config.local.json`, the script records both detected or
-cloned paths as `lattice_estimator_path` and
-`enhanced_lattice_estimator_path`. If the config already exists, add `--force`
-to regenerate it with those paths.
+`./start.sh --with-estimator` clones either missing estimator source tree and
+creates `config.local.json`. If the file already exists, setup fills only an
+absent, `null`, or empty Standard/Enhanced path. Existing non-empty paths,
+timeouts, remote-worker settings, LLM settings, scripts, and unrelated fields
+are preserved. Use `--force` only when you intentionally want to regenerate
+the complete local configuration.
 
 Sage remains optional for fast-screen mode. Local estimator routing is exact:
 
@@ -374,6 +382,19 @@ such as `\\wsl.localhost\Ubuntu-22.04\usr\local\bin\sage`. Standard and
 Enhanced both expose a package named `estimator`, so easyLattice never imports
 them together: each configured profile is preflighted and executed in a
 separate, isolated Sage subprocess.
+
+If Sage is not on `PATH`, provide its executable explicitly. Paths containing
+spaces are supported:
+
+```bash
+SAGE_BINARY="/Applications/SageMath-10-7.app/Contents/Frameworks/Sage.framework/Versions/10.7/local/bin/sage" \
+./start.sh --with-estimator
+```
+
+The live status reports Standard and Enhanced separately. An estimator package
+found through ambient `PYTHONPATH` is not a ready profile: only an explicit
+source path that passes the isolated Sage import-origin preflight is marked
+available.
 
 - `estimator.sage_binary`: `sage` or an absolute Sage executable path, required
   only for local estimator mode;
@@ -463,11 +484,12 @@ field reports `candidate_search`, `estimator_running`, or `finalizing`:
 }
 ```
 
-Before creating a local estimator job, the server verifies that its exact
-profile is available. A missing profile returns HTTP 409 with code
-`estimator_profile_not_configured` and a `required_profile` field instead of
-silently falling back to the fast screen. A configured remote worker bypasses
-this local preflight.
+Before search or job creation, every estimator-enabled recommendation route
+(`/api/agent/jobs`, `/api/agent/recommend`, and `/api/rlwe/recommend`) verifies
+that its exact profile is available. A missing profile returns HTTP 409 with
+code `estimator_profile_not_configured`, `required_profile`, and a specific
+`profile_error_code` instead of silently falling back to the fast screen. A
+configured remote worker bypasses this local preflight.
 
 The browser-managed local profile API is:
 

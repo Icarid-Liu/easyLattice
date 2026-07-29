@@ -244,6 +244,12 @@ NTRU 乘积支持按 `x^n - 1` 的循环约化、按 `x^n + 1` 的负循环约�
 `--no-open` 表示不自动打开浏览器。`--with-estimator` 保留 setup helper 的可选
 行为，将缺少的 Standard 和 Enhanced 仓库 clone 到 `.external/`。
 
+若新的 checkout 需要支持所有本地 estimator 路由，使用：
+
+```bash
+./start.sh --with-estimator
+```
+
 第一次以 live 模式打开时，浏览器会显示 estimator profile 配置表单。Sage 默认值为
 `sage`；Standard estimator 路径必填，Enhanced 路径可选。保存时，每个已配置仓库
 都会在独立 Sage 子进程中验证，随后写入 `config.local.json`。配置完成后仍可使用
@@ -262,9 +268,10 @@ NTRU 乘积支持按 `x^n - 1` 的循环约化、按 `x^n + 1` 的负循环约�
 ./scripts/setup-local.sh --with-estimator
 ```
 
-创建新的 `config.local.json` 时，脚本会将检测或 clone 得到的两个路径分别写入
-`lattice_estimator_path` 和 `enhanced_lattice_estimator_path`。如果配置已存在，请加
-`--force` 重新生成并写入这些路径。
+`./start.sh --with-estimator` 会 clone 缺少的 estimator 源码树并创建
+`config.local.json`。若配置文件已存在，setup 只补全缺失、`null` 或空字符串的
+Standard/Enhanced 路径；已有非空路径、超时、远程 worker、LLM、scripts 和其他字段
+都会保留。只有明确要重新生成完整本地配置时才使用 `--force`。
 
 快速筛选模式仍不需要 Sage。本地 estimator 使用固定路由：
 
@@ -323,6 +330,17 @@ Sage 和两个 estimator 源码目录可以位于任意位置，只要 easyLatti
 不是 `\\wsl.localhost\Ubuntu-22.04\usr\local\bin\sage` 这类 Windows UNC 路径。
 Standard 与 Enhanced 都提供名为 `estimator` 的 Python package，因此 easyLattice
 不会将两者导入同一进程；每个 profile 都在独立、隔离的 Sage 子进程中预检和执行。
+
+如果 Sage 不在 `PATH` 中，可显式传入可执行文件；包含空格的路径也受支持：
+
+```bash
+SAGE_BINARY="/Applications/SageMath-10-7.app/Contents/Frameworks/Sage.framework/Versions/10.7/local/bin/sage" \
+./start.sh --with-estimator
+```
+
+实时状态会分别报告 Standard 和 Enhanced。通过环境 `PYTHONPATH` 偶然找到的
+`estimator` package 不代表 profile 可用；只有显式配置源码路径并通过隔离 Sage
+导入来源预检的 profile 才会显示为可用。
 
 - `estimator.sage_binary`：`sage` 或 Sage 可执行文件的绝对路径；仅本地 estimator
   模式需要；
@@ -409,10 +427,11 @@ lattice-estimator 运行不依赖单个长 HTTP 请求。任务 `status` 仍为 
 }
 ```
 
-创建本地 estimator 任务前，服务会检查该请求所需的准确 profile。若缺少 profile，
-服务返回 HTTP 409、错误码 `estimator_profile_not_configured` 和
-`required_profile` 字段，不会静默退回快速筛选。已配置远程 worker 时会绕过该本地
-预检。
+开始搜索或创建任务前，所有启用 estimator 的推荐路由
+（`/api/agent/jobs`、`/api/agent/recommend` 和 `/api/rlwe/recommend`）都会检查请求
+所需的准确 profile。若缺少 profile，服务返回 HTTP 409、错误码
+`estimator_profile_not_configured`、`required_profile` 和具体的
+`profile_error_code`，不会静默退回快速筛选。已配置远程 worker 时会绕过该本地预检。
 
 浏览器管理本地 profile 使用以下 API：
 

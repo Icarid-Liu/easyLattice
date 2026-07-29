@@ -21,36 +21,40 @@ not part of the security calculation.
 4. `app.local_profile`: strict browser-profile parsing, path normalization,
    isolated Sage import preflight, Git metadata, atomic `config.local.json`
    persistence, and required-profile availability checks.
-5. `app.job_progress`: context-local progress reporting for candidate search,
+5. `app.setup_config`: command-line local configuration bootstrap. It
+   supplements only missing or empty estimator paths, preserves all existing
+   non-empty and unrelated settings, and replaces the file atomically.
+6. `app.job_progress`: context-local progress reporting for candidate search,
    estimator execution, and result finalization without coupling search modules
    to HTTP job storage.
-6. `app.estimator_contract`: shared per-attack structure-correction metadata
+7. `app.estimator_contract`: shared per-attack structure-correction metadata
    and coverage rules used by the estimator runner and response validator.
-7. `app.security_result`: shared selection and validation result contract,
+8. `app.security_result`: shared selection and validation result contract,
    including modulus-bit accounting, `target_met`/`target_unmet`, and
    `validated`/`partial`/`failed`/`not_requested` states.
-8. `app.agent`: orchestration boundary. It always returns the same response
+9. `app.agent`: orchestration boundary. It always returns the same response
    shape and records whether an LLM was used.
-9. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
+10. `app.llm_provider`: optional OpenAI-compatible chat-completions client. It
    is imported by `app.agent`, but it is instantiated and invoked only when
    `useLLM=true` and `llm.enabled=true`.
-10. `app.polynomial_ring`: exact polynomial multiplication/reduction primitives
+11. `app.polynomial_ring`: exact polynomial multiplication/reduction primitives
    for cyclic `x^n - 1`, negacyclic `x^n + 1`, and NTRU Prime
    `x^n - x - 1` quotient rings.
-11. `app.decryption_failure`: independent, ring-aware finite-PMF DFR engine for
+12. `app.decryption_failure`: independent, ring-aware finite-PMF DFR engine for
    NTRU and LWE correctness expressions. It converts estimator-style
    distribution descriptors into finite `value -> probability` maps without
    modifying the third-party estimator and aggregates vector failure with a
    union bound.
-12. `app.server`: HTTP routing, guarded local-profile writes, asynchronous job
-    preflight/status storage, and static UI serving for a local checkout.
-13. `static/app-model.js`: browser request-state model. Search and DFR have
+13. `app.server`: HTTP routing, guarded local-profile writes, unified
+    synchronous/asynchronous estimator-profile preflight, job status storage,
+    and static UI serving for a local checkout.
+14. `static/app-model.js`: browser request-state model. Search and DFR have
     independent input revisions and monotonic request tokens. Input changes
     advance the revision, making prior results stale and disabling their
     actions. An identical-input resubmission keeps the revision, so the prior
     result may remain current and copyable while pending, but its new token
     still prevents any older response from winning.
-14. `static/app.js`: browser rendering and API orchestration. The LLM checkbox
+15. `static/app.js`: browser rendering and API orchestration. The LLM checkbox
     is disabled unless public config says the local LLM provider is enabled and
     authenticated. In live mode it also manages first-run estimator profile
     setup, later modification, and localized job-stage rendering.
@@ -102,6 +106,13 @@ profile state. Same-origin JSON requests may use
 loopback address; writes atomically preserve unrelated local settings. A
 configured remote worker bypasses local path availability checks.
 
+`app.local_profile` is the sole readiness authority. `app.config` reports
+metadata only for explicitly configured source trees; an `estimator` package
+found through ambient `PYTHONPATH` cannot make a profile ready.
+`app.setup_config` creates or supplements `config.local.json` atomically,
+filling only absent, `null`, or empty Standard/Enhanced paths unless the user
+explicitly requests a forced regeneration.
+
 ## Default Path
 
 `POST /api/agent/recommend` with no `useLLM` field, or with `useLLM=false`,
@@ -122,10 +133,13 @@ request JSON -> app.agent -> app.ntru_search -> response JSON
 When `useEstimator=true`, the browser submits the same request to
 `POST /api/agent/jobs` and polls `GET /api/agent/jobs/{job_id}`. This keeps
 3-5 minute Sage/lattice-estimator runs off a single long browser request while
-leaving the deterministic fast path synchronous. Before queueing a local job,
+leaving the deterministic fast path synchronous. The job route and both
+synchronous recommendation routes (`POST /api/agent/recommend` and
+`POST /api/rlwe/recommend`) share one preflight. Before search or queueing,
 `app.server` resolves the exact required profile and returns HTTP 409 with
-`estimator_profile_not_configured` when it is unavailable. Remote-worker jobs
-bypass that local preflight.
+`estimator_profile_not_configured`, `required_profile`, and
+`profile_error_code` when it is unavailable. A configured remote worker
+bypasses the local preflight.
 
 The job status lifecycle remains `queued`, `running`, `succeeded`, and `failed`.
 While running, `app.job_progress` independently reports `candidate_search`,
@@ -150,6 +164,9 @@ disables that last step. `app.server` serves `static/index.html` and its API on
 the same local origin. The first-run form stores browser-managed estimator
 paths in `config.local.json`, and **Modify configuration** reopens it. Paths,
 estimator output, and optional API credentials remain on the user's machine.
+`./start.sh --with-estimator` clones missing profile trees and supplements only
+missing or empty profile paths in an existing configuration. `SAGE_BINARY` may
+name an explicit executable, including a path containing spaces.
 
 ## Decryption Failure Path
 
