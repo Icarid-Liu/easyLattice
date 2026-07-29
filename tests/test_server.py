@@ -440,7 +440,7 @@ class ServerTests(unittest.TestCase):
                 for expected_profile, request in cases:
                     with self.subTest(profile=expected_profile):
                         with mock.patch(
-                            "app.local_profile.load_config",
+                            "app.server.load_config",
                             return_value=AppConfig(estimator=EstimatorConfig()),
                         ):
                             response, payload = self.request_json(
@@ -493,7 +493,7 @@ class ServerTests(unittest.TestCase):
             with self.running_server() as server:
                 with (
                     mock.patch(
-                        "app.local_profile.load_config",
+                        "app.server.load_config",
                         return_value=AppConfig(estimator=EstimatorConfig()),
                     ),
                     mock.patch("app.server.recommend_with_agent") as recommend,
@@ -551,7 +551,7 @@ class ServerTests(unittest.TestCase):
                 with (
                     self.subTest(request=request),
                     mock.patch(
-                        "app.local_profile.load_config",
+                        "app.server.load_config",
                         return_value=config,
                     ),
                     mock.patch(
@@ -568,7 +568,10 @@ class ServerTests(unittest.TestCase):
                     )
                     self.assertEqual(response.status, 200)
                     self.assertEqual(payload, {"ok": True})
-                    recommend.assert_called_once_with(request)
+                    recommend.assert_called_once_with(
+                        request,
+                        config=config,
+                    )
 
     def test_agent_job_preflight_bypasses_disabled_remote_and_unknown_variants(self):
         self.clear_jobs()
@@ -603,7 +606,7 @@ class ServerTests(unittest.TestCase):
                     for name, request, config in cases:
                         with self.subTest(name=name):
                             with mock.patch(
-                                "app.local_profile.load_config",
+                                "app.server.load_config",
                                 return_value=config,
                             ):
                                 response, payload = self.request_json(
@@ -624,11 +627,85 @@ class ServerTests(unittest.TestCase):
         finally:
             self.clear_jobs()
 
+    def test_job_json_reports_local_and_remote_execution_policy(self):
+        now = 1_000.0
+        cases = (
+            (
+                AppConfig(estimator=EstimatorConfig()),
+                "local",
+                None,
+            ),
+            (
+                AppConfig(
+                    estimator=EstimatorConfig(
+                        remote_url="https://worker.example",
+                        remote_timeout_seconds=123,
+                    )
+                ),
+                "remote",
+                123,
+            ),
+        )
+        try:
+            for config, mode, timeout in cases:
+                with self.subTest(mode=mode), mock.patch(
+                    "app.server.time.time",
+                    return_value=now,
+                ):
+                    job = server_module.create_job(
+                        {"useEstimator": True},
+                        config,
+                    )
+                    job.started_at = now - 12.34
+                    payload = server_module.job_to_json(job)
+
+                self.assertEqual(payload["execution_mode"], mode)
+                self.assertEqual(payload["timeout_seconds"], timeout)
+                self.assertEqual(payload["elapsed_seconds"], 12.34)
+        finally:
+            self.clear_jobs()
+
+    def test_job_admission_reuses_config_for_preflight_and_execution(self):
+        self.clear_jobs()
+        config = AppConfig(
+            estimator=EstimatorConfig(
+                remote_url="https://worker.example",
+                remote_timeout_seconds=91,
+            )
+        )
+        request = {"problem": "rlwe", "useEstimator": True}
+        try:
+            with self.running_server() as server:
+                with (
+                    mock.patch("app.server.load_config", return_value=config),
+                    mock.patch(
+                        "app.server.require_available_profile"
+                    ) as require,
+                    mock.patch("app.server.submit_job") as submit,
+                ):
+                    response, payload = self.request_json(
+                        server,
+                        "POST",
+                        "/api/agent/jobs",
+                        request,
+                        {"Content-Type": "application/json"},
+                    )
+
+            self.assertEqual(response.status, 202)
+            require.assert_called_once_with(request, config=config)
+            submitted_job = submit.call_args.args[0]
+            self.assertIs(submitted_job.config, config)
+            self.assertEqual(payload["execution_mode"], "remote")
+            self.assertEqual(payload["timeout_seconds"], 91)
+        finally:
+            self.clear_jobs()
+
     def test_run_job_tracks_stages_and_does_not_leak_progress_between_jobs(self):
         first = server_module.RecommendationJob(id="first", payload={})
         snapshots = []
 
-        def successful_recommend(_payload):
+        def successful_recommend(_payload, *, config):
+            self.assertIs(config, first.config)
             report_progress("candidate_search")
             snapshots.append((first.stage, first.estimator_profile, first.estimator_commit))
             report_progress("estimator_running", "enhanced", "89abcdef")
@@ -659,7 +736,8 @@ class ServerTests(unittest.TestCase):
 
         second = server_module.RecommendationJob(id="second", payload={})
 
-        def second_recommend(_payload):
+        def second_recommend(_payload, *, config):
+            self.assertIs(config, second.config)
             report_progress("candidate_search")
             report_progress("finalizing")
             return {"ok": True, "job": 2}
@@ -677,7 +755,8 @@ class ServerTests(unittest.TestCase):
 
         failed = server_module.RecommendationJob(id="failed", payload={})
 
-        def failing_recommend(_payload):
+        def failing_recommend(_payload, *, config):
+            self.assertIs(config, failed.config)
             report_progress("candidate_search")
             raise RuntimeError("search failed")
 

@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .agent import recommend_with_agent
-from .config import public_config
+from .config import AppConfig, load_config, public_config
 from .decryption_failure import calculate_decryption_failure
 from .job_progress import ProgressEvent, progress_reporting
 from .json_safety import reject_json_constant, sanitize_json_value
@@ -160,6 +160,9 @@ class RecommendationJob:
     stage: str | None = None
     estimator_profile: str | None = None
     estimator_commit: str | None = None
+    execution_mode: str = "local"
+    timeout_seconds: int | None = None
+    config: AppConfig = field(default_factory=AppConfig, repr=False)
 
 
 jobs: dict[str, RecommendationJob] = {}
@@ -210,8 +213,21 @@ def local_profile_error_status(error: LocalProfileError) -> HTTPStatus:
     }.get(error.code, HTTPStatus.BAD_REQUEST)
 
 
-def create_job(payload: dict[str, Any]) -> RecommendationJob:
-    job = RecommendationJob(id=uuid.uuid4().hex, payload=payload)
+def create_job(
+    payload: dict[str, Any],
+    config: AppConfig | None = None,
+) -> RecommendationJob:
+    config = config or load_config()
+    remote = bool(config.estimator.remote_url)
+    job = RecommendationJob(
+        id=uuid.uuid4().hex,
+        payload=payload,
+        execution_mode="remote" if remote else "local",
+        timeout_seconds=(
+            config.estimator.remote_timeout_seconds if remote else None
+        ),
+        config=config,
+    )
     with jobs_lock:
         jobs[job.id] = job
     return job
@@ -235,7 +251,7 @@ def run_job(job: RecommendationJob) -> None:
 
     try:
         with progress_reporting(update_job_progress):
-            result = recommend_with_agent(job.payload)
+            result = recommend_with_agent(job.payload, config=job.config)
         with jobs_lock:
             job.status = "succeeded"
             job.result = result
@@ -261,6 +277,12 @@ def cleanup_jobs() -> None:
 
 
 def job_to_json(job: RecommendationJob) -> dict[str, Any]:
+    elapsed_end = (
+        job.finished_at if job.finished_at is not None else time.time()
+    )
+    elapsed_start = (
+        job.started_at if job.started_at is not None else job.created_at
+    )
     payload: dict[str, Any] = {
         "ok": job.status != "failed",
         "job_id": job.id,
@@ -271,6 +293,12 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
         "stage": job.stage,
         "estimator_profile": job.estimator_profile,
         "estimator_commit": job.estimator_commit,
+        "execution_mode": job.execution_mode,
+        "timeout_seconds": job.timeout_seconds,
+        "elapsed_seconds": round(
+            max(0.0, elapsed_end - elapsed_start),
+            2,
+        ),
     }
     if job.result is not None:
         payload["result"] = job.result
@@ -416,7 +444,8 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
                 self.write_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
 
-            if not self.ensure_recommendation_profile(payload):
+            config = self.recommendation_config(payload)
+            if config is None:
                 return
 
             cleanup_jobs()
@@ -426,7 +455,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
                 self.write_error(HTTPStatus.TOO_MANY_REQUESTS, "too many queued estimator jobs")
                 return
 
-            job = create_job(payload)
+            job = create_job(payload, config)
             submit_job(job)
             self.write_json(job_to_json(job), HTTPStatus.ACCEPTED)
             return
@@ -437,9 +466,10 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self.read_json()
-            if not self.ensure_recommendation_profile(payload):
+            config = self.recommendation_config(payload)
+            if config is None:
                 return
-            result = recommend_with_agent(payload)
+            result = recommend_with_agent(payload, config=config)
         except RequestBodyReadTimeout as exc:
             self.write_request_timeout(str(exc))
             return
@@ -458,15 +488,19 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
         self.write_json(result)
 
-    def ensure_recommendation_profile(self, payload: dict[str, Any]) -> bool:
+    def recommendation_config(
+        self,
+        payload: dict[str, Any],
+    ) -> AppConfig | None:
         try:
-            require_available_profile(payload)
+            config = load_config()
+            require_available_profile(payload, config=config)
+            return config
         except LocalProfileError as exc:
             self.write_json(
                 exc.as_api_payload(),
                 local_profile_error_status(exc),
             )
-            return False
         except Exception:
             self.write_json(
                 {
@@ -476,8 +510,7 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
                 },
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
-            return False
-        return True
+        return None
 
     def handle_profile_post(self) -> None:
         try:
