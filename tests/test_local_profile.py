@@ -434,7 +434,10 @@ class LocalProfileStateTests(unittest.TestCase):
             runtime = EstimatorRuntime("/usr/bin/sage", root.resolve(), {})
             with (
                 mock.patch("app.local_profile.prepare_estimator_runtime", return_value=runtime),
-                mock.patch("app.local_profile.run_origin_preflight", return_value={"ok": True}),
+                mock.patch(
+                    "app.local_profile.run_origin_preflight",
+                    return_value={"ok": True},
+                ) as preflight,
                 mock.patch(
                     "app.local_profile.git_metadata",
                     return_value=GitMetadata("01234567", True, None),
@@ -444,6 +447,7 @@ class LocalProfileStateTests(unittest.TestCase):
 
             enhanced = profile_record(estimator, "enhanced")
 
+        preflight.assert_called_once_with(runtime, None)
         self.assertEqual(
             standard,
             {

@@ -70,12 +70,12 @@ def run_estimator(
             timeout_seconds=config.estimator.remote_timeout_seconds,
             poll_interval_seconds=config.estimator.remote_poll_interval_seconds,
         )
-    return run_local_estimator(normalized, timeout, config.estimator, profile)
+    return run_local_estimator(normalized, None, config.estimator, profile)
 
 
 def run_local_estimator(
     payload: dict[str, Any],
-    timeout: int,
+    timeout: int | float | None,
     config: EstimatorConfig,
     profile: str,
 ) -> dict[str, Any]:

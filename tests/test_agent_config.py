@@ -346,7 +346,7 @@ class AgentConfigTests(unittest.TestCase):
 
                 def preflight(selected_runtime, selected_timeout):
                     self.assertIs(selected_runtime, runtime)
-                    self.assertEqual(selected_timeout, 17)
+                    self.assertIsNone(selected_timeout)
                     self.assertEqual(len(events), 1)
                     self.assertEqual(events[0].stage, "estimator_running")
                     self.assertEqual(events[0].estimator_profile, profile)
@@ -378,8 +378,9 @@ class AgentConfigTests(unittest.TestCase):
                 self.assertEqual(result, successful)
                 prepare.assert_called_once_with(config.estimator, profile)
                 metadata_for.assert_called_once_with(runtime.root)
-                origin_preflight.assert_called_once_with(runtime, 17)
+                origin_preflight.assert_called_once_with(runtime, None)
                 runner.assert_called_once()
+                self.assertIsNone(runner.call_args.kwargs["timeout"])
 
     def test_local_validation_failures_do_not_report_estimator_running(self):
         failures = (
@@ -470,7 +471,7 @@ class AgentConfigTests(unittest.TestCase):
         runner_process.assert_called_once()
         runner_call = runner_process.call_args
         runtime, preflight_timeout = preflight.call_args.args
-        self.assertEqual(preflight_timeout, 17)
+        self.assertIsNone(preflight_timeout)
         self.assertEqual(runtime.sage_binary, "/test/sage")
         self.assertEqual(runtime.root, Path(enhanced))
         self.assertEqual(
@@ -479,6 +480,7 @@ class AgentConfigTests(unittest.TestCase):
         )
         self.assertTrue(runner_call.args[0][2].endswith("app/estimator_runner.py"))
         self.assertIs(runner_call.kwargs["env"], runtime.environment)
+        self.assertIsNone(runner_call.kwargs["timeout"])
         self.assertEqual(
             runtime.environment["PYTHONPATH"].split(os.pathsep),
             [enhanced, str(ROOT)],

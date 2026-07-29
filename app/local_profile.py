@@ -260,7 +260,7 @@ def _last_output_line(*outputs: str) -> str | None:
 
 def run_origin_preflight(
     runtime: EstimatorRuntime,
-    timeout_seconds: int | float,
+    timeout_seconds: int | float | None,
 ) -> dict[str, object]:
     try:
         completed = subprocess.run(
@@ -399,7 +399,7 @@ def profile_record(estimator: EstimatorConfig, profile: str) -> dict[str, object
 
     try:
         runtime = prepare_estimator_runtime(estimator, profile)
-        run_origin_preflight(runtime, estimator.default_timeout_seconds)
+        run_origin_preflight(runtime, None)
     except LocalProfileError as exc:
         return _profile_result(
             available=False,
