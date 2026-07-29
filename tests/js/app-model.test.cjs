@@ -8,6 +8,7 @@ test("exports the exact browser model API", () => {
     "acceptsResponse",
     "compactRows",
     "createRequestState",
+    "estimatorJobDeadline",
     "jobStagePresentation",
     "nextRevision",
     "normalizeRingSelection",
@@ -16,6 +17,24 @@ test("exports the exact browser model API", () => {
     "ringOptions",
   ]);
   assert.equal(globalThis.EasyLatticeModel, undefined);
+});
+
+test("local estimator jobs have no browser polling deadline", () => {
+  assert.equal(model.estimatorJobDeadline({
+    execution_mode: "local",
+    timeout_seconds: null,
+  }, 10_000), null);
+});
+
+test("remote estimator jobs retain a bounded polling deadline", () => {
+  assert.equal(model.estimatorJobDeadline({
+    execution_mode: "remote",
+    timeout_seconds: 123,
+  }, 10_000), 163_000);
+  assert.equal(model.estimatorJobDeadline({
+    execution_mode: "remote",
+    timeout_seconds: null,
+  }, 10_000), 280_000);
 });
 
 test("estimator profiles follow the selected hard problem", () => {

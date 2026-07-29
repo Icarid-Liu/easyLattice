@@ -51,6 +51,15 @@
     return stages[stage] ? { ...stages[stage] } : null;
   }
 
+  function estimatorJobDeadline(job, nowMs = Date.now()) {
+    if (job?.execution_mode !== "remote") return null;
+    const configured = Number(job.timeout_seconds);
+    const timeoutSeconds = Number.isFinite(configured) && configured > 0
+      ? configured
+      : 240;
+    return nowMs + (timeoutSeconds + 30) * 1000;
+  }
+
   function resultPresentation(validationStatus, selectionStatus) {
     if (selectionStatus === "target_unmet") return { kind: "warning", key: "statusTargetUnmet" };
     if (validationStatus === "failed") return { kind: "error", key: "statusValidationFailed" };
@@ -175,6 +184,7 @@
     normalizeRingSelection,
     requiredEstimatorProfile,
     jobStagePresentation,
+    estimatorJobDeadline,
     resultPresentation,
     compactRows,
     nextRevision,

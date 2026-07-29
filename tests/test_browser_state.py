@@ -1109,6 +1109,51 @@ class BrowserRequestStateTests(unittest.TestCase):
             },
         )
 
+    def test_local_estimator_job_omits_timeout_and_shows_unbounded_status(self):
+        self.set_viewport(1440, 1000, mobile=False)
+        self.navigate("")
+        self.page.wait_for(
+            "document.readyState === 'complete'"
+            " && window.__requests.length === 1"
+        )
+        self.page.evaluate(
+            """window.__requests[0].resolveResult({
+              recommendation: {},
+              request: { target_security: 128 },
+              validation: { status: 'not_requested' },
+              alternatives: [],
+              search: {}
+            })"""
+        )
+        self.page.wait_for("!searchState.snapshot().inFlight")
+        self.page.evaluate(
+            """(() => {
+              document.querySelector('#use-estimator').checked = true;
+              document.querySelector('#parameter-form').requestSubmit();
+            })()"""
+        )
+        self.page.wait_for("window.__requests.length === 2")
+
+        payload = self.page.evaluate("window.__requests[1].body")
+        self.assertNotIn("estimatorTimeout", payload)
+        self.page.evaluate(
+            """window.__requests[1].resolveResult({
+              ok: true,
+              job_id: 'local-job',
+              status: 'running',
+              stage: 'estimator_running',
+              execution_mode: 'local',
+              timeout_seconds: null,
+              elapsed_seconds: 601.25,
+              estimator_profile: 'enhanced',
+              estimator_commit: '876b6617'
+            }, 202)"""
+        )
+        self.page.wait_for(
+            "document.querySelector('#summary-subtitle')"
+            ".textContent.includes('no time limit')"
+        )
+
     def test_local_estimator_status_never_uses_pythonpath_default(self):
         self.set_viewport(1440, 1000, mobile=False)
         self.navigate("?missing-profile=1")

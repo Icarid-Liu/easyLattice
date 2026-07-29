@@ -217,6 +217,10 @@ const TRANSLATIONS = {
     estimatorWaiting: "Estimator job {status}. Waiting for Sage/lattice-estimator.",
     jobStageCandidateSearch: "Searching and ranking candidate parameters.",
     jobStageEstimatorRunning: "Running {profile} estimator{commit}.",
+    jobStageEstimatorRunningLocal:
+      "Running {profile} estimator{commit} · {elapsed}s elapsed · local execution has no time limit.",
+    jobStageEstimatorRunningRemote:
+      "Running {profile} estimator{commit} · {elapsed}s elapsed · remote timeout {timeout}s.",
     jobStageFinalizing: "Normalizing estimator results and preparing the recommendation.",
     estimatorStatusQueued: "Queued",
     estimatorStatusRunning: "Running",
@@ -459,6 +463,10 @@ const TRANSLATIONS = {
     estimatorWaiting: "Estimator 任务 {status}，等待 Sage/lattice-estimator。",
     jobStageCandidateSearch: "正在搜索并排序候选参数。",
     jobStageEstimatorRunning: "正在运行 {profile} estimator{commit}。",
+    jobStageEstimatorRunningLocal:
+      "正在运行 {profile} estimator{commit} · 已运行 {elapsed} 秒 · 本地执行不设时间上限。",
+    jobStageEstimatorRunningRemote:
+      "正在运行 {profile} estimator{commit} · 已运行 {elapsed} 秒 · 远程超时 {timeout} 秒。",
     jobStageFinalizing: "正在整理 estimator 结果并生成推荐。",
     estimatorStatusQueued: "排队中",
     estimatorStatusRunning: "运行中",
@@ -783,7 +791,6 @@ async function requestRecommendation() {
     secretDistribution,
     errorDistribution,
     useEstimator,
-    estimatorTimeout: useEstimator ? 240 : undefined,
     intent: String(form.elements.namedItem("intent")?.value || ""),
     useLLM: useLLM.checked,
   };
@@ -974,10 +981,9 @@ async function requestRecommendationJob(payload, request) {
     throw localizedError("errorEstimatorJobMissingId");
   }
 
-  const timeoutMs = (Number(payload.estimatorTimeout) || 240) * 1000 + 30000;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = EasyLatticeModel.estimatorJobDeadline(submitted);
   let job = submitted;
-  while (Date.now() < deadline) {
+  while (deadline === null || Date.now() < deadline) {
     if (!searchState.accepts(request)) {
       throw localizedError("errorSearchInputsChanged");
     }
@@ -1354,6 +1360,20 @@ function estimatorJobMetadata(job) {
     };
   }
   const profile = job.estimator_profile === "enhanced" ? "Enhanced" : "Standard";
+  if (job.stage === "estimator_running") {
+    const local = job.execution_mode !== "remote";
+    return {
+      subtitleKey: local
+        ? "jobStageEstimatorRunningLocal"
+        : "jobStageEstimatorRunningRemote",
+      subtitleValues: {
+        profile,
+        commit: job.estimator_commit ? ` @ ${job.estimator_commit}` : "",
+        elapsed: Math.max(0, Number(job.elapsed_seconds) || 0).toFixed(1),
+        timeout: job.timeout_seconds ?? 240,
+      },
+    };
+  }
   return {
     subtitleKey: stage.key,
     subtitleValues: {
