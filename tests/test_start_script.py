@@ -66,6 +66,18 @@ def isolated_checkout(destination: Path) -> Path:
 
 
 class StartScriptTest(unittest.TestCase):
+    def test_empty_setup_arguments_are_guarded_for_bash_3_2_nounset(self) -> None:
+        source = START_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('if [[ "${#SETUP_ARGS[@]}" -eq 0 ]]; then', source)
+        self.assertIn(
+            'exec "$ROOT_DIR/scripts/setup-local.sh" --start\n'
+            "else\n"
+            '  exec "$ROOT_DIR/scripts/setup-local.sh" --start "${SETUP_ARGS[@]}"\n'
+            "fi",
+            source,
+        )
+
     def test_help_documents_supported_options_without_starting_server(self) -> None:
         result = subprocess.run(
             [str(START_SCRIPT), "--help"],

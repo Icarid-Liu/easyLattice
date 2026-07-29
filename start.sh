@@ -162,4 +162,8 @@ if [[ "$OPEN_BROWSER" -eq 1 ]]; then
   wait_and_open "$HEALTH_URL" "$APP_URL" "$$" &
 fi
 
-exec "$ROOT_DIR/scripts/setup-local.sh" --start "${SETUP_ARGS[@]}"
+if [[ "${#SETUP_ARGS[@]}" -eq 0 ]]; then
+  exec "$ROOT_DIR/scripts/setup-local.sh" --start
+else
+  exec "$ROOT_DIR/scripts/setup-local.sh" --start "${SETUP_ARGS[@]}"
+fi
