@@ -281,7 +281,7 @@ def recommend_ntru(
                 "degree n second",
                 ntru_ntt_strategy_text(request),
                 "calibrate sigma with a discrete-Gaussian proxy after q",
-                "choose the closest fast-sampling Xf/Xg distribution with stddev above that sigma",
+                "choose the smallest Secret+Error sampling-bit budget that meets the measured target",
                 "rank only candidates above the requested lower bound",
             ],
         },
@@ -740,10 +740,15 @@ def distribution_rank(candidate: dict[str, Any], request: NTRURequest) -> tuple[
     available = margin is not None
     margin_value = float(margin) if available else 0.0
     stddev = float(candidate["distribution"]["secret"].get("stddev", 0.0))
+    secret_sampling_bits = _ntru_sampling_bits(candidate["distribution"].get("secret"))
+    error_sampling_bits = _ntru_sampling_bits(candidate["distribution"].get("error"))
     shortage = abs(min(0.0, margin_value)) * 10_000.0
     return (
         0.0 if available else 1.0,
         shortage,
+        secret_sampling_bits + error_sampling_bits,
+        secret_sampling_bits,
+        error_sampling_bits,
         max(0.0, margin_value),
         stddev,
     )
@@ -771,9 +776,14 @@ def ntru_candidate_order(candidate: dict[str, Any], request: NTRURequest) -> tup
     distribution = candidate.get("distribution") or {}
     secret = distribution.get("secret") or {}
     error = distribution.get("error") or {}
+    secret_sampling_bits = _ntru_sampling_bits(secret)
+    error_sampling_bits = _ntru_sampling_bits(error)
     return (
         int(candidate["ring"]["n"]),
         int(candidate["modulus"]["q"]),
+        secret_sampling_bits + error_sampling_bits,
+        secret_sampling_bits,
+        error_sampling_bits,
         str(secret.get("family", "")),
         int(secret.get("component_count", 1)),
         str(secret.get("name", "")),
@@ -791,18 +801,65 @@ def validated_ntru_candidate_rank(
     selected = candidate["selection"]["selected_security_bits"]
     available = selected is not None
     measured_rank = -float(selected) if available else 0.0
-    rank = (
-        0 if candidate["selection"]["meets_target"] else 1,
-        0 if available else 1,
-        measured_rank,
-        0 if candidate["ring"]["family_id"] == request.ring_family else 1,
-        int(candidate["ring"]["n"]),
-        int(candidate["modulus"]["bits"]),
-        int(candidate["modulus"]["q"]),
-        str(candidate["ring"].get("preset") or ""),
-    )
+    meets = bool(candidate["selection"]["meets_target"])
+    ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
+    n = int(candidate["ring"]["n"])
+    q_bits = int(candidate["modulus"]["bits"])
+    q = int(candidate["modulus"]["q"])
+    secret = candidate["distribution"].get("secret") or {}
+    error = candidate["distribution"].get("error") or {}
+    secret_sampling_bits = _ntru_sampling_bits(secret)
+    error_sampling_bits = _ntru_sampling_bits(error)
+    if meets:
+        # Keep the required n -> q -> distribution order.  For a fixed n/q,
+        # the first target hit is the one with the smallest sampling budget.
+        rank = (
+            0,
+            ring_rank,
+            n,
+            q_bits,
+            q,
+            secret_sampling_bits + error_sampling_bits,
+            secret_sampling_bits,
+            error_sampling_bits,
+            str(secret.get("name", "")),
+            str(error.get("name", "")),
+        )
+    else:
+        # When the validated pool contains no target hit, retain the strongest
+        # measured unmet reference instead of a low-security cheap sampler.
+        rank = (
+            1,
+            0 if available else 1,
+            measured_rank,
+            ring_rank,
+            n,
+            q_bits,
+            q,
+            secret_sampling_bits + error_sampling_bits,
+            secret_sampling_bits,
+            error_sampling_bits,
+            str(secret.get("name", "")),
+            str(error.get("name", "")),
+        )
     candidate["selection"]["rank_score"] = rank
     return rank
+
+
+def _ntru_sampling_bits(distribution: dict[str, Any] | None) -> float:
+    unavailable = 1_000_000.0
+    if not isinstance(distribution, dict):
+        return unavailable
+    value = distribution.get("sampling_bits")
+    if value is None:
+        parameters = distribution.get("parameters")
+        if isinstance(parameters, dict):
+            value = parameters.get("sampling_bits")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return unavailable
+    return value if math.isfinite(value) else unavailable
 
 
 def recalculate_ntru_selection(
@@ -1383,13 +1440,23 @@ def uniform_mod_distribution(modulus: int) -> dict[str, Any]:
 
 def sparse_ternary_distribution(p: int, m: int, n: int) -> dict[str, Any]:
     variance = (p + m) / n
+    probability_plus = p / n
+    probability_minus = m / n
     return {
         "family": "sparse_ternary_fixed_weight",
         "name": f"SparseTernary(p={p}, m={m})",
+        "parameters": {
+            "probability_plus": probability_plus,
+            "probability_minus": probability_minus,
+            "probability_zero": 1 - probability_plus - probability_minus,
+            "nonzero_probability": probability_plus + probability_minus,
+            "plus_weight": p,
+            "minus_weight": m,
+        },
         "mean": round((p - m) / n, 9),
         "variance": round(variance, 9),
         "stddev": round(math.sqrt(variance), 9),
-        "support": [-1, 1],
+        "support": [-1, 0, 1],
         "symmetric": p == m,
         "sampling": "fixed-weight sparse ternary sampler",
         "estimator": {
@@ -1405,7 +1472,7 @@ def sparse_ternary_probability_distribution(n: int, l0: int, l1: int) -> dict[st
     p = max(0, round(n * probability_each))
     distribution = sparse_ternary_distribution(p, p, n)
     distribution["name"] = f"ST(l0={l0}, l1={l1})"
-    distribution["parameters"] = {
+    distribution["parameters"].update({
         "l0": l0,
         "l1": l1,
         "probability_plus": probability_each,
@@ -1413,7 +1480,10 @@ def sparse_ternary_probability_distribution(n: int, l0: int, l1: int) -> dict[st
         "probability_zero": 1 - 2 * probability_each,
         "plus_weight": p,
         "minus_weight": p,
-    }
+        "sampling_bits": 2 * l0 + l1,
+    })
+    distribution["sampling_bits"] = 2 * l0 + l1
     distribution["sampling"] = "sample sign/magnitude from bit arithmetic; zero otherwise"
     distribution["estimator"]["note"] = "fixed-weight approximation to iid sparse ternary"
+    distribution["estimator"]["sampling_bits"] = 2 * l0 + l1
     return distribution

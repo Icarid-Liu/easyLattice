@@ -34,6 +34,14 @@ class DistributionSearchTests(unittest.TestCase):
         self.assertEqual(result["component_count"], 1)
         self.assertEqual(result["estimator"]["type"], "centered_binomial")
 
+    def test_sparse_ternary_exposes_probabilities_support_and_sampling_bits(self):
+        result = sparse_ternary_component(1, 0, 512)
+        self.assertEqual(result["support"], [-1, 0, 1])
+        self.assertEqual(result["parameters"]["probability_plus"], 0.25)
+        self.assertEqual(result["parameters"]["probability_minus"], 0.25)
+        self.assertEqual(result["parameters"]["probability_zero"], 0.5)
+        self.assertEqual(result["sampling_bits"], 2)
+
     def test_component_limit_is_one_through_six(self):
         for value in (0, 7, "three", 3.5, True):
             with self.subTest(value=value), self.assertRaises(ValueError):

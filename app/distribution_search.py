@@ -24,6 +24,7 @@ SUPPORTED_DISTRIBUTION_SELECTORS = {
     "sparse_ternary",
 }
 SUPPORTED_DISTRIBUTION_MODES = {"pure", "combination"}
+UNAVAILABLE_SAMPLING_BITS = 1_000_000.0
 MIN_DISTRIBUTION_COMPONENTS = 1
 MAX_DISTRIBUTION_COMPONENTS = 6
 DEFAULT_DISTRIBUTION_COMPONENTS = 3
@@ -173,6 +174,7 @@ def centered_binomial_component(eta: int) -> dict[str, Any]:
         "variance": variance,
         "stddev": math.sqrt(variance),
         "support": [-eta, eta],
+        "sampling_bits": 2 * eta,
         "symmetric": True,
         "sampling": "bit-sliced popcount friendly",
         "estimator": {"type": "centered_binomial", "eta": eta},
@@ -196,6 +198,7 @@ def sparse_ternary_component(l0: int, l1: int, n: int) -> dict[str, Any]:
     if plus_weight < 1 or minus_weight < 1:
         raise ValueError("sparse-ternary component has no non-zero coefficients at this n.")
     variance = 2.0 * probability_each
+    sampling_bits = 2 * l0 + l1
     return {
         "family": "sparse_ternary",
         "name": f"ST(l0={l0}, l1={l1})",
@@ -210,7 +213,8 @@ def sparse_ternary_component(l0: int, l1: int, n: int) -> dict[str, Any]:
         "mean": 0.0,
         "variance": variance,
         "stddev": math.sqrt(variance),
-        "support": [-1, 1],
+        "support": [-1, 0, 1],
+        "sampling_bits": sampling_bits,
         "symmetric": True,
         "sampling": "sample sign/magnitude from bit arithmetic; zero otherwise",
         "estimator": {
@@ -219,6 +223,7 @@ def sparse_ternary_component(l0: int, l1: int, n: int) -> dict[str, Any]:
             "minus_weight": minus_weight,
             "iid_stddev": math.sqrt(variance),
             "fixed_weight_stddev": math.sqrt((plus_weight + minus_weight) / n),
+            "sampling_bits": sampling_bits,
             "note": "fixed-weight approximation to the iid sparse ternary distribution",
         },
     }
@@ -246,6 +251,11 @@ def compose_distribution(components: Sequence[dict[str, Any]]) -> dict[str, Any]
     support_low = sum(numeric_support(component)[0] for component in copied)
     support_high = sum(numeric_support(component)[1] for component in copied)
     stddev = math.sqrt(max(0.0, variance))
+    sampling_bits = sum(
+        int(component.get("sampling_bits", 0))
+        for component in copied
+        if component.get("sampling_bits") is not None
+    )
     names = [str(component.get("name", component.get("family", "component"))) for component in copied]
     components_summary = [component_summary(component) for component in copied]
     return {
@@ -256,6 +266,7 @@ def compose_distribution(components: Sequence[dict[str, Any]]) -> dict[str, Any]
         "variance": round(variance, 9),
         "stddev": round(stddev, 9),
         "support": [support_low, support_high],
+        "sampling_bits": sampling_bits,
         "symmetric": all(bool(component.get("symmetric", False)) for component in copied),
         "sampling": "sample each listed component independently and add the coefficients",
         "component_count": len(copied),
@@ -291,9 +302,11 @@ def enumerate_distribution_candidates(
             yield compose_distribution([component])
         return
 
+    candidates = []
     for size in range(1, request.max_components + 1):
         for selected in combinations_with_replacement(components, size):
-            yield compose_distribution(selected)
+            candidates.append(compose_distribution(selected))
+    yield from sorted(candidates, key=distribution_order_key)
 
 
 def distribution_order_key(distribution: dict[str, Any]) -> tuple[Any, ...]:
@@ -304,10 +317,25 @@ def distribution_order_key(distribution: dict[str, Any]) -> tuple[Any, ...]:
     count = int(distribution.get("component_count", len(distribution.get("components", [])) or 1))
     components = distribution.get("components", [])
     component_names = tuple(str(item.get("name", "")) for item in components)
+    component_families = tuple(
+        _component_family_rank(str(item.get("family", "")))
+        for item in components
+    )
+    if not component_families:
+        component_family = distribution.get("component_family", family)
+        component_families = (_component_family_rank(str(component_family)),)
+    sampling_bits = distribution.get("sampling_bits")
+    try:
+        sampling_bits = float(sampling_bits)
+        if not math.isfinite(sampling_bits):
+            raise ValueError
+    except (TypeError, ValueError):
+        sampling_bits = UNAVAILABLE_SAMPLING_BITS
     return (
         family_rank,
+        sampling_bits,
         count,
-        tuple(_component_family_rank(str(item.get("family", ""))) for item in components),
+        component_families,
         component_names,
         float(distribution.get("variance", 0.0)),
         str(distribution.get("name", "")),
@@ -341,6 +369,7 @@ def component_summary(component: dict[str, Any]) -> dict[str, Any]:
         "variance": component.get("variance", 0.0),
         "stddev": component.get("stddev", 0.0),
         "support": component.get("support", [-1, 1]),
+        "sampling_bits": component.get("sampling_bits"),
         "estimator": component.get("estimator", {}),
     }
 
@@ -356,7 +385,10 @@ def numeric_support(distribution: dict[str, Any]) -> tuple[int, int]:
 
 
 def _component_family_rank(family: str) -> int:
-    return {"centered_binomial": 0, "sparse_ternary": 1}.get(family, 2)
+    # When both families consume the same number of random bits, prefer the
+    # explicitly ternary sampler so its {-1, 0, +1} support remains visible in
+    # the automatic recommendation.
+    return {"sparse_ternary": 0, "centered_binomial": 1}.get(family, 2)
 
 
 __all__ = [

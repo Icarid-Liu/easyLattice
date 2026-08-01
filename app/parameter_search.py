@@ -128,6 +128,7 @@ class DistributionSpec:
     estimator: dict[str, Any]
     components: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    sampling_bits: int | None = None
 
 
 def recommend_rlwe(
@@ -708,6 +709,11 @@ def distribution_spec_from_shared(item: dict[str, Any]) -> DistributionSpec:
         estimator=dict(item.get("estimator") or {}),
         components=list(item.get("components") or []),
         warnings=list(item.get("warnings") or []),
+        sampling_bits=(
+            int(item["sampling_bits"])
+            if item.get("sampling_bits") is not None
+            else None
+        ),
     )
 
 
@@ -777,6 +783,7 @@ def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
     probability_each = ((2**l0) - 1) / (2 ** (2 * l0 + l1))
     variance = 2 * probability_each
     nonzero_probability = 2 * probability_each
+    sampling_bits = 2 * l0 + l1
     plus_weight = max(0, round(n * probability_each))
     minus_weight = max(0, round(n * probability_each))
     estimator_stddev = math.sqrt((plus_weight + minus_weight) / n) if n else 0.0
@@ -794,7 +801,7 @@ def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
         mean=0.0,
         variance=variance,
         stddev=math.sqrt(variance),
-        support=[-1, 1],
+        support=[-1, 0, 1],
         symmetric=True,
         sampling="sample sign/magnitude from bit arithmetic; zero otherwise",
         estimator={
@@ -803,9 +810,11 @@ def sparse_ternary_spec(n: int, l0: int, l1: int) -> DistributionSpec:
             "minus_weight": minus_weight,
             "iid_stddev": math.sqrt(variance),
             "fixed_weight_stddev": estimator_stddev,
+            "sampling_bits": sampling_bits,
             "note": "fixed-weight approximation to the iid sparse ternary distribution",
             "fast_screen_penalty_bits": sparse_ternary_fast_screen_penalty_bits(probability_each),
         },
+        sampling_bits=sampling_bits,
     )
 
 
@@ -818,14 +827,18 @@ def sparse_ternary_fast_screen_penalty_bits(probability_each: float) -> float:
 def distribution_profile(distribution: DistributionSpec) -> dict[str, Any]:
     return {
         "family": distribution.family,
+        "component_family": distribution.family,
         "name": distribution.name,
+        "parameters": distribution.parameters,
         "mean": distribution.mean,
         "variance": round(distribution.variance, 9),
         "stddev": round(distribution.stddev, 9),
         "support": distribution.support,
+        "sampling_bits": distribution.sampling_bits,
         "symmetric": distribution.symmetric,
         "sampling": distribution.sampling,
         "estimator": distribution.estimator,
+        "components": distribution.components,
     }
 
 
@@ -1018,12 +1031,30 @@ def distribution_rank(candidate: dict[str, Any], request: RequestOptions) -> tup
     margin = security_margin_bits(candidate["security"], request)
     stddev = float(candidate["distribution"]["secret"]["stddev"])
     error_stddev = float(candidate["distribution"]["error"]["stddev"])
+    secret_sampling_bits = _sampling_bits(candidate["distribution"].get("secret"))
+    error_sampling_bits = _sampling_bits(candidate["distribution"].get("error"))
+    total_sampling_bits = secret_sampling_bits + error_sampling_bits
     family_rank = 0 if candidate["distribution"]["secret"].get("family") == "sparse_ternary" else 1
     overkill = max(0.0, margin)
     shortage = abs(min(0.0, margin)) * 10_000.0
     if is_lwr_variant(request.hard_problem_variant):
-        return (shortage, error_stddev, overkill, stddev, family_rank)
-    return (shortage, overkill, error_stddev, stddev, family_rank)
+        return (
+            shortage,
+            error_sampling_bits,
+            overkill,
+            stddev,
+            family_rank,
+        )
+    return (
+        shortage,
+        total_sampling_bits,
+        secret_sampling_bits,
+        error_sampling_bits,
+        overkill,
+        error_stddev,
+        stddev,
+        family_rank,
+    )
 
 
 def visual_scores_for_candidate(candidate: dict[str, Any], request: RequestOptions) -> dict[str, Any]:
@@ -1129,6 +1160,18 @@ def estimator_candidate_rank(candidate: dict[str, Any], request: RequestOptions)
     return (n, q, *candidate_distribution_order(candidate))
 
 
+def _sampling_bits(distribution: dict[str, Any] | None) -> float:
+    unavailable = 1_000_000.0
+    if not isinstance(distribution, dict):
+        return unavailable
+    value = distribution.get("sampling_bits")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return unavailable
+    return value if math.isfinite(value) else unavailable
+
+
 def candidate_distribution_order(candidate: dict[str, Any]) -> tuple[Any, ...]:
     distribution = candidate.get("distribution") or {}
     secret = distribution.get("secret") or {}
@@ -1198,22 +1241,46 @@ def validated_candidate_rank(candidate: dict[str, Any], request: RequestOptions)
     q = int(candidate["modulus"]["q"])
     secret = candidate["distribution"]["secret"]
     error = candidate["distribution"]["error"]
+    secret_sampling_bits = _sampling_bits(secret)
+    error_sampling_bits = _sampling_bits(error)
+    total_sampling_bits = secret_sampling_bits + error_sampling_bits
     sampling_rank = 0 if secret.get("family") == "sparse_ternary" else 1
-    rank = (
-        0 if meets else 1,
-        measured_rank,
-        ring_rank,
-        n,
-        modulus_bits(q),
-        q,
-        sampling_rank,
-        str(secret.get("sampling", "")),
-        str(error.get("sampling", "")),
-        float(secret["stddev"]),
-        float(error["stddev"]),
-        str(secret.get("name", "")),
-        str(error.get("name", "")),
-    )
+    if meets:
+        # A measured target hit is selected in the required n -> q ->
+        # distribution order.  Within the same (n, q), minimize the random
+        # bits needed to sample Secret and Error, then use stable tie-breakers.
+        rank = (
+            0,
+            ring_rank,
+            n,
+            modulus_bits(q),
+            q,
+            total_sampling_bits,
+            secret_sampling_bits,
+            error_sampling_bits,
+            sampling_rank,
+            str(secret.get("name", "")),
+            str(error.get("name", "")),
+        )
+    else:
+        # If no measured candidate reaches the target, retain the best unmet
+        # reference by security bits rather than presenting a low-security
+        # distribution merely because it is cheap to sample.
+        rank = (
+            1,
+            0 if math.isfinite(selected_bits) else 1,
+            measured_rank,
+            ring_rank,
+            n,
+            modulus_bits(q),
+            q,
+            total_sampling_bits,
+            secret_sampling_bits,
+            error_sampling_bits,
+            sampling_rank,
+            str(secret.get("name", "")),
+            str(error.get("name", "")),
+        )
     candidate["selection"]["selected_security_bits"] = selected_bits
     candidate["selection"]["margin_bits"] = security_margin_bits(candidate["security"], request)
     candidate["selection"]["meets_target"] = meets

@@ -54,6 +54,7 @@
     fixed_weight_stddev: 0.1711632992203644,
     iid_stddev: 0.1711632992203644,
     fast_screen_penalty_bits: 30,
+    sampling_bits: 10,
     note: "fixed-weight approximation to the iid sparse ternary distribution",
   };
   const sparseParameters = {
@@ -70,25 +71,33 @@
     parameters: { secret: clone(sparseParameters), error: clone(sparseParameters) },
     secret: {
       family: "sparse_ternary",
+      component_family: "sparse_ternary",
       name: "ST(l0=4, l1=2)",
+      parameters: clone(sparseParameters),
       mean: 0,
       variance: 0.029296875,
       stddev: 0.171163299,
-      support: [-1, 1],
+      support: [-1, 0, 1],
+      sampling_bits: 10,
       symmetric: true,
       sampling: "sample sign/magnitude from bit arithmetic; zero otherwise",
       estimator: clone(sparseEstimator),
+      components: [],
     },
     error: {
       family: "sparse_ternary",
+      component_family: "sparse_ternary",
       name: "ST(l0=4, l1=2)",
+      parameters: clone(sparseParameters),
       mean: 0,
       variance: 0.029296875,
       stddev: 0.171163299,
-      support: [-1, 1],
+      support: [-1, 0, 1],
+      sampling_bits: 10,
       symmetric: true,
       sampling: "sample sign/magnitude from bit arithmetic; zero otherwise",
       estimator: clone(sparseEstimator),
+      components: [],
     },
     mode: { secret: "pure", error: "pure" },
     components: { secret: [], error: [] },
@@ -188,7 +197,7 @@
     lweCandidate({ q: 15361, factorization: "2^10 * 3 * 5", condition: "1024 | q - 1; 2048 does not divide q - 1", quality: "one_layer_remaining", layers: 1, factorCount: 512, factorDegree: 2, score: 67, twoAdicity: 10, smallWeight: 12, classical: 130.3, quantum: 115.4, beta: 549 }),
   ];
 
-  const distributionProfile = ({ family, name, variance, stddev, support, sampling, estimator, components }) => {
+  const distributionProfile = ({ family, name, parameters, variance, stddev, support, sampling, estimator, components }) => {
     const profile = {
       family,
       name,
@@ -200,6 +209,7 @@
       sampling,
       estimator,
     };
+    if (parameters !== undefined) profile.parameters = parameters;
     if (components) profile.components = components;
     return profile;
   };
@@ -215,9 +225,17 @@
   const sparseFixedProfile = (weight, stddev, variance) => distributionProfile({
     family: "sparse_ternary_fixed_weight",
     name: `SparseTernary(p=${weight}, m=${weight})`,
+    parameters: {
+      probability_plus: variance / 2,
+      probability_minus: variance / 2,
+      probability_zero: 1 - variance,
+      nonzero_probability: variance,
+      plus_weight: weight,
+      minus_weight: weight,
+    },
     variance,
     stddev,
-    support: [-1, 1],
+    support: [-1, 0, 1],
     sampling: "fixed-weight sparse ternary sampler",
     estimator: { type: "sparse_ternary_fixed_weight", plus_weight: weight, minus_weight: weight },
   });
@@ -302,7 +320,7 @@
   const power2NtruCandidate = (q, factorization, profileName, stddev, support, variance, bits) => {
     const components = profileName.startsWith("ST")
       ? [
-          compositeComponent("sparse_ternary_fixed_weight", "ST(l0=2, l1=0)", 0.375, 0.612372436, [-1, 1], { type: "sparse_ternary_fixed_weight", plus_weight: 96, minus_weight: 96, note: "fixed-weight approximation to iid sparse ternary" }),
+          compositeComponent("sparse_ternary_fixed_weight", "ST(l0=2, l1=0)", 0.375, 0.612372436, [-1, 0, 1], { type: "sparse_ternary_fixed_weight", plus_weight: 96, minus_weight: 96, sampling_bits: 4, note: "fixed-weight approximation to iid sparse ternary" }),
           compositeComponent("centered_binomial", "CBD(5)", 2.5, 1.58113883, [-5, 5], { type: "centered_binomial", eta: 5 }),
           compositeComponent("centered_binomial", "CBD(8)", 4, 2, [-8, 8], { type: "centered_binomial", eta: 8 }),
         ]

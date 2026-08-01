@@ -265,7 +265,7 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual((q - 1) % n, 0)
         self.assertIn(candidate["distribution"]["secret"]["family"], {"centered_binomial", "sparse_ternary"})
         self.assertIn(candidate["distribution"]["error"]["family"], {"centered_binomial", "sparse_ternary"})
-        self.assertEqual(candidate["selection"]["security_level"], "NIST-I")
+        self.assertEqual(candidate["selection"]["security_level"], "NIST-III")
         self.assertIn("visual_scores", candidate)
         self.assertEqual(candidate["visual_scores"]["security"]["max_bits"], 512)
         self.assertGreater(candidate["visual_scores"]["compactness"]["score"], 0)
@@ -328,6 +328,8 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertAlmostEqual(spec.parameters["probability_plus"], 1 / 4)
         self.assertAlmostEqual(spec.parameters["probability_minus"], 1 / 4)
         self.assertAlmostEqual(spec.parameters["probability_zero"], 1 / 2)
+        self.assertEqual(spec.support, [-1, 0, 1])
+        self.assertEqual(spec.sampling_bits, 2)
         self.assertEqual(spec.estimator["fast_screen_penalty_bits"], 0.0)
 
         result = recommend_rlwe({
@@ -347,7 +349,10 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(candidate["modulus"]["q"], 257)
         self.assertEqual(candidate["distribution"]["secret"]["family"], "sparse_ternary")
         self.assertEqual(candidate["distribution"]["error"]["family"], "sparse_ternary")
-        self.assertNotEqual(candidate["distribution"]["secret"]["name"], candidate["distribution"]["error"]["name"])
+        self.assertEqual(candidate["distribution"]["secret"]["support"], [-1, 0, 1])
+        self.assertEqual(candidate["distribution"]["error"]["support"], [-1, 0, 1])
+        self.assertEqual(candidate["distribution"]["secret"]["sampling_bits"], 2)
+        self.assertEqual(candidate["distribution"]["error"]["sampling_bits"], 2)
 
     def test_lwr_variants_use_compression_noise_error_with_configurable_secret(self):
         request = parse_request({
@@ -587,7 +592,7 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(result["validation"]["covered_candidates"], 2)
         self.assertEqual(result["validation"]["eligible_candidates"], 7)
         self.assertEqual(result["validation"]["estimator_commit"], "abc1234")
-        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 151.0)
+        self.assertEqual(result["recommendation"]["selection"]["selected_security_bits"], 141.0)
         self.assertEqual(result["recommendation"]["security"]["source_code"], "sage_enhanced")
         self.assertIn("validation_applied", result["recommendation"]["warning_codes"])
 

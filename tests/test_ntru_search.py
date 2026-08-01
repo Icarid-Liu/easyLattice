@@ -74,6 +74,38 @@ def estimator_partial_single_mode(bits=149.0, model="matzov", mode="classical"):
 
 
 class NTRUSearchTests(unittest.TestCase):
+    def test_pure_sparse_search_chooses_minimum_sampling_bits_target_hit(self):
+        request = {
+            "targetSecurity": 128,
+            "securityModel": "classical",
+            "redCostModel": "matzov",
+            "ringFamily": "power2",
+            "minN": 512,
+            "maxN": 512,
+            "minQBits": 9,
+            "maxQBits": 9,
+            "nttScalePower": 1,
+            "secretDistribution": "sparse_ternary",
+            "errorDistribution": "sparse_ternary",
+            "secretDistributionMode": "pure",
+            "errorDistributionMode": "pure",
+            "useEstimator": True,
+        }
+        with patch(
+            "app.ntru_search.run_estimator",
+            return_value=estimator_success(bits=140.0, complete=True),
+        ) as run:
+            result = recommend_ntru(request, config=AppConfig())
+
+        candidate = result["recommendation"]
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(candidate["distribution"]["secret"]["name"], "ST(l0=1, l1=0)")
+        self.assertEqual(candidate["distribution"]["secret"]["support"], [-1, 0, 1])
+        self.assertEqual(candidate["distribution"]["secret"]["parameters"]["probability_plus"], 0.25)
+        self.assertEqual(candidate["distribution"]["secret"]["parameters"]["probability_minus"], 0.25)
+        self.assertEqual(candidate["distribution"]["secret"]["sampling_bits"], 2)
+        self.assertEqual(candidate["selection"]["status"], "target_met")
+
     def test_power2_ntru_recommendation_has_three_candidates(self):
         result = recommend_ntru(
             {

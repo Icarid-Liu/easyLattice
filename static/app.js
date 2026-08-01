@@ -329,7 +329,8 @@ const TRANSLATIONS = {
     centeredBinomial: "Centered Binomial",
     sparseTernary: "Sparse Ternary",
     compressionP: "p={value}",
-    distributionText: "{name}, sigma={stddev}, support [{support}]",
+    distributionText: "{name}, sigma={stddev}{probabilities}, support [{support}]",
+    sparseProbabilities: ", P(+1)={plus}, P(-1)={minus}, P(0)={zero}",
     alternativeSummary: "{model}: {bits} · {margin} · {status}",
     alternativeUnavailableSummary: "{model}: security estimate unavailable · {status}",
     securityLevelUnclassified: "Unclassified",
@@ -597,7 +598,8 @@ const TRANSLATIONS = {
     centeredBinomial: "中心二项分布",
     sparseTernary: "稀疏三元分布",
     compressionP: "p={value}",
-    distributionText: "{name}, sigma={stddev}, support [{support}]",
+    distributionText: "{name}, sigma={stddev}{probabilities}, support [{support}]",
+    sparseProbabilities: "，P(+1)={plus}，P(-1)={minus}，P(0)={zero}",
     alternativeSummary: "{model}：{bits} · {margin} · {status}",
     alternativeUnavailableSummary: "{model}：无可用安全估计 · {status}",
     securityLevelUnclassified: "未分类",
@@ -1324,9 +1326,18 @@ function distributionText(distribution) {
     && distribution.stddev != null
     && Array.isArray(distribution.support)
   ) {
+    const probabilities = [distribution.family, distribution.component_family].includes("sparse_ternary")
+      || distribution.family === "sparse_ternary_fixed_weight"
+      ? t("sparseProbabilities", {
+          plus: formatDistributionProbability(distribution.parameters?.probability_plus),
+          minus: formatDistributionProbability(distribution.parameters?.probability_minus),
+          zero: formatDistributionProbability(distribution.parameters?.probability_zero),
+        })
+      : "";
     return t("distributionText", {
       name: distribution.name,
       stddev: distribution.stddev,
+      probabilities,
       support: distribution.support.join(", "),
     });
   }
@@ -1335,6 +1346,12 @@ function distributionText(distribution) {
     ["stddev", distribution.stddev == null ? null : `sigma=${distribution.stddev}`],
     ["support", Array.isArray(distribution.support) ? `[${distribution.support.join(", ")}]` : null],
   ]).map(([, value]) => value).join(", ") || null;
+}
+
+function formatDistributionProbability(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return numeric.toPrecision(6).replace(/\.?0+$/, "");
 }
 
 function formatNttQuality(modulus) {

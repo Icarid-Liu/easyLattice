@@ -73,6 +73,10 @@ Sparse ternary uses
 \frac{2^{\ell_0}-1}{2^{2\ell_0+\ell_1}}.
 \]
 
+Results expose `P(+1)`, `P(-1)`, `P(0)`, and support `[-1, 0, 1]`. For a fixed
+`(n, q)`, the search keeps the first measured candidate that meets the target
+when ordered by the smallest Secret+Error sampling-bit budget.
+
 The fast screen is not a scheme proof: correctness, rejection sampling,
 smoothing, and error correction remain scheme-specific.
 
