@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -162,6 +162,15 @@ class RecommendationJob:
     estimator_commit: str | None = None
     execution_mode: str = "local"
     timeout_seconds: int | None = None
+    current_candidate: Any = None
+    current_model: str | None = None
+    current_mode: str | None = None
+    current_attack: str | None = None
+    completed_attacks: int | None = None
+    total_attacks: int | None = None
+    cancel_requested: bool = False
+    cancel_event: Event = field(default_factory=Event, repr=False)
+    future: Future | None = field(default=None, repr=False)
     config: AppConfig = field(default_factory=AppConfig, repr=False)
 
 
@@ -234,7 +243,8 @@ def create_job(
 
 
 def submit_job(job: RecommendationJob) -> Future:
-    return executor.submit(run_job, job)
+    job.future = executor.submit(run_job, job)
+    return job.future
 
 
 def run_job(job: RecommendationJob) -> None:
@@ -248,12 +258,31 @@ def run_job(job: RecommendationJob) -> None:
             if event.estimator_profile is not None:
                 job.estimator_profile = event.estimator_profile
                 job.estimator_commit = event.estimator_commit
+            if event.candidate is not None:
+                job.current_candidate = event.candidate
+            if event.model is not None:
+                job.current_model = event.model
+            if event.mode is not None:
+                job.current_mode = event.mode
+            if event.attack is not None:
+                job.current_attack = event.attack
+            if event.completed is not None:
+                job.completed_attacks = event.completed
+            if event.total is not None:
+                job.total_attacks = event.total
 
     try:
         with progress_reporting(update_job_progress):
-            result = recommend_with_agent(job.payload, config=job.config)
+            search_kwargs = {"config": job.config}
+            # Fast-screen-only jobs are synchronous and do not spawn a
+            # cancellable estimator process.  Keeping the legacy call shape
+            # for those jobs also preserves compatibility with integrations
+            # that wrap recommend_with_agent.
+            if bool(job.payload.get("use_estimator", job.payload.get("useEstimator", False))):
+                search_kwargs["cancel_event"] = job.cancel_event
+            result = recommend_with_agent(job.payload, **search_kwargs)
         with jobs_lock:
-            job.status = "succeeded"
+            job.status = "cancelled" if job.cancel_event.is_set() else "succeeded"
             job.result = result
             job.error = None
             job.finished_at = time.time()
@@ -295,6 +324,13 @@ def job_to_json(job: RecommendationJob) -> dict[str, Any]:
         "estimator_commit": job.estimator_commit,
         "execution_mode": job.execution_mode,
         "timeout_seconds": job.timeout_seconds,
+        "current_candidate": job.current_candidate,
+        "current_model": job.current_model,
+        "current_mode": job.current_mode,
+        "current_attack": job.current_attack,
+        "completed_attacks": job.completed_attacks,
+        "total_attacks": job.total_attacks,
+        "cancel_requested": job.cancel_requested,
         "elapsed_seconds": round(
             max(0.0, elapsed_end - elapsed_start),
             2,
@@ -401,6 +437,23 @@ class EasyLatticeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/agent/jobs/") and parsed.path.endswith("/cancel"):
+            job_id = parsed.path.removeprefix("/api/agent/jobs/").removesuffix("/cancel").strip("/")
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job is not None and job.status in {"queued", "running"}:
+                    job.cancel_requested = True
+                    job.cancel_event.set()
+            if job is None:
+                self.write_error(HTTPStatus.NOT_FOUND, "job not found")
+                return
+            if job.status not in {"queued", "running"}:
+                self.write_json(job_to_json(job), HTTPStatus.CONFLICT)
+                return
+            response = job_to_json(job)
+            response["cancellation_requested"] = True
+            self.write_json(response, HTTPStatus.ACCEPTED)
+            return
         if parsed.path == "/api/config/estimator-profile":
             self.handle_profile_post()
             return

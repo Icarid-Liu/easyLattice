@@ -38,11 +38,11 @@ The same agent API also includes an initial NTRU selector:
 - power-of-two cyclotomic NTRU over `Z_q[x] / (x^n + 1)`, matching ring
   families used by NEV/BAT/DAWN-style variants;
 - the relaxed power-of-two NTT default `n/2 | q - 1`;
-- two-stage distribution selection: a discrete-Gaussian proxy first calibrates
-  the minimum standard deviation, then a closest fast-sampling distribution is
-  chosen. Fast distributions can be one block or short sums of sparse ternary,
-  symmetric uniform, and centered-binomial blocks. Summed distributions are
-  estimator moment approximations capped by the Gaussian calibration;
+- Secret and Error are independent distribution modules. Each defaults to
+  `pure`; `combination` mode enumerates additive CBD/sparse-ternary components
+  up to `maxDistributionComponents` (default 3, hard range 1–6). Composite
+  distributions are sent to the estimator as conservative moment
+  approximations and are marked with a warning;
 - HPS-like and HRSS-like comparison candidates;
 - optional local NTRU validation with MATZOV and ADPS16 classical and quantum
   cost models. The power-of-two, HPS, and HRSS fast/reference screens contain
@@ -134,13 +134,17 @@ Recommendation responses distinguish selection from validation:
 | `failed` | Validation was requested, but no candidate produced a usable estimate. The recommendation falls back to the deterministic fast-screen/reference ranking and is explicitly identified by `validation.status="failed"`, its security `source_code`, and validation warnings/messages. |
 | `not_requested` | Estimator validation was not requested; values come from the deterministic screen/reference data. |
 | `target_unmet` | Selection status, not validation status: the returned best available candidate is below the requested security target. |
+| `no_feasible_candidate` | The adaptive estimator search exhausted every candidate without a measured target hit; the returned item is the best unmet reference candidate. |
+| `cancelled` | The current local estimator process or job was cancelled explicitly. |
 
 ## Search Model
 
-Requested security is a lower bound. The selector first chooses the
-polynomial/ring family, then degree `n`, then the smallest modulus satisfying
-the requested NTT scale, and then the secret and error distributions. Within a
-fixed modulus, it avoids unnecessary security margin.
+Requested security is a lower bound. The selector orders candidates by degree
+`n`, then modulus `q`, then Secret/Error distribution. With estimator validation
+enabled, it evaluates the four MATZOV/ADPS16 classical/quantum comparisons for
+each candidate and returns at the first measured target hit. If the range is
+exhausted, it reports `validation.search_status="no_feasible_candidate"` and
+keeps only a clearly labelled best reference candidate.
 
 JSON output separates `secret` and `error` fields. For LWE/RLWE/MLWE, the
 prototype searches `Xs` and `Xe` independently. For LWR/RLWR/MLWR, the secret

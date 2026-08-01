@@ -27,6 +27,45 @@ from app.json_safety import sanitize_json_value
 NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
 
 
+def requested_task(payload: dict) -> tuple[str, str, str] | None:
+    """Return an optional task selector embedded in a runner payload.
+
+    The original payload has no task fields and therefore retains the full
+    four model/mode execution path.  Task payloads must provide all three
+    fields, which prevents an accidental request from silently running a
+    different attack.
+    """
+
+    names = ("model", "mode", "attack")
+    present = [name for name in names if name in payload and payload[name] is not None]
+    if not present:
+        return None
+    missing = [name for name in names if name not in present]
+    if missing:
+        raise ValueError(
+            "Estimator task requires model, mode, and attack fields. "
+            f"Missing: {', '.join(missing)}."
+        )
+    model = str(payload["model"]).lower()
+    mode = str(payload["mode"]).lower()
+    attack = str(payload["attack"]).lower()
+    if model not in {"matzov", "adps16"}:
+        raise ValueError(f"Unsupported estimator reduction model: {model}")
+    if mode not in {"classical", "quantum"}:
+        raise ValueError(f"Unsupported estimator security mode: {mode}")
+    return model, mode, attack
+
+
+def _task_attacks(problem: str) -> tuple[str, ...]:
+    return NTRU_ATTACKS if problem == "ntru" else LWE_ATTACKS
+
+
+def _default_modes(models: dict):
+    # Keep the historical ADPS16 view when available, while task payloads
+    # that only execute MATZOV still get a useful ``modes`` alias.
+    return models.get("adps16") or next(iter(models.values()), {})
+
+
 class AttackTimeout(Exception):
     pass
 
@@ -290,12 +329,22 @@ def run_lwe(payload: dict) -> dict:
         tag=f"RLWE screen n={n}, q={q}, {distribution.get('name', distribution.get('family'))}",
     ).normalize()
 
+    task = requested_task(payload)
+    if task is not None and task[2] not in _task_attacks("lwe"):
+        raise ValueError(f"Unsupported LWE estimator attack: {task[2]}")
     models = {}
-    for model_name, modes in reduction_model_variants().items():
+    variants = reduction_model_variants()
+    model_items = (
+        variants.items()
+        if task is None
+        else ((task[0], {task[1]: variants[task[0]][task[1]]}),)
+    )
+    for model_name, modes in model_items:
         models[model_name] = {}
         for mode, model in modes.items():
             attacks = {}
-            for name in LWE_ATTACKS:
+            attack_names = LWE_ATTACKS if task is None else (task[2],)
+            for name in attack_names:
                 correction = structure_correction_metadata(
                     name,
                     estimator_profile,
@@ -320,12 +369,12 @@ def run_lwe(payload: dict) -> dict:
                 attacks[name]["structure_correction"] = correction
             models[model_name][mode] = summarize_attacks(attacks)
 
-    default_modes = models["adps16"]
+    default_modes = _default_modes(models)
     ok = all(mode.get("ok") for family in models.values() for mode in family.values())
     complete = all(
         mode.get("complete") for family in models.values() for mode in family.values()
     )
-    return {
+    result = {
         "ok": ok,
         "complete": complete,
         "estimator_profile": estimator_profile,
@@ -346,6 +395,13 @@ def run_lwe(payload: dict) -> dict:
             "ring_degree": ring_degree,
         },
     }
+    if task is not None:
+        result["task"] = {
+            "model": task[0],
+            "mode": task[1],
+            "attack": task[2],
+        }
+    return result
 
 
 def run_ntru(payload: dict) -> dict:
@@ -385,8 +441,17 @@ def run_ntru(payload: dict) -> dict:
         tag=f"NTRU screen n={n}, q={q}",
     ).normalize()
 
+    task = requested_task(payload)
+    if task is not None and task[2] not in _task_attacks("ntru"):
+        raise ValueError(f"Unsupported NTRU estimator attack: {task[2]}")
     models = {}
-    for model_name, modes in reduction_model_variants().items():
+    variants = reduction_model_variants()
+    model_items = (
+        variants.items()
+        if task is None
+        else ((task[0], {task[1]: variants[task[0]][task[1]]}),)
+    )
+    for model_name, modes in model_items:
         models[model_name] = {}
         for mode, model in modes.items():
             try:
@@ -399,9 +464,15 @@ def run_ntru(payload: dict) -> dict:
                         catch_exceptions=True,
                     )
                 attacks = {}
-                for name, cost in estimates.items():
+                selected_estimates = estimates
+                if task is not None:
+                    selected_estimates = {
+                        task[2]: estimates[task[2]]
+                    } if task[2] in estimates else {}
+                for name, cost in selected_estimates.items():
                     attacks[name] = attack_result(cost)
-                for name in NTRU_ATTACKS:
+                expected_attacks = NTRU_ATTACKS if task is None else (task[2],)
+                for name in expected_attacks:
                     attacks.setdefault(
                         name,
                         {
@@ -416,12 +487,12 @@ def run_ntru(payload: dict) -> dict:
             except Exception as exc:
                 models[model_name][mode] = failure_mode(f"{type(exc).__name__}: {exc}")
 
-    default_modes = models["adps16"]
+    default_modes = _default_modes(models)
     ok = all(mode.get("ok") for family in models.values() for mode in family.values())
     complete = all(
         mode.get("complete") for family in models.values() for mode in family.values()
     )
-    return {
+    result = {
         "ok": ok,
         "complete": complete,
         "estimator_profile": estimator_profile,
@@ -441,6 +512,13 @@ def run_ntru(payload: dict) -> dict:
             "ring_degree": ring_degree,
         },
     }
+    if task is not None:
+        result["task"] = {
+            "model": task[0],
+            "mode": task[1],
+            "attack": task[2],
+        }
+    return result
 
 
 def estimator_distribution(ND, distribution: dict, n: int):

@@ -228,6 +228,29 @@ textarea {
   gap: 18px;
 }
 
+.field-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.distribution-module {
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.distribution-mode {
+  min-height: 36px;
+}
+
+.distribution-mode span {
+  min-height: 36px;
+  font-size: 12px;
+}
+
 .dfr-input-group,
 .dfr-distribution-section,
 .dfr-distribution-editors {
@@ -557,6 +580,20 @@ textarea {
 .top-strip p {
   color: var(--muted);
   margin-top: 4px;
+}
+
+.job-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.job-progress {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .status-pill {

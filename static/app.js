@@ -22,6 +22,10 @@ const ringFamily = document.querySelector("#ring-family");
 const secretDistributionSelect = document.querySelector("#secret-distribution");
 const errorDistributionSelect = document.querySelector("#error-distribution");
 const errorDistributionLabel = document.querySelector("#error-distribution-label");
+const errorDistributionTypeLabel = document.querySelector("#error-distribution-type-label");
+const errorDistributionModeControls = document.querySelector("#error-distribution-mode");
+const errorDistributionNote = document.querySelector("#error-distribution-note");
+const maxDistributionComponents = document.querySelector("#max-distribution-components");
 const languageSelect = document.querySelector("#language-select");
 const useLLM = document.querySelector("#use-llm");
 const profilePanel = document.querySelector("#profile-panel");
@@ -32,6 +36,9 @@ const modifyEstimatorProfile = document.querySelector("#modify-estimator-profile
 const saveEstimatorProfileButton = document.querySelector("#save-estimator-profile");
 const searchSubmit = form.querySelector('button[type="submit"]');
 const dfrSubmit = dfrForm.querySelector('button[type="submit"]');
+const jobControls = document.querySelector("#job-controls");
+const jobProgress = document.querySelector("#job-progress");
+const cancelEstimatorJobButton = document.querySelector("#cancel-estimator-job");
 
 const searchState = EasyLatticeModel.createRequestState();
 const dfrState = EasyLatticeModel.createRequestState();
@@ -42,6 +49,7 @@ let estimatorProfileDialogOpener = null;
 let currentLanguage = supportedLanguage(localStorage.getItem("easyLatticeLanguage") || navigator.language || "en");
 let activeWorkspace = "search";
 let renderedDfrType = null;
+let activeSearchRequest = null;
 const PREVIEW_MODE = new URLSearchParams(window.location.search).get("preview") === "1"
   && Boolean(window.EASYLATTICE_PREVIEW_FIXTURES);
 const DEFAULT_DISTRIBUTION_OPTIONS = [
@@ -125,6 +133,8 @@ const RESULT_CODE_KEYS = {
   dfr_sparse_fixed_weight_marginal: "dfrWarningSparse",
   dfr_ecc_external: "dfrEccExternal",
   bind_scheme_constraints: "nextBindSchemeConstraints",
+  no_feasible_candidate: "statusNoFeasibleCandidate",
+  cancelled: "statusCancelled",
 };
 const SOURCE_CODE_KEYS = {
   fast_screen: "sourceFastScreen",
@@ -166,6 +176,7 @@ const LEGACY_ERROR_KEYS = {
   "estimator job completed without a result": "errorEstimatorJobMissingResult",
   "estimator job failed": "errorEstimatorJobFailed",
   "estimator job polling timed out": "errorEstimatorPollingTimedOut",
+  "estimator job was cancelled": "statusCancelled",
   "request failed": "errorRequestFailed",
 };
 const DFR_LEGACY_MESSAGE_CODES = {
@@ -187,12 +198,23 @@ const TRANSLATIONS = {
     classical: "Classical",
     quantum: "Quantum",
     reductionCostModel: "Reduction cost model",
+    matzovModelLabel: "MATZOV (polynomial and sub-exponential terms; more aggressive)",
+    adps16ModelLabel: "ADPS16 (exponential term only; more conservative)",
+    reductionCostModelDescription: "MATZOV includes polynomial and sub-exponential terms; ADPS16 considers the exponential term only.",
     nttUnfriendly: "NTT scale: no restriction of n and q (NTT unfriendly)",
     nttScale: "NTT scale: {label} | q - 1",
     minimumModulusBits: "Minimum modulus bits",
     maximumModulusBits: "Maximum modulus bits",
     secretDistribution: "Secret distribution",
     errorDistribution: "Error distribution",
+    secretDistributionMode: "Secret distribution mode",
+    errorDistributionMode: "Error distribution mode",
+    distributionType: "Distribution type",
+    pureDistribution: "Pure",
+    combinationDistribution: "Combination",
+    maxDistributionComponents: "Maximum distribution components",
+    maxDistributionComponentsHelp: "Combination mode enumerates up to this many additive components (1–6).",
+    lwrErrorDistributionNote: "LWR-family errors use compression modulus p; distribution mode is not applicable.",
     compressionModulusP: "Compression modulus p",
     refineWithSage: "Refine with Sage estimator",
     naturalLanguageConstraints: "Natural-language constraints",
@@ -210,6 +232,8 @@ const TRANSLATIONS = {
     statusValidationFailed: "Validation failed",
     statusTargetMet: "Target met",
     statusTargetUnmet: "Target unmet",
+    statusNoFeasibleCandidate: "No feasible candidate",
+    statusCancelled: "Cancelled",
     statusInputsChanged: "Inputs changed",
     searchingParameters: "Searching parameters",
     generatingSubtitle: "Generating NTT-friendly moduli and screening security estimates.",
@@ -226,14 +250,23 @@ const TRANSLATIONS = {
     estimatorStatusRunning: "Running",
     estimatorStatusSucceeded: "Completed",
     estimatorStatusFailed: "Failed",
+    estimatorStatusCancelled: "Cancelled",
+    cancelEstimatorJob: "Cancel current attack",
+    cancellingEstimatorJob: "Requesting cancellation...",
+    cancelRequested: "Cancellation requested",
+    jobProgress: "Estimator progress: {completed}/{total} attacks{details}",
+    jobProgressUnknown: "Estimator progress{details}",
     errorSearchInputsChanged: "Search inputs changed while the estimator was running.",
     errorEstimatorJobMissingId: "The estimator job did not return an ID.",
     errorEstimatorJobMissingResult: "The estimator job completed without a result.",
     errorEstimatorJobFailed: "The estimator job failed.",
+    errorEstimatorJobCancelled: "The estimator job was cancelled.",
     errorEstimatorPollingTimedOut: "Estimator job polling timed out.",
     errorRequestFailed: "Request failed",
     requestFailed: "Request failed",
     recommendedInstance: "Recommended lattice instance ({n}, {q})",
+    bestEffortInstance: "Best-effort candidate ({n}, {q})",
+    cancelledResult: "Cancelled estimator result ({n}, {q})",
     summaryStats: "{source} · {count} candidates · {ms} ms",
     sageEstimator: "Sage estimator",
     fastScreen: "fast screen",
@@ -433,12 +466,23 @@ const TRANSLATIONS = {
     classical: "经典",
     quantum: "量子",
     reductionCostModel: "规约代价模型",
+    matzovModelLabel: "MATZOV（考虑多项式及亚指数部分复杂度，更激进）",
+    adps16ModelLabel: "ADPS16（只考虑指数部分，更保守）",
+    reductionCostModelDescription: "MATZOV 考虑多项式及亚指数部分复杂度；ADPS16 只考虑指数部分。",
     nttUnfriendly: "NTT 规模：不限制 n 和 q（不利于 NTT）",
     nttScale: "NTT 规模：{label} | q - 1",
     minimumModulusBits: "最小模数比特",
     maximumModulusBits: "最大模数比特",
     secretDistribution: "Secret 分布",
     errorDistribution: "Error 分布",
+    secretDistributionMode: "Secret 分布模式",
+    errorDistributionMode: "Error 分布模式",
+    distributionType: "分布类型",
+    pureDistribution: "纯分布",
+    combinationDistribution: "组合分布",
+    maxDistributionComponents: "最大分布分量数",
+    maxDistributionComponentsHelp: "组合模式最多自动枚举此数量的相加分量（1–6）。",
+    lwrErrorDistributionNote: "LWR 系列 Error 使用压缩模数 p；不适用分布模式。",
     compressionModulusP: "压缩模数 p",
     refineWithSage: "使用 Sage estimator 细化",
     naturalLanguageConstraints: "自然语言约束",
@@ -456,6 +500,8 @@ const TRANSLATIONS = {
     statusValidationFailed: "验证失败",
     statusTargetMet: "已达到目标",
     statusTargetUnmet: "未达到目标",
+    statusNoFeasibleCandidate: "范围内无可行候选",
+    statusCancelled: "已取消",
     statusInputsChanged: "输入已更改",
     searchingParameters: "正在搜索参数",
     generatingSubtitle: "正在生成适合 NTT 的模数并筛选安全估计。",
@@ -472,14 +518,23 @@ const TRANSLATIONS = {
     estimatorStatusRunning: "运行中",
     estimatorStatusSucceeded: "已完成",
     estimatorStatusFailed: "失败",
+    estimatorStatusCancelled: "已取消",
+    cancelEstimatorJob: "取消当前攻击",
+    cancellingEstimatorJob: "正在请求取消……",
+    cancelRequested: "已请求取消",
+    jobProgress: "Estimator 进度：{completed}/{total} 个攻击{details}",
+    jobProgressUnknown: "Estimator 进度{details}",
     errorSearchInputsChanged: "Estimator 运行期间搜索输入已更改。",
     errorEstimatorJobMissingId: "Estimator 任务未返回 ID。",
     errorEstimatorJobMissingResult: "Estimator 任务已完成，但没有返回结果。",
     errorEstimatorJobFailed: "Estimator 任务失败。",
+    errorEstimatorJobCancelled: "Estimator 任务已取消。",
     errorEstimatorPollingTimedOut: "Estimator 任务轮询超时。",
     errorRequestFailed: "请求失败",
     requestFailed: "请求失败",
     recommendedInstance: "推荐格实例 ({n}, {q})",
+    bestEffortInstance: "最佳参考候选 ({n}, {q})",
+    cancelledResult: "已取消的 estimator 结果 ({n}, {q})",
     summaryStats: "{source} · {count} 个候选 · {ms} ms",
     sageEstimator: "Sage estimator",
     fastScreen: "快速筛选",
@@ -762,6 +817,7 @@ estimatorProfileDialog?.addEventListener("close", () => {
 });
 form.addEventListener("input", markSearchInputsChanged);
 dfrForm.addEventListener("input", markDfrInputsChanged);
+cancelEstimatorJobButton?.addEventListener("click", cancelEstimatorJob);
 
 async function requestRecommendation() {
   if (searchState.snapshot().inFlight) return;
@@ -776,6 +832,15 @@ async function requestRecommendation() {
   );
   const secretDistribution = secretDistributionSelect.value;
   const errorDistribution = errorDistributionSelect.value;
+  const secretDistributionMode = selectedDistributionMode("secretDistributionMode");
+  const lwrError = LWR_VARIANTS.has(ringSelection.variant);
+  const errorDistributionMode = lwrError
+    ? "pure"
+    : selectedDistributionMode("errorDistributionMode");
+  const configuredMaxComponents = Number(maxDistributionComponents.value);
+  const maxComponents = Number.isInteger(configuredMaxComponents)
+    ? Math.max(1, Math.min(6, configuredMaxComponents))
+    : 3;
   const payload = {
     problem: hardProblem.category === "ntru" ? "ntru" : "rlwe",
     hardProblemCategory: hardProblem.category,
@@ -790,6 +855,9 @@ async function requestRecommendation() {
     distribution: secretDistribution,
     secretDistribution,
     errorDistribution,
+    secretDistributionMode,
+    errorDistributionMode,
+    maxDistributionComponents: maxComponents,
     useEstimator,
     intent: String(form.elements.namedItem("intent")?.value || ""),
     useLLM: useLLM.checked,
@@ -800,6 +868,7 @@ async function requestRecommendation() {
     subtitleKey: useEstimator ? "estimatorSubtitle" : "generatingSubtitle",
     subtitleValues: {},
   });
+  activeSearchRequest = request;
   updateRequestControls();
   if (activeWorkspace === "search") renderSearchState();
 
@@ -829,6 +898,7 @@ async function requestRecommendation() {
     });
   } finally {
     if (searchState.finish(request)) {
+      if (activeSearchRequest === request) activeSearchRequest = null;
       updateRequestControls();
       if (activeWorkspace === "search") renderSearchState();
     }
@@ -991,6 +1061,10 @@ async function requestRecommendationJob(payload, request) {
       if (!job.result) throw localizedError("errorEstimatorJobMissingResult");
       return job.result;
     }
+    if (job.status === "cancelled") {
+      if (job.result) return job.result;
+      throw localizedError("errorEstimatorJobCancelled");
+    }
     if (job.status === "failed") {
       throw errorWithFallback(job.error, "errorEstimatorJobFailed");
     }
@@ -1057,12 +1131,23 @@ function renderResult(result) {
   const target = request.target_security;
   const redCostModel = request.red_cost_model || request.redCostModel || "matzov";
   const displayedSecurity = securityBitsForReductionModel(security, redCostModel);
+  const resultStatus = result?.selection_status
+    || (result?.status && !["succeeded", "completed"].includes(result.status) ? result.status : null)
+    || validation.search_status
+    || (validation.status === "cancelled" ? "cancelled" : null)
+    || selection.status
+    || (selection.meets_target === true ? "target_met" : selection.meets_target === false ? "target_unmet" : null);
   const sourceCode = security.source_code || "";
   const source = sourceCode.startsWith("sage_") || String(security.source || "").startsWith("sage-lattice-estimator")
     ? t("sageEstimator")
     : t("fastScreen");
 
-  title.textContent = t("recommendedInstance", { n: ring.n ?? "-", q: modulus.q ?? "-" });
+  const titleKey = resultStatus === "cancelled"
+    ? "cancelledResult"
+    : ["target_unmet", "no_feasible_candidate", "no-feasible-candidate"].includes(resultStatus)
+      ? "bestEffortInstance"
+      : "recommendedInstance";
+  title.textContent = t(titleKey, { n: ring.n ?? "-", q: modulus.q ?? "-" });
   subtitle.textContent = t("summaryStats", {
     source,
     count: result.search?.generated_candidates ?? 0,
@@ -1308,6 +1393,8 @@ function validationStatusText(status) {
     failed: "statusValidationFailed",
     partial: "statusPartial",
     validated: "statusReady",
+    cancelled: "statusCancelled",
+    no_feasible_candidate: "statusNoFeasibleCandidate",
   };
   return status == null ? null : t(keys[status] || status);
 }
@@ -1316,6 +1403,8 @@ function selectionStatusText(status) {
   const keys = {
     target_met: "statusTargetMet",
     target_unmet: "statusTargetUnmet",
+    no_feasible_candidate: "statusNoFeasibleCandidate",
+    cancelled: "statusCancelled",
   };
   return status == null ? t("notAvailable") : t(keys[status] || status);
 }
@@ -1347,6 +1436,7 @@ function estimatorJobStatusText(status) {
     running: "estimatorStatusRunning",
     succeeded: "estimatorStatusSucceeded",
     failed: "estimatorStatusFailed",
+    cancelled: "estimatorStatusCancelled",
   };
   return status == null ? null : t(keys[status] || status);
 }
@@ -1357,6 +1447,9 @@ function estimatorJobMetadata(job) {
     return {
       subtitleKey: "estimatorWaiting",
       subtitleValues: { statusCode: job.status },
+      jobId: job.job_id || job.id || null,
+      cancelRequested: job.cancel_requested === true,
+      progress: estimatorJobProgress(job),
     };
   }
   const profile = job.estimator_profile === "enhanced" ? "Enhanced" : "Standard";
@@ -1372,6 +1465,9 @@ function estimatorJobMetadata(job) {
         elapsed: Math.max(0, Number(job.elapsed_seconds) || 0).toFixed(1),
         timeout: job.timeout_seconds ?? 240,
       },
+      jobId: job.job_id || job.id || null,
+      cancelRequested: job.cancel_requested === true,
+      progress: estimatorJobProgress(job),
     };
   }
   return {
@@ -1380,6 +1476,37 @@ function estimatorJobMetadata(job) {
       profile,
       commit: job.estimator_commit ? ` @ ${job.estimator_commit}` : "",
     },
+    jobId: job.job_id || job.id || null,
+    cancelRequested: job.cancel_requested === true,
+    progress: estimatorJobProgress(job),
+  };
+}
+
+function estimatorJobProgress(job) {
+  const current = job?.current_candidate;
+  const candidate = current && typeof current === "object"
+    ? EasyLatticeModel.compactRows([
+        ["n", (current.n ?? current.ring?.n) == null ? null : `n=${current.n ?? current.ring.n}`],
+        ["q", (current.q ?? current.modulus?.q) == null ? null : `q=${current.q ?? current.modulus.q}`],
+      ]).map(([, value]) => value).join(", ")
+    : current == null ? null : String(current);
+  const details = EasyLatticeModel.compactRows([
+    ["candidate", candidate],
+    ["model", job?.current_model],
+    ["mode", job?.current_mode],
+    ["attack", job?.current_attack],
+  ]).map(([, value]) => value).join(" · ");
+  const completed = Number.isFinite(Number(job?.completed_attacks))
+    ? Number(job.completed_attacks)
+    : null;
+  const total = Number.isFinite(Number(job?.total_attacks))
+    ? Number(job.total_attacks)
+    : null;
+  return {
+    completed,
+    total,
+    details: details ? ` · ${details}` : "",
+    textKey: completed != null && total != null ? "jobProgress" : details ? "jobProgressUnknown" : null,
   };
 }
 
@@ -1531,6 +1658,7 @@ function syncPreviewSecurityForm() {
     maxQBits: "24",
     secretDistribution: "auto",
     errorDistribution: "auto",
+    maxDistributionComponents: "3",
     intent: "",
   };
   Object.entries(fixedValues).forEach(([name, value]) => {
@@ -1546,6 +1674,13 @@ function syncPreviewSecurityForm() {
   });
   useLLM.checked = false;
   useLLM.disabled = true;
+  ["secretDistributionMode", "errorDistributionMode"].forEach((name) => {
+    const controls = form.querySelectorAll(`input[name="${name}"]`);
+    controls.forEach((control) => {
+      control.checked = control.value === "pure";
+      control.disabled = true;
+    });
+  });
 }
 
 function updateRequestControls() {
@@ -1555,6 +1690,14 @@ function updateRequestControls() {
   dfrSubmit.disabled = dfr.inFlight;
   copyJson.disabled = !search.copyEligible;
   copyDfrJson.disabled = !dfr.copyEligible;
+  const metadata = search.metadata || {};
+  const jobActive = Boolean(search.inFlight && metadata.jobId);
+  if (cancelEstimatorJobButton) {
+    cancelEstimatorJobButton.disabled = !jobActive || metadata.cancelRequested === true;
+    cancelEstimatorJobButton.textContent = metadata.cancelRequested
+      ? t("cancellingEstimatorJob")
+      : t("cancelEstimatorJob");
+  }
 }
 
 function markSearchInputsChanged() {
@@ -1574,11 +1717,28 @@ function syncDistributionOptions() {
   fillSelect(secretDistributionSelect, DEFAULT_DISTRIBUTION_OPTIONS, "auto");
   if (LWR_VARIANTS.has(hardProblem.variant)) {
     errorDistributionLabel.textContent = t("compressionModulusP");
+    if (errorDistributionTypeLabel) errorDistributionTypeLabel.textContent = t("compressionModulusP");
     fillSelect(errorDistributionSelect, LWR_COMPRESSION_OPTIONS, "3", formatCompressionOption);
+    errorDistributionModeControls?.classList.add("hidden");
+    errorDistributionNote?.classList.remove("hidden");
+    form.querySelectorAll('input[name="errorDistributionMode"]').forEach((control) => {
+      control.disabled = true;
+      if (control.value === "pure") control.checked = true;
+    });
     return;
   }
   errorDistributionLabel.textContent = t("errorDistribution");
+  if (errorDistributionTypeLabel) errorDistributionTypeLabel.textContent = t("distributionType");
   fillSelect(errorDistributionSelect, DEFAULT_DISTRIBUTION_OPTIONS, "auto");
+  errorDistributionModeControls?.classList.remove("hidden");
+  errorDistributionNote?.classList.add("hidden");
+  form.querySelectorAll('input[name="errorDistributionMode"]').forEach((control) => {
+    control.disabled = PREVIEW_MODE;
+  });
+}
+
+function selectedDistributionMode(name) {
+  return form.querySelector(`input[name="${name}"]:checked`)?.value || "pure";
 }
 
 function syncWorkspace() {
@@ -1600,7 +1760,9 @@ function syncWorkspace() {
 
 function searchResultPresentation(result) {
   const selection = result?.recommendation?.selection || {};
-  const selectionStatus = selection.status
+  const selectionStatus = result?.selection_status
+    || (result?.status && !["succeeded", "completed"].includes(result.status) ? result.status : null)
+    || selection.status
     || (selection.meets_target === true ? "target_met" : selection.meets_target === false ? "target_unmet" : null);
   return EasyLatticeModel.resultPresentation(result?.validation?.status, selectionStatus);
 }
@@ -1611,11 +1773,13 @@ function renderSearchState() {
   if (state.result) renderResult(state.result);
   if (state.inFlight) {
     const metadata = state.metadata || {};
+    renderEstimatorJobControls(metadata);
     title.textContent = t("searchingParameters");
     subtitle.textContent = requestMetadataSubtitle(metadata);
     setStatus("loading", t("statusRunning"));
     return;
   }
+  renderEstimatorJobControls(null);
   if (state.error) {
     title.textContent = t(state.error.titleKey);
     subtitle.textContent = requestStateSubtitle(state.error);
@@ -1638,6 +1802,45 @@ function renderSearchState() {
   title.textContent = t("waitingForInput");
   subtitle.textContent = t("chooseTarget");
   setStatus("idle", t("statusIdle"));
+}
+
+function renderEstimatorJobControls(metadata) {
+  const active = Boolean(metadata?.jobId);
+  jobControls?.classList.toggle("hidden", !active);
+  if (!active) {
+    if (jobProgress) jobProgress.textContent = "";
+    return;
+  }
+  const progress = metadata.progress || {};
+  if (jobProgress) {
+    jobProgress.textContent = progress.textKey
+      ? t(progress.textKey, {
+          completed: progress.completed,
+          total: progress.total,
+          details: progress.details || "",
+        })
+      : metadata.cancelRequested ? t("cancelRequested") : "";
+  }
+}
+
+async function cancelEstimatorJob() {
+  const state = searchState.snapshot();
+  const metadata = state.metadata || {};
+  const jobId = metadata.jobId;
+  if (!state.inFlight || !jobId || metadata.cancelRequested) return;
+  searchState.update(activeSearchRequest, { cancelRequested: true });
+  if (activeWorkspace === "search") {
+    renderSearchState();
+    updateRequestControls();
+  }
+  try {
+    await postJson(`/api/agent/jobs/${encodeURIComponent(jobId)}/cancel`, {}, { accepted: true });
+  } catch (error) {
+    if (searchState.snapshot().inFlight && searchState.update(activeSearchRequest, { cancelRequested: false, cancelError: error.message })) {
+      renderEstimatorJobControls(searchState.snapshot().metadata);
+      updateRequestControls();
+    }
+  }
 }
 
 function renderDfrState() {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from threading import Event
 from typing import Any
 
 from .config import AppConfig, load_config
@@ -30,7 +31,11 @@ LLM_ASSISTED_MODE = AgentMode(
 )
 
 
-def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
+def recommend_with_agent(
+    raw: dict[str, Any] | None = None,
+    config: AppConfig | None = None,
+    cancel_event: Event | None = None,
+) -> dict[str, Any]:
     payload = raw or {}
     config = config or load_config()
     deterministic_request = extract_request_payload(payload)
@@ -39,7 +44,7 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
 
     if not use_llm:
         report_progress("candidate_search")
-        result = run_deterministic_search(deterministic_request, config=config)
+        result = run_deterministic_search(deterministic_request, config=config, cancel_event=cancel_event)
         report_progress("finalizing")
         result["agent"] = {
             **asdict(DETERMINISTIC_MODE),
@@ -59,7 +64,7 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
     interpretation = OpenAICompatibleLLM(config.llm).interpret_request(intent, deterministic_request)
     merged_request = {**deterministic_request, **interpretation.overrides}
     report_progress("candidate_search")
-    result = run_deterministic_search(merged_request, config=config)
+    result = run_deterministic_search(merged_request, config=config, cancel_event=cancel_event)
     report_progress("finalizing")
     result["agent"] = {
         **asdict(LLM_ASSISTED_MODE),
@@ -75,12 +80,16 @@ def recommend_with_agent(raw: dict[str, Any] | None = None, config: AppConfig | 
     return result
 
 
-def run_deterministic_search(payload: dict[str, Any], config: AppConfig | None = None) -> dict[str, Any]:
+def run_deterministic_search(
+    payload: dict[str, Any],
+    config: AppConfig | None = None,
+    cancel_event: Event | None = None,
+) -> dict[str, Any]:
     problem = str(payload.get("problem", "rlwe")).lower()
     if problem == "ntru":
-        return recommend_ntru(payload, config=config)
+        return recommend_ntru(payload, config=config, cancel_event=cancel_event)
     if problem == "rlwe":
-        return recommend_rlwe(payload, config=config)
+        return recommend_rlwe(payload, config=config, cancel_event=cancel_event)
     raise ValueError("problem must be one of rlwe, ntru.")
 
 

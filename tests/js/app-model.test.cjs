@@ -139,6 +139,14 @@ test("status presentation applies the exact safety priority", () => {
     kind: "screened",
     key: "statusScreened",
   });
+  assert.deepEqual(model.resultPresentation("validated", "no_feasible_candidate"), {
+    kind: "warning",
+    key: "statusNoFeasibleCandidate",
+  });
+  assert.deepEqual(model.resultPresentation("cancelled", "target_unmet"), {
+    kind: "warning",
+    key: "statusCancelled",
+  });
 });
 
 test("compact rows removes absent values while retaining falsey data", () => {

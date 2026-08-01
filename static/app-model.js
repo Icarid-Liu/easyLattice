@@ -61,6 +61,16 @@
   }
 
   function resultPresentation(validationStatus, selectionStatus) {
+    if (selectionStatus === "cancelled" || validationStatus === "cancelled") {
+      return { kind: "warning", key: "statusCancelled" };
+    }
+    if (
+      selectionStatus === "no_feasible_candidate"
+      || selectionStatus === "no-feasible-candidate"
+      || validationStatus === "no_feasible_candidate"
+    ) {
+      return { kind: "warning", key: "statusNoFeasibleCandidate" };
+    }
     if (selectionStatus === "target_unmet") return { kind: "warning", key: "statusTargetUnmet" };
     if (validationStatus === "failed") return { kind: "error", key: "statusValidationFailed" };
     if (validationStatus === "partial") return { kind: "warning", key: "statusPartial" };

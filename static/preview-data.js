@@ -90,6 +90,8 @@
       sampling: "sample sign/magnitude from bit arithmetic; zero otherwise",
       estimator: clone(sparseEstimator),
     },
+    mode: { secret: "pure", error: "pure" },
+    components: { secret: [], error: [] },
     estimator: { secret: clone(sparseEstimator), error: clone(sparseEstimator) },
   });
   const lweSecurity = (classical, quantum, beta) => ({
@@ -322,7 +324,7 @@
     return ntruFixture({
       ring: { family_id: "power2", family: "2-power cyclotomic NTRU", n: 512, cyclotomic_index: 1024, polynomial: "x^512 + 1", quotient: `Z_${q}[x] / (x^512 + 1)`, ntru_type: "circulant", preset: null },
       modulus: { q, bits: 13 + (q >= 8192 ? 1 : 0), prime: true, q_minus_1_factorization: factorization, ntt_condition: "512 | q - 1; one layer below full split", ntt_friendly: true, ntt_quality: "selected_scale", two_adicity: 9, small_factor_weight: factorization.includes("23") ? 10 : 11 },
-      distribution: { family: "composite", name: profileName, fixed_weight: null, secret: clone(profile), error: clone(profile), calibration: { method: "gaussian_proxy_then_fast_distribution", sigma_lower_bound: 2.6, gaussian_proxy: gaussian, gaussian_proxy_bits: bits, chosen_fast_distribution: profileName, chosen_fast_stddev: stddev } },
+      distribution: { family: "composite", name: profileName, fixed_weight: null, secret: clone(profile), error: clone(profile), mode: { secret: "pure", error: "pure" }, components: { secret: [], error: [] }, calibration: { method: "gaussian_proxy_then_fast_distribution", sigma_lower_bound: 2.6, gaussian_proxy: gaussian, gaussian_proxy_bits: bits, chosen_fast_distribution: profileName, chosen_fast_stddev: stddev } },
       security: ntruSecurity(bits, null, null, "usvp"),
       note: "power-of-two cyclotomic NTRU candidate",
     });
@@ -330,21 +332,21 @@
   const hpsCandidate = (publicN, bits, errorStddev, errorVariance) => ntruFixture({
     ring: { family_id: "hps", family: "NTRU-HPS style", n: publicN - 1, cyclotomic_index: null, polynomial: `x^${publicN} - 1 with one relation removed by the estimator`, quotient: `NTRU-HPS style mod q=2048, public polynomial degree N=${publicN}`, ntru_type: "circulant", preset: null },
     modulus: { q: 2048, bits: 11, prime: false, q_minus_1_factorization: "23 * 89" },
-    distribution: { family: "uniform_mod / sparse_ternary_fixed_weight", name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)", fixed_weight: null, secret: uniformModProfile(), error: sparseFixedProfile(127, errorStddev, errorVariance), calibration: null },
+    distribution: { family: "uniform_mod / sparse_ternary_fixed_weight", name: "Xs=UniformMod(3), Xe=SparseTernary(p=127, m=127)", fixed_weight: null, secret: uniformModProfile(), error: sparseFixedProfile(127, errorStddev, errorVariance), mode: { secret: "pure", error: "pure" }, components: { secret: [], error: [] }, calibration: null },
     security: ntruSecurity(bits, null, null, "bdd_hybrid"),
     note: "HPS-like NTRU candidate",
   });
   const hrssCandidate = (publicN, bits) => ntruFixture({
     ring: { family_id: "hrss", family: "NTRU-HRSS style", n: publicN - 1, cyclotomic_index: null, polynomial: `x^${publicN} - 1 with one relation removed by the estimator`, quotient: `NTRU-HRSS style mod q=8192, public polynomial degree N=${publicN}`, ntru_type: "circulant", preset: null },
     modulus: { q: 8192, bits: 13, prime: false, q_minus_1_factorization: "8191" },
-    distribution: { family: "uniform_mod", name: "UniformMod(3)", fixed_weight: null, secret: uniformModProfile(), error: uniformModProfile(), calibration: null },
+    distribution: { family: "uniform_mod", name: "UniformMod(3)", fixed_weight: null, secret: uniformModProfile(), error: uniformModProfile(), mode: { secret: "pure", error: "pure" }, components: { secret: [], error: [] }, calibration: null },
     security: ntruSecurity(bits, null, null, "usvp"),
     note: "HRSS-like NTRU candidate",
   });
   const ntruPrimeCandidate = (preset, n, q, factorization, signWeight, fixedWeight, stddev, variance, classical, quantum, category) => ntruFixture({
     ring: { family_id: "ntru_prime", family: "Streamlined NTRU Prime", n, cyclotomic_index: null, polynomial: `x^${n} - x - 1`, quotient: `Z_${q}[x] / (x^${n} - x - 1)`, ntru_type: "circulant", preset },
     modulus: { q, bits: Math.floor(Math.log2(q)) + 1, prime: true, q_minus_1_factorization: factorization },
-    distribution: { family: "sparse_ternary_fixed_weight / uniform_mod", name: `Xs=SparseTernary(p=${signWeight}, m=${signWeight}), Xe=UniformMod(3)`, fixed_weight: fixedWeight, secret: sparseFixedProfile(signWeight, stddev, variance), error: uniformModProfile(), calibration: null },
+    distribution: { family: "sparse_ternary_fixed_weight / uniform_mod", name: `Xs=SparseTernary(p=${signWeight}, m=${signWeight}), Xe=UniformMod(3)`, fixed_weight: fixedWeight, secret: sparseFixedProfile(signWeight, stddev, variance), error: uniformModProfile(), mode: { secret: "pure", error: "pure" }, components: { secret: [], error: [] }, calibration: null },
     security: ntruSecurity(classical, quantum, category, "official-including-hybrid-minimum"),
     note: "Streamlined NTRU Prime Round-3 preset; fixed-weight signs use a balanced estimator approximation.",
   });
@@ -407,6 +409,9 @@
     distribution: "auto",
     secret_distribution: "auto",
     error_distribution: "auto",
+    secret_distribution_mode: "pure",
+    error_distribution_mode: "pure",
+    max_distribution_components: 3,
     use_estimator: false,
     estimator_timeout: 16,
     validation_count: 1,
@@ -430,6 +435,9 @@
     distribution: "auto",
     secret_distribution: "auto",
     error_distribution: "auto",
+    secret_distribution_mode: "pure",
+    error_distribution_mode: "pure",
+    max_distribution_components: 3,
     use_estimator: false,
     estimator_timeout: 16,
     validation_count: 3,
@@ -463,7 +471,10 @@
       status: meetsTarget ? "target_met" : "target_unmet",
       security_level: securityLevelForBits(selected),
       rank_score: candidate.problem === "ntru"
-        ? [hasEstimate ? 0 : 1, hasEstimate && !meetsTarget ? Math.abs(margin) * 10000 : 0, 0, candidate.ring.n, candidate.modulus.q, hasEstimate ? Math.max(0, margin) : 0, candidate.distribution.secret.stddev]
+        ? [hasEstimate ? 0 : 1, candidate.ring.n, candidate.modulus.q,
+          candidate.distribution.secret.family, candidate.distribution.secret.component_count ?? 1,
+          candidate.distribution.secret.name, candidate.distribution.error.family,
+          candidate.distribution.error.component_count ?? 1, candidate.distribution.error.name]
         : [meetsTarget ? 0 : Math.abs(Math.min(0, margin)) * 10000, 0, candidate.ring.n, candidate.modulus.q, candidate.modulus.bits, candidate.modulus.ntt_layers_remaining, hasEstimate ? Math.max(0, margin) : 0, candidate.distribution.secret.stddev, -candidate.modulus.decomposition_score],
     };
     candidate.visual_scores.security.bits = selected;
@@ -496,6 +507,9 @@
       distribution: payload.distribution || payload.secretDistribution || "auto",
       secret_distribution: payload.secretDistribution || payload.distribution || "auto",
       error_distribution: payload.errorDistribution || payload.distribution || "auto",
+      secret_distribution_mode: payload.secretDistributionMode || "pure",
+      error_distribution_mode: payload.errorDistributionMode || "pure",
+      max_distribution_components: Number(payload.maxDistributionComponents ?? 3),
       use_estimator: Boolean(payload.useEstimator),
       estimator_timeout: payload.useEstimator ? Number(payload.estimatorTimeout || 240) : baseRequest.estimator_timeout,
       intent: String(payload.intent || ""),

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import time
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from .config import AppConfig, EstimatorConfig, configured_estimator_source_root
@@ -47,9 +51,10 @@ def estimator_root(config: EstimatorConfig, profile: str) -> str | None:
 
 def run_estimator(
     payload: dict[str, Any],
-    timeout: int,
+    timeout: int | float | None,
     config: AppConfig,
     profile: str,
+    cancel_event: Event | None = None,
 ) -> dict[str, Any]:
     normalized = dict(payload)
     normalized["estimator_profile"] = profile
@@ -63,6 +68,8 @@ def run_estimator(
     except EstimatorRouteError as exc:
         return exc.as_result()
     if config.estimator.remote_url:
+        if cancel_event is not None and cancel_event.is_set():
+            return cancellation_result()
         report_progress("estimator_running", profile, None)
         return estimate_remotely(
             base_url=config.estimator.remote_url,
@@ -70,7 +77,13 @@ def run_estimator(
             timeout_seconds=config.estimator.remote_timeout_seconds,
             poll_interval_seconds=config.estimator.remote_poll_interval_seconds,
         )
-    return run_local_estimator(normalized, None, config.estimator, profile)
+    return run_local_estimator(
+        normalized,
+        None,
+        config.estimator,
+        profile,
+        cancel_event=cancel_event,
+    )
 
 
 def run_local_estimator(
@@ -78,6 +91,7 @@ def run_local_estimator(
     timeout: int | float | None,
     config: EstimatorConfig,
     profile: str,
+    cancel_event: Event | None = None,
 ) -> dict[str, Any]:
     try:
         runtime = prepare_estimator_runtime(config, profile)
@@ -98,15 +112,34 @@ def run_local_estimator(
         if not preflight_data.get("ok"):
             return preflight_data
 
-        completed = subprocess.run(
-            [runtime.sage_binary, "-python", str(runner)],
-            input=json.dumps(payload, allow_nan=False),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            env=runtime.environment,
-        )
+        if cancel_event is not None and cancel_event.is_set():
+            return cancellation_result()
+
+        command = [runtime.sage_binary, "-python", str(runner)]
+        input_data = json.dumps(payload, allow_nan=False)
+        if cancel_event is None:
+            # Preserve the simple path (and its stable CompletedProcess
+            # contract) for existing callers.  Jobs that opt into task
+            # cancellation use the polled Popen path below.
+            completed = subprocess.run(
+                command,
+                input=input_data,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                env=runtime.environment,
+            )
+        else:
+            completed = run_cancellable_process(
+                command,
+                input_data,
+                timeout=timeout,
+                environment=runtime.environment,
+                cancel_event=cancel_event,
+            )
+            if isinstance(completed, dict):
+                return completed
     except LocalProfileError as exc:
         if exc.code == "estimator_preflight_timeout":
             return {
@@ -148,6 +181,91 @@ def run_local_estimator(
             "message": "Estimator returned non-JSON output.",
         }
     return data
+
+
+def cancellation_result() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": "attack_cancelled",
+        "message": "Estimator attack was cancelled.",
+        "cancelled": True,
+    }
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    """Terminate a Sage process and its descendants when possible."""
+
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+
+def run_cancellable_process(
+    command: list[str],
+    input_data: str,
+    *,
+    timeout: int | float | None,
+    environment: dict[str, str],
+    cancel_event: Event,
+) -> subprocess.CompletedProcess[str] | dict[str, Any]:
+    """Run Sage while polling cancellation and the optional wall timeout."""
+
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=(os.name == "posix"),
+        )
+        # Send the request once; communicate() below drains both pipes while
+        # it waits, avoiding the deadlock risk of a direct stdout.read().
+        assert process.stdin is not None
+        process.stdin.write(input_data)
+        process.stdin.close()
+        # communicate() attempts to flush ``self.stdin`` before draining the
+        # pipes.  The request has already been sent, so mark it unavailable
+        # to avoid flushing a closed handle on the polling path.
+        process.stdin = None
+    except OSError as exc:
+        raise exc
+
+    while True:
+        if cancel_event.is_set():
+            _terminate_process(process)
+            process.communicate()
+            return cancellation_result()
+        if timeout is not None and time.monotonic() - started >= timeout:
+            _terminate_process(process)
+            process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            stdout, stderr = process.communicate(timeout=0.1)
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def decode_json_object(output: str) -> dict[str, Any] | None:

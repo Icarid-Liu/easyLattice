@@ -7,8 +7,11 @@ from itertools import combinations_with_replacement
 from typing import Any
 
 from .config import AppConfig, load_config
+from .adaptive_search import adaptive_validate
+from .distribution_search import DistributionRequest, enumerate_distribution_candidates, parse_distribution_request
 from .estimator_contract import ntru_type_for_variant
 from .estimator_process import run_estimator
+from .job_progress import report_progress
 from .json_safety import sanitize_json_value as sanitize_json_metadata
 from .parameter_search import (
     NTT_UNFRIENDLY_SCALE_POWER,
@@ -16,6 +19,7 @@ from .parameter_search import (
     SUPPORTED_SECURITY_MODELS,
     VALIDATION_CONFIG_ERROR_CODES,
     compactness_profile,
+    distinct_modulus_alternatives,
     factor_integer,
     floor_bits,
     floor_optional_bits,
@@ -65,6 +69,11 @@ class NTRURequest:
     min_q_bits: int = 2
     max_q_bits: int = 24
     distribution: str = "auto"
+    secret_distribution: str = "auto"
+    error_distribution: str = "auto"
+    secret_distribution_mode: str = "pure"
+    error_distribution_mode: str = "pure"
+    max_distribution_components: int = 3
     use_estimator: bool = False
     estimator_timeout: int = 45
     validation_count: int = 3
@@ -91,7 +100,11 @@ class NTRUCandidateSpec:
     calibration: dict[str, Any] | None = None
 
 
-def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
+def recommend_ntru(
+    raw: dict[str, Any] | None = None,
+    config: AppConfig | None = None,
+    cancel_event: Any | None = None,
+) -> dict[str, Any]:
     config = config or load_config()
     request = parse_ntru_request(raw or {}, config=config)
     started = time.perf_counter()
@@ -100,7 +113,7 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
         raise ValueError("No NTRU candidates could be generated for the requested bounds.")
 
     raw_candidates = [make_ntru_candidate(spec, request) for spec in specs]
-    candidates = select_best_distribution_per_modulus(raw_candidates, request)
+    candidates = raw_candidates
     viable = [candidate for candidate in candidates if candidate["selection"]["meets_target"]]
     ranked = sorted(viable or candidates, key=lambda candidate: candidate_rank(candidate, request))
 
@@ -122,55 +135,77 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
     failure_messages: list[str] = []
     raw_unknown_messages: list[str] = []
     if request.use_estimator:
-        estimator_result = {
-            "ok": True,
-            "profile": NTRU_ESTIMATOR_PROFILE,
-            "validated": [],
-        }
+        estimator_result = {"ok": True, "profile": NTRU_ESTIMATOR_PROFILE, "validated": []}
         validated_candidates: list[dict[str, Any]] = []
         covered_keys: set[str] = set()
-        attempts = 0
-        successful = 0
         attacks_complete = True
         estimator_commit = None
-        max_validation_attempts = min(len(eligible_candidates), request.validation_attempts)
-        validation_pool = sorted(
-            eligible_candidates.values(),
-            key=lambda candidate: candidate_rank(candidate, request),
-        )
-        for candidate in validation_pool[:max_validation_attempts]:
-            if successful >= request.validation_count:
-                break
-            attempts += 1
-            raw_result = run_ntru_estimator(
+        legacy_successes = [0]
+
+        def estimate(candidate: dict[str, Any]) -> Any:
+            return run_ntru_estimator(
                 candidate,
                 request.estimator_timeout,
                 config=config,
                 request=request,
+                cancel_event=cancel_event,
             )
-            result, validation_entry = normalize_ntru_estimator_response(
-                raw_result,
-                candidate=candidate,
-                request=request,
-            )
-            estimator_result["validated"].append(validation_entry)
-            if result is not None:
-                estimator_commit = estimator_commit or result.get("estimator_commit")
-                successful += 1
-                covered_keys.add(ntru_validation_candidate_key(candidate))
-                attacks_complete = attacks_complete and result["complete"]
-                apply_ntru_estimator_result(candidate, result, request)
-                validated_candidates.append(candidate)
-                validation_codes.append("validation_applied")
-                if not result["complete"]:
-                    estimator_result["ok"] = False
-                    validation_codes.append("validation_partial_attacks")
-            else:
+
+        def normalize(candidate: dict[str, Any], raw_result: Any) -> tuple[Any, dict[str, Any]]:
+            try:
+                return normalize_ntru_estimator_response(raw_result, candidate=candidate, request=request)
+            except Exception as exc:
+                return None, {
+                    "ok": False,
+                    "code": "invalid_estimator_response",
+                    "message": f"Invalid estimator response: {type(exc).__name__}: {exc}",
+                }
+
+        def apply(candidate: dict[str, Any], result: Any) -> None:
+            nonlocal attacks_complete, estimator_commit
+            estimator_commit = estimator_commit or result.get("estimator_commit")
+            covered_keys.add(ntru_validation_candidate_key(candidate))
+            attacks_complete = attacks_complete and result["complete"]
+            apply_ntru_estimator_result(candidate, result, request)
+            validated_candidates.append(candidate)
+            legacy_successes[0] += 1
+            validation_codes.append("validation_applied")
+            if not result["complete"]:
                 estimator_result["ok"] = False
-                code = validation_entry.get("code")
-                message = validation_entry["message"]
+                validation_codes.append("validation_partial_attacks")
+
+        validation_pool = sorted(
+            list(eligible_candidates.values()),
+            key=lambda candidate: ntru_candidate_order(candidate, request),
+        )
+        if request.legacy_validation_cap:
+            validation_pool = validation_pool[: request.validation_attempts]
+        adaptive = adaptive_validate(
+            validation_pool,
+            estimate=estimate,
+            normalize=normalize,
+            apply=apply,
+            meets_target=(
+                (lambda candidate: bool(candidate["selection"]["meets_target"]))
+                if not request.legacy_validation_cap
+                else (lambda candidate: False)
+            ),
+            order_key=lambda candidate: ntru_candidate_order(candidate, request),
+            cancel=(
+                lambda: bool(cancel_event and cancel_event.is_set())
+                or (
+                    request.legacy_validation_cap
+                    and legacy_successes[0] >= request.validation_count
+                )
+            ),
+        )
+        estimator_result["validated"] = list(adaptive.validated)
+        for entry in adaptive.validated:
+            if entry.get("ok") is not True:
+                estimator_result["ok"] = False
+                code = entry.get("code")
+                message = str(entry.get("message", "Estimator validation failed."))
                 failure_messages.append(message)
-                candidate["warnings"].append(message)
                 if isinstance(code, str) and code in VALIDATION_CONFIG_ERROR_CODES:
                     validation_codes.append("validation_config_missing")
                 else:
@@ -179,40 +214,38 @@ def recommend_ntru(raw: dict[str, Any] | None = None, config: AppConfig | None =
         validation = validation_result(
             requested=True,
             profile=NTRU_ESTIMATOR_PROFILE,
-            attempted=attempts,
-            successful=successful,
+            attempted=adaptive.attempted,
+            successful=adaptive.successful,
             covered=len(covered_keys),
             eligible=len(eligible_candidates),
             attacks_complete=attacks_complete,
             estimator_commit=estimator_commit,
-            message_codes=validation_codes,
+            message_codes=list(dict.fromkeys(validation_codes)),
         )
+        validation["search_status"] = (
+            "no_feasible_candidate"
+            if adaptive.exhausted and not adaptive.target_met
+            else adaptive.status
+        )
+        validation["target_met"] = adaptive.target_met
+        validation["exhausted"] = adaptive.exhausted
         if raw_unknown_messages:
             validation["message"] = raw_unknown_messages[0]
             validation["messages"] = list(dict.fromkeys(raw_unknown_messages))
         if validated_candidates:
             ranked = sorted(
                 validated_candidates,
-                key=lambda candidate: validated_ntru_candidate_rank(candidate, request),
+                key=(lambda candidate: ntru_candidate_order(candidate, request))
+                if adaptive.target_met
+                else (lambda candidate: validated_ntru_candidate_rank(candidate, request)),
             )
-            viable = [
-                candidate
-                for candidate in ranked
-                if candidate["selection"]["meets_target"]
-            ]
+            viable = [candidate for candidate in ranked if candidate["selection"]["meets_target"]]
         else:
-            viable = [
-                candidate
-                for candidate in ranked
-                if candidate["selection"]["meets_target"]
-            ]
-            ranked = sorted(
-                viable or ranked,
-                key=lambda candidate: candidate_rank(candidate, request),
-            )
+            viable = [candidate for candidate in ranked if candidate["selection"]["meets_target"]]
+            ranked = sorted(viable or ranked, key=lambda candidate: candidate_rank(candidate, request))
 
     recommendation = ranked[0]
-    alternatives = ranked[1:5]
+    alternatives = distinct_modulus_alternatives([recommendation, *ranked[1:]], limit=5)[1:]
     if (
         request.security_model == "quantum"
         and recommendation["selection"]["selected_security_bits"] is None
@@ -296,10 +329,25 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
     )
     validation_count = max(1, min(12, int(raw.get("validation_count", raw.get("validationCount", 3)))))
     validation_attempts = int(raw.get("validation_attempts", raw.get("validationAttempts", validation_count + 2)))
+    legacy_validation_cap = any(
+        key in raw
+        for key in ("validation_count", "validationCount", "validation_attempts", "validationAttempts")
+    )
 
     use_estimator = bool(raw.get("use_estimator", raw.get("useEstimator", False)))
+    secret_distribution_request = parse_distribution_request(raw, "secret")
+    error_distribution_request = parse_distribution_request(raw, "error")
+    legacy_distribution_defaults = not any(
+        key in raw
+        for key in (
+            "secretDistributionMode",
+            "secret_distribution_mode",
+            "errorDistributionMode",
+            "error_distribution_mode",
+        )
+    )
 
-    return NTRURequest(
+    request = NTRURequest(
         target_security=target,
         hard_problem_category=hard_problem_category,
         hard_problem_variant=hard_problem_variant,
@@ -312,11 +360,19 @@ def parse_ntru_request(raw: dict[str, Any], config: AppConfig | None = None) -> 
         min_q_bits=min_q_bits,
         max_q_bits=max_q_bits,
         distribution=str(raw.get("distribution", "auto")),
+        secret_distribution=secret_distribution_request.selector,
+        error_distribution=error_distribution_request.selector,
+        secret_distribution_mode=secret_distribution_request.mode,
+        error_distribution_mode=error_distribution_request.mode,
+        max_distribution_components=secret_distribution_request.max_components,
         use_estimator=use_estimator,
         estimator_timeout=max(4, min(300, estimator_timeout)),
         validation_count=validation_count,
         validation_attempts=max(1, min(24, validation_attempts)),
     )
+    object.__setattr__(request, "legacy_validation_cap", legacy_validation_cap)
+    object.__setattr__(request, "legacy_distribution_defaults", legacy_distribution_defaults)
+    return request
 
 
 def ntru_candidate_specs(request: NTRURequest) -> list[NTRUCandidateSpec]:
@@ -328,7 +384,7 @@ def ntru_candidate_specs(request: NTRURequest) -> list[NTRUCandidateSpec]:
     )
     for family in families:
         if family == "power2":
-            specs.extend(power2_specs())
+            specs.extend(power2_specs(None if request.legacy_distribution_defaults else request))
         elif family == "hps":
             specs.extend(hps_specs())
         elif family == "hrss":
@@ -344,7 +400,7 @@ def ntru_candidate_specs(request: NTRURequest) -> list[NTRUCandidateSpec]:
     ]
 
 
-def power2_specs() -> list[NTRUCandidateSpec]:
+def power2_specs(request: NTRURequest | None = None) -> list[NTRUCandidateSpec]:
     n = 512
     rows = [
         (257, 0.51, 128.0),
@@ -359,7 +415,7 @@ def power2_specs() -> list[NTRUCandidateSpec]:
     specs = []
     for q, sigma, bits in rows:
         fast_distribution = closest_fast_distribution(n=n, sigma_lower_bound=sigma)
-        specs.append(NTRUCandidateSpec(
+        base = NTRUCandidateSpec(
             family_id="power2",
             n=n,
             q=q,
@@ -379,8 +435,54 @@ def power2_specs() -> list[NTRUCandidateSpec]:
                 "chosen_fast_distribution": fast_distribution["name"],
                 "chosen_fast_stddev": fast_distribution["stddev"],
             },
-        ))
+        )
+        if request is None:
+            specs.append(base)
+            continue
+        specs.extend(expand_power2_distributions(base, request))
     return specs
+
+
+def expand_power2_distributions(
+    base: NTRUCandidateSpec,
+    request: NTRURequest,
+) -> list[NTRUCandidateSpec]:
+    """Enumerate Secret/Error distributions after the n/q row is selected."""
+    secret_request = DistributionRequest(
+        selector=request.secret_distribution,
+        mode=request.secret_distribution_mode,
+        max_components=request.max_distribution_components,
+    )
+    error_request = DistributionRequest(
+        selector=request.error_distribution,
+        mode=request.error_distribution_mode,
+        max_components=request.max_distribution_components,
+    )
+    secret_candidates = list(enumerate_distribution_candidates(base.n, secret_request))
+    error_candidates = list(enumerate_distribution_candidates(base.n, error_request))
+    expanded: list[NTRUCandidateSpec] = []
+    for secret in secret_candidates:
+        for error in error_candidates:
+            calibration = dict(base.calibration or {})
+            calibration.update(
+                {
+                    "secret_distribution_mode": request.secret_distribution_mode,
+                    "error_distribution_mode": request.error_distribution_mode,
+                    "secret_distribution": secret.get("name"),
+                    "error_distribution": error.get("name"),
+                }
+            )
+            expanded.append(
+                NTRUCandidateSpec(
+                    **{
+                        **asdict(base),
+                        "secret_distribution": secret,
+                        "error_distribution": error,
+                        "calibration": calibration,
+                    }
+                )
+            )
+    return expanded
 
 
 def hps_specs() -> list[NTRUCandidateSpec]:
@@ -531,6 +633,14 @@ def make_ntru_candidate(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[s
             "fixed_weight": spec.fixed_weight,
             "secret": spec.secret_distribution,
             "error": spec.error_distribution,
+            "mode": {
+                "secret": request.secret_distribution_mode,
+                "error": request.error_distribution_mode,
+            },
+            "components": {
+                "secret": spec.secret_distribution.get("components", []),
+                "error": spec.error_distribution.get("components", []),
+            },
             "calibration": spec.calibration,
         },
         "security": security,
@@ -553,6 +663,12 @@ def make_ntru_candidate(spec: NTRUCandidateSpec, request: NTRURequest) -> dict[s
         "notes": [spec.note],
     }
     recalculate_ntru_selection(candidate, request, update_visual=False)
+    if spec.secret_distribution.get("warnings") or spec.error_distribution.get("warnings"):
+        candidate["warnings"].extend(
+            list(spec.secret_distribution.get("warnings", []))
+            + list(spec.error_distribution.get("warnings", []))
+        )
+        candidate["warning_codes"].append("composite_distribution_moment_approximation")
     return candidate
 
 
@@ -638,22 +754,33 @@ def candidate_rank(candidate: dict[str, Any], request: NTRURequest) -> tuple[flo
     margin = candidate["selection"]["margin_bits"]
     available = margin is not None
     margin_value = float(margin) if available else 0.0
-    shortage = abs(min(0.0, margin_value)) * 10_000.0
-    family_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
     n = int(candidate["ring"]["n"])
     q = int(candidate["modulus"]["q"])
-    stddev = float(candidate["distribution"]["secret"].get("stddev", 0.0))
     rank = (
         0.0 if available else 1.0,
-        shortage,
-        family_rank,
         n,
         q,
-        max(0.0, margin_value),
-        stddev,
+        *ntru_candidate_order(candidate, request)[2:],
     )
     candidate["selection"]["rank_score"] = rank
     return rank
+
+
+def ntru_candidate_order(candidate: dict[str, Any], request: NTRURequest) -> tuple[Any, ...]:
+    """Deterministic adaptive order: n, then q, then Secret/Error distribution."""
+    distribution = candidate.get("distribution") or {}
+    secret = distribution.get("secret") or {}
+    error = distribution.get("error") or {}
+    return (
+        int(candidate["ring"]["n"]),
+        int(candidate["modulus"]["q"]),
+        str(secret.get("family", "")),
+        int(secret.get("component_count", 1)),
+        str(secret.get("name", "")),
+        str(error.get("family", "")),
+        int(error.get("component_count", 1)),
+        str(error.get("name", "")),
+    )
 
 
 def validated_ntru_candidate_rank(
@@ -839,6 +966,7 @@ def run_ntru_estimator(
     timeout: int,
     config: AppConfig | None = None,
     request: NTRURequest | None = None,
+    cancel_event: Any | None = None,
 ) -> dict[str, Any]:
     config = config or load_config()
     provenance = ntru_estimator_provenance(candidate, request)
@@ -856,7 +984,34 @@ def run_ntru_estimator(
             5,
             min(90, config.estimator.per_attack_timeout_seconds * 2),
         )
-    return run_estimator(payload, timeout, config, NTRU_ESTIMATOR_PROFILE)
+    report_progress(
+        "estimator_running",
+        NTRU_ESTIMATOR_PROFILE,
+        None,
+        candidate={"n": candidate["ring"]["n"], "q": candidate["modulus"]["q"]},
+        completed=0,
+        total=4,
+    )
+    if cancel_event is None:
+        result = run_estimator(payload, timeout, config, NTRU_ESTIMATOR_PROFILE)
+    else:
+        result = run_estimator(
+            payload,
+            timeout,
+            config,
+            NTRU_ESTIMATOR_PROFILE,
+            cancel_event=cancel_event,
+        )
+    report_progress(
+        "estimator_attack_completed" if isinstance(result, dict) and result.get("complete") else "estimator_running",
+        NTRU_ESTIMATOR_PROFILE,
+        result.get("estimator_commit") if isinstance(result, dict) else None,
+        candidate={"n": candidate["ring"]["n"], "q": candidate["modulus"]["q"]},
+        completed=4 if isinstance(result, dict) and result.get("complete") else None,
+        total=4,
+        cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+    )
+    return result
 
 
 def apply_ntru_estimator_result(
@@ -1053,9 +1208,11 @@ def ntru_required_ntt_divisor(n: int, ntt_scale_power: int) -> int:
 
 
 def ntru_distribution_family(spec: NTRUCandidateSpec) -> str:
-    if spec.secret_distribution["family"] == spec.error_distribution["family"]:
-        return spec.secret_distribution["family"]
-    return f"{spec.secret_distribution['family']} / {spec.error_distribution['family']}"
+    secret_family = spec.secret_distribution.get("component_family", spec.secret_distribution.get("family"))
+    error_family = spec.error_distribution.get("component_family", spec.error_distribution.get("family"))
+    if secret_family == error_family:
+        return str(secret_family)
+    return f"{secret_family} / {error_family}"
 
 
 def ntru_distribution_name(spec: NTRUCandidateSpec) -> str:

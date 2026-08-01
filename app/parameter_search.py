@@ -4,12 +4,19 @@ import json
 import math
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from itertools import product
 from typing import Any
 
 from .compression_noise import compression_noise_profile
+from .adaptive_search import adaptive_validate
 from .config import AppConfig, load_config
+from .distribution_search import (
+    DistributionRequest,
+    distribution_order_key,
+    enumerate_distribution_candidates,
+    parse_distribution_request,
+)
 from .estimator_contract import (
     EstimatorRouteError,
     LWE_ATTACKS,
@@ -18,6 +25,7 @@ from .estimator_contract import (
     validate_estimator_route,
 )
 from .estimator_process import estimator_profile_for, run_estimator
+from .job_progress import report_progress
 from .json_safety import sanitize_json_value
 from .security_result import modulus_bits, selection_status, validation_result
 
@@ -97,6 +105,9 @@ class RequestOptions:
     distribution: str = "auto"
     secret_distribution: str = "auto"
     error_distribution: str = "auto"
+    secret_distribution_mode: str = "pure"
+    error_distribution_mode: str = "pure"
+    max_distribution_components: int = 3
     use_estimator: bool = False
     estimator_timeout: int = 16
     validation_count: int = 1
@@ -115,16 +126,22 @@ class DistributionSpec:
     symmetric: bool
     sampling: str
     estimator: dict[str, Any]
+    components: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
-def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None = None) -> dict[str, Any]:
+def recommend_rlwe(
+    raw: dict[str, Any] | None = None,
+    config: AppConfig | None = None,
+    cancel_event: Any | None = None,
+) -> dict[str, Any]:
     """Return an RLWE recommendation and a small list of alternatives."""
     config = config or load_config()
     request = parse_request(raw or {}, config=config)
     started = time.perf_counter()
 
     raw_candidates = build_candidates(request)
-    candidates = select_best_distribution_per_modulus(raw_candidates, request)
+    candidates = raw_candidates
     if not candidates:
         raise ValueError("No candidates could be generated for the requested bounds.")
 
@@ -152,47 +169,94 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
         estimator_result = {"ok": True, "profile": profile, "validated": []}
         validated_candidates: list[dict[str, Any]] = []
         covered_keys: set[str] = set()
-        max_validation_attempts = min(len(eligible_candidates), request.validation_attempts)
-        validation_pool = rotate_secret_candidates(
-            list(eligible_candidates.values()),
-            lambda candidate: estimator_candidate_rank(candidate, request),
-        )
-        attempts = 0
-        successful = 0
         attacks_complete = True
         estimator_commit = None
-        for candidate in validation_pool[:max_validation_attempts]:
-            attempts += 1
-            raw_result = run_sage_estimator(
+        legacy_successes = [0]
+
+        def estimate(candidate: dict[str, Any]) -> Any:
+            return run_sage_estimator(
                 candidate,
                 request.estimator_timeout,
                 config=config,
                 request=request,
                 profile=profile,
+                cancel_event=cancel_event,
             )
-            result, validation_entry = normalize_estimator_response(
-                raw_result,
-                request=request,
-                expected_profile=profile,
-            )
-            estimator_result["validated"].append(validation_entry)
-            if result is not None:
-                estimator_commit = estimator_commit or result.get("estimator_commit")
-                successful += 1
-                covered_keys.add(validation_candidate_key(candidate))
-                attacks_complete = attacks_complete and result["complete"]
-                apply_estimator_result(candidate, result, request, profile=profile)
-                validated_candidates.append(candidate)
-                validation_codes.append("validation_applied")
-                if not result["complete"]:
-                    estimator_result["ok"] = False
-                    validation_codes.append("validation_partial_attacks")
-            else:
+
+        def normalize(candidate: dict[str, Any], raw_result: Any) -> tuple[Any, dict[str, Any]]:
+            try:
+                return normalize_estimator_response(
+                    raw_result,
+                    request=request,
+                    expected_profile=profile,
+                )
+            except Exception as exc:
+                return None, invalid_estimator_response(
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        def apply(candidate: dict[str, Any], result: Any) -> None:
+            nonlocal attacks_complete, estimator_commit
+            estimator_commit = estimator_commit or result.get("estimator_commit")
+            covered_keys.add(validation_candidate_key(candidate))
+            attacks_complete = attacks_complete and result["complete"]
+            apply_estimator_result(candidate, result, request, profile=profile)
+            validated_candidates.append(candidate)
+            legacy_successes[0] += 1
+            validation_codes.append("validation_applied")
+            if not result["complete"]:
                 estimator_result["ok"] = False
-                code = validation_entry.get("code")
-                message = validation_entry["message"]
-                failure_messages.append(message)
-                candidate["warnings"].append(message)
+                validation_codes.append("validation_partial_attacks")
+
+        def on_progress(event: dict[str, Any]) -> None:
+            entry = event.get("candidate")
+            if event.get("event") == "candidate_failed" and isinstance(entry, dict):
+                # The normalized error is already in the validation list; keep the
+                # candidate warning for the existing UI contract.
+                if estimator_result["validated"]:
+                    last = estimator_result["validated"][-1]
+                    message = last.get("message")
+                    if message:
+                        failure_messages.append(str(message))
+                        entry.setdefault("warnings", []).append(str(message))
+
+        validation_values = list(eligible_candidates.values())
+        validation_pool = rotate_secret_candidates(
+            validation_values,
+            lambda candidate: estimator_candidate_rank(candidate, request),
+        )
+        if request.legacy_validation_cap:
+            validation_pool = validation_pool[: request.validation_attempts]
+        adaptive = adaptive_validate(
+            validation_pool,
+            estimate=estimate,
+            normalize=normalize,
+            apply=apply,
+            meets_target=(
+                (lambda candidate: meets_target(candidate["security"], request))
+                if not request.legacy_validation_cap
+                else (lambda candidate: False)
+            ),
+            order_key=lambda candidate: estimator_candidate_rank(candidate, request),
+            on_progress=on_progress,
+            cancel=(
+                lambda: bool(cancel_event and cancel_event.is_set())
+                or (
+                    request.legacy_validation_cap
+                    and legacy_successes[0] >= request.validation_count
+                )
+            ),
+        )
+        # ``adaptive_validate`` stores normalized entries; classify failures and
+        # preserve the legacy validation messages/codes expected by the UI.
+        estimator_result["validated"] = list(adaptive.validated)
+        for entry in adaptive.validated:
+            if entry.get("ok") is not True:
+                estimator_result["ok"] = False
+                code = entry.get("code")
+                message = str(entry.get("message", "Estimator validation failed."))
+                if message not in failure_messages:
+                    failure_messages.append(message)
                 if isinstance(code, str) and code in VALIDATION_CONFIG_ERROR_CODES:
                     validation_codes.append("validation_config_missing")
                 else:
@@ -201,26 +265,39 @@ def recommend_rlwe(raw: dict[str, Any] | None = None, config: AppConfig | None =
         validation = validation_result(
             requested=True,
             profile=profile,
-            attempted=attempts,
-            successful=successful,
+            attempted=adaptive.attempted,
+            successful=adaptive.successful,
             covered=len(covered_keys),
             eligible=len(eligible_candidates),
             attacks_complete=attacks_complete,
             estimator_commit=estimator_commit,
-            message_codes=validation_codes,
+            message_codes=list(dict.fromkeys(validation_codes)),
         )
+        validation["search_status"] = (
+            "no_feasible_candidate"
+            if adaptive.exhausted and not adaptive.target_met
+            else adaptive.status
+        )
+        validation["target_met"] = adaptive.target_met
+        validation["exhausted"] = adaptive.exhausted
         if raw_unknown_messages:
             validation["message"] = raw_unknown_messages[0]
             validation["messages"] = list(dict.fromkeys(raw_unknown_messages))
         if validated_candidates:
-            ranked = sorted(validated_candidates, key=lambda c: validated_candidate_rank(c, request))
+            # The first measured target hit is already minimal under the required
+            # n -> q -> distribution order. Keep all checked candidates as
+            # alternatives while retaining a best unmet reference if exhausted.
+            if adaptive.target_met:
+                ranked = sorted(validated_candidates, key=lambda c: estimator_candidate_rank(c, request))
+            else:
+                ranked = sorted(validated_candidates, key=lambda c: validated_candidate_rank(c, request))
             viable = [candidate for candidate in ranked if meets_target(candidate["security"], request)]
         else:
             viable = [c for c in ranked if meets_target(c["security"], request)]
             ranked = sorted(viable or ranked, key=lambda c: candidate_rank(c, request))
 
     recommendation = ranked[0]
-    alternatives = ranked[1:5]
+    alternatives = distinct_modulus_alternatives([recommendation, *ranked[1:]], limit=5)[1:]
     for candidate in [recommendation, *alternatives]:
         candidate["warning_codes"] = list(
             dict.fromkeys(candidate.get("warning_codes", []) + validation["message_codes"])
@@ -295,6 +372,12 @@ def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> Reque
         raise ValueError("Require 256 <= min_n <= max_n.")
 
     distribution = parse_distribution_selector(raw.get("distribution", "auto"), "distribution")
+    secret_distribution_request = parse_distribution_request(raw, "secret")
+    error_distribution_request = parse_distribution_request(
+        raw,
+        "error",
+        lwr_error=is_lwr_variant(hard_problem_variant),
+    )
     secret_distribution = parse_distribution_selector(
         raw.get("secret_distribution", raw.get("secretDistribution", distribution)),
         "secret_distribution",
@@ -321,8 +404,12 @@ def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> Reque
         "validation_attempts",
         raw.get("validationAttempts", validation_count if validation_count == 1 else validation_count * 4),
     )
+    legacy_validation_cap = any(
+        key in raw
+        for key in ("validation_count", "validationCount", "validation_attempts", "validationAttempts")
+    )
 
-    return RequestOptions(
+    request = RequestOptions(
         target_security=target,
         hard_problem_category=hard_problem_category,
         hard_problem_variant=hard_problem_variant,
@@ -337,11 +424,18 @@ def parse_request(raw: dict[str, Any], config: AppConfig | None = None) -> Reque
         distribution=distribution,
         secret_distribution=secret_distribution,
         error_distribution=error_distribution,
+        secret_distribution_mode=secret_distribution_request.mode,
+        error_distribution_mode=error_distribution_request.mode,
+        max_distribution_components=secret_distribution_request.max_components,
         use_estimator=bool(raw.get("use_estimator", raw.get("useEstimator", False))),
         estimator_timeout=max(4, min(300, int(estimator_timeout))),
         validation_count=validation_count,
         validation_attempts=max(validation_count, min(80, int(validation_attempts))),
     )
+    # Internal compatibility switches are intentionally not part of the JSON
+    # request contract (and therefore do not appear in ``asdict`` output).
+    object.__setattr__(request, "legacy_validation_cap", legacy_validation_cap)
+    return request
 
 
 def parse_hard_problem(
@@ -528,6 +622,14 @@ def make_candidate(
                 "secret": secret_distribution.estimator,
                 "error": error_distribution.estimator,
             },
+            "mode": {
+                "secret": "combination" if secret_distribution.components and len(secret_distribution.components) > 1 else "pure",
+                "error": "combination" if error_distribution.components and len(error_distribution.components) > 1 else "pure",
+            },
+            "components": {
+                "secret": secret_distribution.components,
+                "error": error_distribution.components,
+            },
         },
         "security": security,
         "selection": {
@@ -543,6 +645,10 @@ def make_candidate(
         "warnings": warnings,
         "warning_codes": ["screen_scheme_not_bound"],
     }
+    composite_warnings = secret_distribution.warnings + error_distribution.warnings
+    if composite_warnings:
+        candidate["warnings"].extend(composite_warnings)
+        candidate["warning_codes"].append("composite_distribution_moment_approximation")
     if lwr_profile:
         candidate["lwr"] = lwr_profile
     candidate["visual_scores"] = visual_scores_for_candidate(candidate, request)
@@ -550,24 +656,59 @@ def make_candidate(
 
 
 def distribution_pairs(n: int, q: int, request: RequestOptions) -> list[tuple[DistributionSpec, DistributionSpec]]:
-    secret_candidates = distribution_candidates(n, request.secret_distribution)
+    secret_candidates = distribution_candidates(
+        n,
+        request.secret_distribution,
+        mode=request.secret_distribution_mode,
+        max_components=request.max_distribution_components,
+    )
     if not is_lwr_variant(request.hard_problem_variant):
-        error_candidates = distribution_candidates(n, request.error_distribution)
+        error_candidates = distribution_candidates(
+            n,
+            request.error_distribution,
+            mode=request.error_distribution_mode,
+            max_components=request.max_distribution_components,
+        )
         return list(product(secret_candidates, error_candidates))
     error_candidates = lwr_error_distribution_candidates(q, request)
     return list(product(secret_candidates, error_candidates))
 
 
-def distribution_candidates(n: int, selector: str) -> list[DistributionSpec]:
-    candidates: list[DistributionSpec] = []
-    if selector in {"auto", "centered_binomial"}:
-        candidates.extend(centered_binomial_spec(eta) for eta in ETA_VALUES)
-    if selector in {"auto", "sparse_ternary"}:
-        for l0, l1 in SPARSE_TERNARY_PARAMETERS:
-            spec = sparse_ternary_spec(n=n, l0=l0, l1=l1)
-            if spec.estimator["plus_weight"] >= 1 and spec.estimator["minus_weight"] >= 1:
-                candidates.append(spec)
-    return candidates
+def distribution_candidates(
+    n: int,
+    selector: str,
+    *,
+    mode: str = "pure",
+    max_components: int = 3,
+) -> list[DistributionSpec]:
+    """Adapt the shared distribution enumeration to the legacy spec type."""
+    request = DistributionRequest(
+        selector=selector,
+        mode=mode,
+        max_components=max_components,
+    )
+    return [distribution_spec_from_shared(item) for item in enumerate_distribution_candidates(n, request)]
+
+
+def distribution_spec_from_shared(item: dict[str, Any]) -> DistributionSpec:
+    # The shared pure representation deliberately uses family="pure" so the
+    # JSON contract can distinguish it from an additive composite.  Internally
+    # retain the concrete component family for existing security/ranking code.
+    family = str(item.get("component_family") or item.get("family") or "distribution")
+    return DistributionSpec(
+        family=family,
+        name=str(item.get("name", family)),
+        parameters=dict(item.get("parameters") or {}),
+        mean=float(item.get("mean", 0.0)),
+        variance=float(item.get("variance", 0.0)),
+        stddev=float(item.get("stddev", 0.0)),
+        support=[int(value) for value in item.get("support", [-1, 1])],
+        symmetric=bool(item.get("symmetric", True)),
+        sampling=str(item.get("sampling", "")),
+        estimator=dict(item.get("estimator") or {}),
+        components=list(item.get("components") or []),
+        warnings=list(item.get("warnings") or []),
+    )
 
 
 def lwr_error_distribution_candidates(q: int, request: RequestOptions) -> list[DistributionSpec]:
@@ -838,16 +979,32 @@ def security_level_for_bits(bits: float | int | None) -> str:
 
 def candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[float, ...]:
     margin = security_margin_bits(candidate["security"], request)
-    ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
+    if not hasattr(request, "legacy_validation_cap"):
+        ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
+        n = int(candidate["ring"]["n"])
+        q = int(candidate["modulus"]["q"])
+        q_bits = int(candidate["modulus"]["bits"])
+        stddev = float(candidate["distribution"]["secret"]["stddev"])
+        ntt_score = float(candidate["modulus"]["decomposition_score"])
+        ntt_layers_remaining = int(candidate["modulus"]["ntt_layers_remaining"])
+        overkill = max(0.0, margin)
+        shortage = abs(min(0.0, margin)) * 10_000.0
+        rank = (shortage, ring_rank, n, q, q_bits, ntt_layers_remaining, overkill, stddev, -ntt_score)
+        candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
+        candidate["selection"]["margin_bits"] = margin
+        candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
+        candidate["selection"]["status"] = selection_status(candidate["selection"]["meets_target"])
+        candidate["selection"]["security_level"] = security_level_for_bits(candidate["selection"]["selected_security_bits"])
+        candidate["selection"]["rank_score"] = rank
+        return rank
     n = int(candidate["ring"]["n"])
     q = int(candidate["modulus"]["q"])
-    q_bits = int(candidate["modulus"]["bits"])
-    stddev = float(candidate["distribution"]["secret"]["stddev"])
-    ntt_score = float(candidate["modulus"]["decomposition_score"])
-    ntt_layers_remaining = int(candidate["modulus"]["ntt_layers_remaining"])
-    overkill = max(0.0, margin)
-    shortage = abs(min(0.0, margin)) * 10_000.0
-    rank = (shortage, ring_rank, n, q, q_bits, ntt_layers_remaining, overkill, stddev, -ntt_score)
+    rank = (
+        0 if meets_target(candidate["security"], request) else 1,
+        n,
+        q,
+        *candidate_distribution_order(candidate),
+    )
     candidate["selection"]["selected_security_bits"] = selected_security_bits(candidate["security"], request)
     candidate["selection"]["margin_bits"] = margin
     candidate["selection"]["meets_target"] = meets_target(candidate["security"], request)
@@ -967,10 +1124,39 @@ def format_scale_number(value: float) -> str:
 
 
 def estimator_candidate_rank(candidate: dict[str, Any], request: RequestOptions) -> tuple[float, ...]:
-    ring_rank = 0 if candidate["ring"]["family_id"] == request.ring_family else 1
     n = int(candidate["ring"]["n"])
     q = int(candidate["modulus"]["q"])
-    return (ring_rank, n, q, *distribution_rank(candidate, request))
+    return (n, q, *candidate_distribution_order(candidate))
+
+
+def candidate_distribution_order(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    distribution = candidate.get("distribution") or {}
+    secret = distribution.get("secret") or {}
+    error = distribution.get("error") or {}
+    return (*distribution_order_key(secret), *distribution_order_key(error))
+
+
+def distinct_modulus_alternatives(
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    """Keep the UI alternatives readable while validation still sees every distribution."""
+    seen: set[tuple[Any, ...]] = set()
+    selected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        key = (
+            candidate.get("ring", {}).get("family_id"),
+            candidate.get("ring", {}).get("n"),
+            candidate.get("modulus", {}).get("q"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def secret_validation_key(candidate: dict[str, Any]) -> str:
@@ -1705,6 +1891,7 @@ def run_sage_estimator(
     config: AppConfig | None = None,
     request: RequestOptions | None = None,
     profile: str | None = None,
+    cancel_event: Any | None = None,
 ) -> dict[str, Any]:
     config = config or load_config()
     category = request.hard_problem_category if request else "lwe"
@@ -1728,7 +1915,28 @@ def run_sage_estimator(
                 config.estimator.per_attack_timeout_seconds or timeout // 2,
             ),
         )
-    return run_estimator(payload, timeout, config, profile)
+    report_progress(
+        "estimator_running",
+        profile,
+        None,
+        candidate={"n": candidate["ring"]["n"], "q": candidate["modulus"]["q"]},
+        completed=0,
+        total=4,
+    )
+    if cancel_event is None:
+        result = run_estimator(payload, timeout, config, profile)
+    else:
+        result = run_estimator(payload, timeout, config, profile, cancel_event=cancel_event)
+    report_progress(
+        "estimator_attack_completed" if isinstance(result, dict) and result.get("complete") else "estimator_running",
+        profile,
+        result.get("estimator_commit") if isinstance(result, dict) else None,
+        candidate={"n": candidate["ring"]["n"], "q": candidate["modulus"]["q"]},
+        completed=4 if isinstance(result, dict) and result.get("complete") else None,
+        total=4,
+        cancelled=bool(result.get("cancelled")) if isinstance(result, dict) else False,
+    )
+    return result
 
 
 def apply_estimator_result(

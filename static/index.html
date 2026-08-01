@@ -100,9 +100,12 @@
           <label>
             <span data-i18n="reductionCostModel">Reduction cost model</span>
             <select id="red-cost-model" name="redCostModel">
-              <option value="matzov">MATZOV</option>
-              <option value="adps16">ADPS16 / CoreSVP</option>
+              <option value="matzov" data-i18n="matzovModelLabel">MATZOV (aggressive)</option>
+              <option value="adps16" data-i18n="adps16ModelLabel">ADPS16 (conservative)</option>
             </select>
+            <small id="red-cost-model-help" class="field-help" data-i18n="reductionCostModelDescription">
+              MATZOV includes polynomial and sub-exponential terms; ADPS16 considers the exponential term only.
+            </small>
           </label>
 
           <label>
@@ -120,22 +123,45 @@
             <input id="max-q-bits" name="maxQBits" type="number" min="12" max="63" step="1" value="24" />
           </label>
 
-          <label>
-            <span data-i18n="secretDistribution">Secret distribution</span>
-            <select id="secret-distribution" name="secretDistribution">
-              <option value="auto">Auto</option>
-              <option value="centered_binomial">Centered Binomial</option>
-              <option value="sparse_ternary">Sparse Ternary</option>
-            </select>
-          </label>
+          <fieldset class="distribution-module" id="secret-distribution-module">
+            <legend data-i18n="secretDistribution">Secret distribution</legend>
+            <div id="secret-distribution-mode" class="segmented distribution-mode" role="radiogroup" aria-label="Secret distribution mode" data-i18n-aria-label="secretDistributionMode">
+              <label><input type="radio" name="secretDistributionMode" value="pure" checked /><span data-i18n="pureDistribution">Pure</span></label>
+              <label><input type="radio" name="secretDistributionMode" value="combination" /><span data-i18n="combinationDistribution">Combination</span></label>
+            </div>
+            <label>
+              <span data-i18n="distributionType">Distribution type</span>
+              <select id="secret-distribution" name="secretDistribution">
+                <option value="auto">Auto</option>
+                <option value="centered_binomial">Centered Binomial</option>
+                <option value="sparse_ternary">Sparse Ternary</option>
+              </select>
+            </label>
+          </fieldset>
+
+          <fieldset class="distribution-module" id="error-distribution-module">
+            <legend id="error-distribution-label" data-i18n="errorDistribution">Error distribution</legend>
+            <div id="error-distribution-mode" class="segmented distribution-mode" role="radiogroup" aria-label="Error distribution mode" data-i18n-aria-label="errorDistributionMode">
+              <label><input type="radio" name="errorDistributionMode" value="pure" checked /><span data-i18n="pureDistribution">Pure</span></label>
+              <label><input type="radio" name="errorDistributionMode" value="combination" /><span data-i18n="combinationDistribution">Combination</span></label>
+            </div>
+            <label>
+              <span id="error-distribution-type-label" data-i18n="distributionType">Distribution type</span>
+              <select id="error-distribution" name="errorDistribution">
+                <option value="auto">Auto</option>
+                <option value="centered_binomial">Centered Binomial</option>
+                <option value="sparse_ternary">Sparse Ternary</option>
+              </select>
+            </label>
+            <small id="error-distribution-note" class="field-help hidden" data-i18n="lwrErrorDistributionNote">
+              LWR-family errors use compression modulus p; distribution mode is not applicable.
+            </small>
+          </fieldset>
 
           <label>
-            <span id="error-distribution-label" data-i18n="errorDistribution">Error distribution</span>
-            <select id="error-distribution" name="errorDistribution">
-              <option value="auto">Auto</option>
-              <option value="centered_binomial">Centered Binomial</option>
-              <option value="sparse_ternary">Sparse Ternary</option>
-            </select>
+            <span data-i18n="maxDistributionComponents">Maximum distribution components</span>
+            <input id="max-distribution-components" name="maxDistributionComponents" type="number" min="1" max="6" step="1" value="3" />
+            <small class="field-help" data-i18n="maxDistributionComponentsHelp">Combination mode enumerates up to this many additive components (1–6).</small>
           </label>
 
           <label class="check-row">
@@ -223,6 +249,10 @@
           <div>
             <h2 id="summary-title" data-i18n="waitingForInput">Waiting for input</h2>
             <p id="summary-subtitle" data-i18n="chooseTarget">Choose a target to generate a lattice instance.</p>
+            <div id="job-controls" class="job-controls hidden">
+              <span id="job-progress" class="job-progress" aria-live="polite"></span>
+              <button id="cancel-estimator-job" type="button" class="secondary-button compact-button" data-i18n="cancelEstimatorJob">Cancel current attack</button>
+            </div>
           </div>
           <div id="status-pill" class="status-pill idle" data-i18n="statusIdle">Idle</div>
         </section>

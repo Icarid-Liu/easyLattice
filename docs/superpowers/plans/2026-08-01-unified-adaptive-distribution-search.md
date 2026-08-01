@@ -59,7 +59,7 @@ class DistributionSearchTests(unittest.TestCase):
                 parse_distribution_request({"secretDistributionMode": "combination", "maxDistributionComponents": value}, "secret")
 ```
 
-- [ ] **Step 2: Run `python3 -m unittest tests.test_distribution_search -v`; verify failure for the missing module and fields.**
+- [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_distribution_search.py' -v`; verify failure for the missing module and fields.**
 
 - [ ] **Step 3: Implement the frozen request dataclass and one validator.**
 
@@ -83,7 +83,7 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 
 - [ ] **Step 4: Add mode and limit fields to both request dataclasses.** Parse snake_case and camelCase names, default to pure/3, and reject `errorDistributionMode=combination` for LWR-family variants. Preserve existing selectors.
 
-- [ ] **Step 5: Run `python3 -m unittest tests.test_distribution_search tests.test_parameter_search tests.test_ntru_search -v`; expect PASS. Commit with `git commit -m "feat: add bounded pure and composite distributions"`.**
+- [ ] **Step 5: Run `python3 -m unittest discover -s tests -p 'test_distribution_search.py' -v`, then repeat with `test_parameter_search.py` and `test_ntru_search.py`; expect PASS. Commit with `git commit -m "feat: add bounded pure and composite distributions"`.**
 
 ### Task 2: Unify lazy candidate ordering and adaptive validation
 
@@ -99,11 +99,11 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 
 - [ ] **Step 1: Write a test with 90, 127, and 128-bit fake outcomes; assert all three are attempted and the first lexical target hit is returned.**
 - [ ] **Step 2: Write a test with only a 90-bit outcome; assert `target_unmet` and `no_feasible_candidate` after exhaustion.**
-- [ ] **Step 3: Run `python3 -m unittest tests.test_adaptive_search -v`; verify the new helper is missing.**
+- [ ] **Step 3: Run `python3 -m unittest discover -s tests -p 'test_adaptive_search.py' -v`; verify the new helper is missing.**
 - [ ] **Step 4: Implement the helper so it consumes candidates in `(n, q, distribution_order_key)` order, continues after failure/cancellation, and stops only when the selected measured result meets target.**
 - [ ] **Step 5: Remove RLWE's default one-candidate stop and NTRU's fixed successful-count stop. Do not call `select_best_distribution_per_modulus` before estimator validation; preserve every distribution candidate. Return the best checked item only as a reference when exhausted.**
 - [ ] **Step 6: Add pure NTRU and RLWE fixtures with target 128, MATZOV classical, `x^n+1`, q bits 7–12, centered-binomial Secret/Error, and NTT `n/2 | q-1`; assert NTRU routes to standard and RLWE to enhanced.**
-- [ ] **Step 7: Run `python3 -m unittest tests.test_adaptive_search tests.test_parameter_search tests.test_ntru_search -v`; expect PASS. Commit with `git commit -m "fix: unify adaptive minimum-parameter search"`.**
+- [ ] **Step 7: Run unittest discovery separately for `test_adaptive_search.py`, `test_parameter_search.py`, and `test_ntru_search.py`; expect PASS. Commit with `git commit -m "fix: unify adaptive minimum-parameter search"`.**
 
 ### Task 3: Make estimator work attack-observable and cancellable
 
@@ -120,11 +120,11 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 - Progress events include `candidate`, `model`, `mode`, `attack`, `completed`, `total`, and `cancelled`.
 
 - [ ] **Step 1: Add failing tests for composite mapping and a pre-set cancellation event.**
-- [ ] **Step 2: Run `python3 -m unittest tests.test_estimator_tasks tests.test_estimator_runner tests.test_job_progress -v`; verify failure.**
+- [ ] **Step 2: Run unittest discovery separately for `test_estimator_tasks.py`, `test_estimator_runner.py`, and `test_job_progress.py`; verify failure.**
 - [ ] **Step 3: Add optional `model`, `mode`, and `attack` task fields to the Sage runner; deny all other attacks for a task while keeping the existing full four-mode compatibility path.**
 - [ ] **Step 4: Replace opaque local `subprocess.run` with a polled `subprocess.Popen` child. Check `cancel_event`, terminate the process group on cancellation, return `attack_cancelled`, and keep local `timeout=None`; keep remote timeouts unchanged.**
 - [ ] **Step 5: Extend `ProgressEvent` with optional task fields, preserving existing positional constructors.**
-- [ ] **Step 6: Run `python3 -m unittest tests.test_estimator_tasks tests.test_estimator_runner tests.test_job_progress -v`; expect PASS. Commit with `git commit -m "feat: expose cancellable estimator attacks"`.**
+- [ ] **Step 6: Run unittest discovery separately for `test_estimator_tasks.py`, `test_estimator_runner.py`, and `test_job_progress.py`; expect PASS. Commit with `git commit -m "feat: expose cancellable estimator attacks"`.**
 
 ### Task 4: Add job cancellation and detailed server status
 
@@ -138,10 +138,10 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 - Add JSON keys `current_candidate`, `current_model`, `current_mode`, `current_attack`, `completed_attacks`, `total_attacks`, and `cancel_requested`.
 
 - [ ] **Step 1: Add failing tests for active-job cancellation, unknown IDs, terminal jobs, and task progress serialization.**
-- [ ] **Step 2: Run `python3 -m unittest tests.test_server -v`; verify failure.**
+- [ ] **Step 2: Run `python3 -m unittest discover -s tests -p 'test_server.py' -v`; verify failure.**
 - [ ] **Step 3: Add a per-job `threading.Event`, store the submitted future, update synchronized task fields from `ProgressEvent`, and pass the event through the recommendation call.**
 - [ ] **Step 4: Implement the cancel route: 404 unknown, 409 terminal, and 202 `cancellation_requested` for active jobs. Set terminal `cancelled` only after the child process stops and completed results are collected.**
-- [ ] **Step 5: Run `python3 -m unittest tests.test_server tests.test_job_progress -v`; expect PASS. Commit with `git commit -m "feat: add estimator job cancellation status"`.**
+- [ ] **Step 5: Run unittest discovery separately for `test_server.py` and `test_job_progress.py`; expect PASS. Commit with `git commit -m "feat: add estimator job cancellation status"`.**
 
 ### Task 5: Update browser controls, labels, and result states
 
@@ -153,11 +153,11 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 - Test: `tests/js/app-model.test.cjs`, `tests/test_browser_state.py`
 
 - [ ] **Step 1: Add failing tests asserting pure defaults, component limit 3, LWR Error disabling, and `no_feasible_candidate` presentation.**
-- [ ] **Step 2: Run `node --test tests/js/app-model.test.cjs && python3 -m unittest tests.test_browser_state -v`; verify failure.**
+- [ ] **Step 2: Run `node --test tests/js/app-model.test.cjs && python3 -m unittest discover -s tests -p 'test_browser_state.py' -v`; verify failure.**
 - [ ] **Step 3: Add separate Secret/Error mode controls, a global numeric limit with min 1/max 6/value 3, and payload fields `secretDistributionMode`, `errorDistributionMode`, and `maxDistributionComponents`.**
 - [ ] **Step 4: Hide/disable Error distribution controls for LWR-family variants and restore them for RLWE/NTRU. Add English/Chinese model labels and explicit no-feasible/cancelled statuses.**
 - [ ] **Step 5: Render server task progress and send the cancel request while preserving two-second job polling.**
-- [ ] **Step 6: Run `node --test tests/js/app-model.test.cjs && python3 -m unittest tests.test_browser_state -v`; expect PASS. Commit with `git commit -m "feat: expose distribution modes and search status"`.**
+- [ ] **Step 6: Run `node --test tests/js/app-model.test.cjs && python3 -m unittest discover -s tests -p 'test_browser_state.py' -v`; expect PASS. Commit with `git commit -m "feat: expose distribution modes and search status"`.**
 
 ### Task 6: Add live fixtures, documentation, and final verification
 
@@ -171,7 +171,7 @@ Use existing CBD and sparse-ternary parameter tables as base components. Use `it
 - [ ] **Step 3: Add an opt-in Sage smoke test gated by `EASYLATTICE_RUN_SAGE_TESTS=1` and profile availability; assert JSON shape/status rather than version-specific bit values.**
 - [ ] **Step 4: Document pure defaults, the 1–6 limit, LWR Error behavior, model explanations, adaptive search, cancellation, and the smoke command in both README files.**
 - [ ] **Step 5: Run `python3 -m unittest discover -s tests -v`, `node --test tests/js/app-model.test.cjs`, and `git diff --check`; expect all tests to pass and no diff-check output.**
-- [ ] **Step 6: Run the optional smoke test on a configured Sage machine with `EASYLATTICE_RUN_SAGE_TESTS=1 python3 -m unittest tests.test_live_estimator_search -v`, then commit with `git commit -m "test: cover pure NTRU and RLWE adaptive search"`.**
+- [ ] **Step 6: Run the optional smoke test on a configured Sage machine with `EASYLATTICE_RUN_SAGE_TESTS=1 python3 -m unittest discover -s tests -p 'test_live_estimator_search.py' -v`, then commit with `git commit -m "test: cover pure NTRU and RLWE adaptive search"`.**
 
 ## Plan self-review
 
