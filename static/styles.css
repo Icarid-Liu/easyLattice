@@ -343,6 +343,14 @@ textarea:read-only {
   opacity: 1;
 }
 
+#red-cost-model {
+  font-size: 11px;
+}
+
+html[lang="zh-CN"] #red-cost-model {
+  font-size: 9px;
+}
+
 input[type="range"]:disabled {
   accent-color: #587a75;
   cursor: not-allowed;
