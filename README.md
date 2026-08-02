@@ -26,8 +26,10 @@ Useful options:
 ```
 
 `--with-estimator` is not required for ordinary startup. It only clones the
-two estimator repositories into `.external/`. Local estimator runs have no
-automatic wall-clock limit; remote workers retain their configured timeout.
+two estimator repositories into `.external/`. Local jobs have no automatic
+wall-clock deadline; a short per-attack watchdog prevents one Sage reduction
+from blocking the whole search, and remote workers retain their configured
+whole-job timeout.
 
 ## Search model
 

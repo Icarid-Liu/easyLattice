@@ -163,6 +163,47 @@ class EstimatorRunnerTests(unittest.TestCase):
             [None] * 12,
         )
 
+    def test_lwe_uses_local_environment_attack_timeout(self) -> None:
+        payload = self.fake_lwe_payload()
+        payload.pop("per_attack_timeout")
+        estimator_module = types.ModuleType("estimator")
+        estimator_module.LWE = FakeLWE
+        estimator_module.ND = FakeND
+        models = {
+            "matzov": {"classical": "mc", "quantum": "mq"},
+            "adps16": {"classical": "ac", "quantum": "aq"},
+        }
+        with (
+            patch.dict(sys.modules, {"estimator": estimator_module}),
+            patch.dict(
+                os.environ,
+                {"EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT": "3"},
+            ),
+            patch(
+                "app.estimator_runner.reduction_model_variants",
+                return_value=models,
+            ),
+            patch(
+                "app.estimator_runner.cost_to_json",
+                side_effect=fake_cost_to_json,
+            ),
+            patch(
+                "app.estimator_runner.estimator_commit",
+                return_value="abc1234",
+            ),
+            patch(
+                "app.estimator_runner.time_limit",
+                wraps=time_limit,
+            ) as limit,
+        ):
+            result = run_lwe(payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call.args[0] for call in limit.call_args_list],
+            [3] * 12,
+        )
+
     def test_baseline_attacks_receive_exact_arguments(self):
         params = object()
         model = object()

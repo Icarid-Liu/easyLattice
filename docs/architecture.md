@@ -115,10 +115,13 @@ filling only absent, `null`, or empty Standard/Enhanced paths unless the user
 explicitly requests a forced regeneration.
 
 Execution policy follows the configured boundary. Without `remote_url`, local
-origin preflight, estimator attacks, Sage subprocess execution, and browser
-polling have no easyLattice time limit. With `remote_url`, requests retain the
-configured remote whole-job and per-attack limits. Legacy local timeout fields
-remain parseable but do not impose a local deadline.
+origin preflight, Sage subprocess execution, and browser polling have no
+easyLattice wall-clock deadline. The local runner still installs a short
+per-attack watchdog (capped at two seconds by default) so a single reduction
+routine cannot block the entire candidate search; a non-positive local
+`per_attack_timeout_seconds` disables that watchdog. With `remote_url`, requests
+retain the configured remote whole-job and per-attack limits. Legacy local
+timeout fields remain parseable but do not impose a job deadline.
 
 ## Default Path
 

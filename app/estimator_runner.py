@@ -26,6 +26,12 @@ from app.json_safety import sanitize_json_value
 
 NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
 
+# Local Sage jobs are launched with this value in their private environment by
+# ``estimator_process``.  Keeping the fallback out of the JSON request keeps
+# the remote API contract unchanged while ensuring that a single pathological
+# Sage attack cannot hold an otherwise cancellable local search forever.
+LOCAL_ATTACK_TIMEOUT_ENV = "EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT"
+
 
 def requested_task(payload: dict) -> tuple[str, str, str] | None:
     """Return an optional task selector embedded in a runner payload.
@@ -33,7 +39,8 @@ def requested_task(payload: dict) -> tuple[str, str, str] | None:
     The original payload has no task fields and therefore retains the full
     four model/mode execution path.  Task payloads must provide all three
     fields, which prevents an accidental request from silently running a
-    different attack.
+    different attack.  The internal ``attack=all`` selector is explicit and
+    still restricts execution to the requested model/mode.
     """
 
     names = ("model", "mode", "attack")
@@ -57,7 +64,12 @@ def requested_task(payload: dict) -> tuple[str, str, str] | None:
 
 
 def _task_attacks(problem: str) -> tuple[str, ...]:
-    return NTRU_ATTACKS if problem == "ntru" else LWE_ATTACKS
+    attacks = NTRU_ATTACKS if problem == "ntru" else LWE_ATTACKS
+    # ``all`` is an internal selector used by the distribution-boundary
+    # search. It keeps one model/mode comparison while retaining every attack
+    # inside that comparison; a payload without task fields still evaluates
+    # all four model/mode combinations.
+    return (*attacks, "all")
 
 
 def _default_modes(models: dict):
@@ -311,6 +323,8 @@ def run_lwe(payload: dict) -> dict:
     ring_degree = int(payload.get("ring_degree", n))
     distribution = payload["distribution"]
     raw_attack_timeout = payload.get("per_attack_timeout")
+    if raw_attack_timeout is None:
+        raw_attack_timeout = os.environ.get(LOCAL_ATTACK_TIMEOUT_ENV)
     per_attack_timeout = (
         int(raw_attack_timeout)
         if raw_attack_timeout is not None
@@ -343,7 +357,11 @@ def run_lwe(payload: dict) -> dict:
         models[model_name] = {}
         for mode, model in modes.items():
             attacks = {}
-            attack_names = LWE_ATTACKS if task is None else (task[2],)
+            attack_names = (
+                LWE_ATTACKS
+                if task is None or task[2] == "all"
+                else (task[2],)
+            )
             for name in attack_names:
                 correction = structure_correction_metadata(
                     name,
@@ -424,6 +442,8 @@ def run_ntru(payload: dict) -> dict:
     ntru_type = payload["ntru_type"]
     ring_degree = int(payload.get("ring_degree", n))
     raw_attack_timeout = payload.get("per_attack_timeout")
+    if raw_attack_timeout is None:
+        raw_attack_timeout = os.environ.get(LOCAL_ATTACK_TIMEOUT_ENV)
     per_attack_timeout = (
         int(raw_attack_timeout)
         if raw_attack_timeout is not None
@@ -465,13 +485,17 @@ def run_ntru(payload: dict) -> dict:
                     )
                 attacks = {}
                 selected_estimates = estimates
-                if task is not None:
+                if task is not None and task[2] != "all":
                     selected_estimates = {
                         task[2]: estimates[task[2]]
                     } if task[2] in estimates else {}
                 for name, cost in selected_estimates.items():
                     attacks[name] = attack_result(cost)
-                expected_attacks = NTRU_ATTACKS if task is None else (task[2],)
+                expected_attacks = (
+                    NTRU_ATTACKS
+                    if task is None or task[2] == "all"
+                    else (task[2],)
+                )
                 for name in expected_attacks:
                     attacks.setdefault(
                         name,

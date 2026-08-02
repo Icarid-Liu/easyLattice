@@ -27,6 +27,18 @@ STANDARD_LWE_VARIANTS = {"lwe", "lwr"}
 ENHANCED_LWE_VARIANTS = {"rlwe", "mlwe", "rlwr", "mlwr"}
 NTRU_VARIANTS = {"matrix", "ring"}
 
+# A local job intentionally has no wall-clock deadline: the browser and the
+# server must not turn a long Sage search into a spurious remote-style timeout.
+# Individual attacks still need a watchdog, however.  Sage's reduction
+# routines can otherwise remain inside one pathological parameter search for
+# minutes and prevent the runner from returning even a partial estimate.  Two
+# seconds is long enough for the inexpensive attacks on the supported local
+# profiles while bounding the worst-case four-model comparison to a useful
+# interactive interval.  Users can disable the watchdog with a non-positive
+# ``per_attack_timeout_seconds`` or provide an explicit payload timeout.
+LOCAL_ATTACK_TIMEOUT_CAP_SECONDS = 2
+LOCAL_ATTACK_TIMEOUT_ENV = "EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT"
+
 
 def estimator_profile_for(category: str, variant: str) -> str:
     if category == "ntru" and variant in NTRU_VARIANTS:
@@ -107,6 +119,15 @@ def run_local_estimator(
     metadata = git_metadata(runtime.root)
     report_progress("estimator_running", profile, metadata.commit)
     runner = Path(__file__).with_name("estimator_runner.py")
+    if "per_attack_timeout" not in payload:
+        try:
+            configured_attack_timeout = int(config.per_attack_timeout_seconds)
+        except (TypeError, ValueError):
+            configured_attack_timeout = LOCAL_ATTACK_TIMEOUT_CAP_SECONDS
+        if configured_attack_timeout > 0:
+            runtime.environment[LOCAL_ATTACK_TIMEOUT_ENV] = str(
+                min(configured_attack_timeout, LOCAL_ATTACK_TIMEOUT_CAP_SECONDS)
+            )
     try:
         preflight_data = run_origin_preflight(runtime, timeout)
         if not preflight_data.get("ok"):

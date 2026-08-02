@@ -81,6 +81,26 @@ class AdaptiveSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "cancelled")
         self.assertFalse(result.exhausted)
 
+    def test_global_failure_can_short_circuit_unbounded_scan(self):
+        calls = []
+        result = adaptive_validate(
+            [{"index": 0}, {"index": 1}, {"index": 2}],
+            estimate=lambda candidate: calls.append(candidate["index"]) or None,
+            normalize=lambda _candidate, _raw: (
+                None,
+                {"ok": False, "code": "estimator_process_failed", "message": "broken"},
+            ),
+            apply=lambda _candidate, _result: None,
+            meets_target=lambda _candidate: False,
+            stop_on_failure=lambda entry: entry.get("code") == "estimator_process_failed",
+        )
+
+        self.assertEqual(calls, [0])
+        self.assertEqual(result.attempted, 1)
+        self.assertEqual(result.status, "validation_unavailable")
+        self.assertEqual(result.method, "failure_short_circuit")
+        self.assertFalse(result.exhausted)
+
 
 if __name__ == "__main__":
     unittest.main()

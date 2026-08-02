@@ -91,6 +91,13 @@ VALIDATION_CONFIG_ERROR_CODES = {
     "estimator_path_invalid",
     "estimator_origin_mismatch",
 }
+VALIDATION_STOP_ERROR_CODES = VALIDATION_CONFIG_ERROR_CODES | {
+    "estimator_timeout",
+    "estimator_process_failed",
+    "estimator_non_json",
+    "invalid_estimator_response",
+    "invalid_estimator_route",
+}
 ESTIMATOR_MODELS = ("matzov", "adps16")
 ESTIMATOR_MODES = ("classical", "quantum")
 INVALID_ESTIMATOR_RESPONSE_CODE = "invalid_estimator_response"
@@ -195,12 +202,43 @@ def recommend_rlwe(
                 cancel_event=cancel_event,
             )
 
+        def estimate_distribution_boundary(candidate: dict[str, Any]) -> Any:
+            # A stddev boundary probe only needs the selected model/mode.  The
+            # primary ordered pass retains the full four-way comparison, so
+            # the expensive secondary search does not launch four complete
+            # Sage comparisons for every binary-search midpoint.
+            return run_sage_estimator(
+                candidate,
+                request.estimator_timeout,
+                config=config,
+                request=request,
+                profile=profile,
+                cancel_event=cancel_event,
+                scope="selected",
+            )
+
         def normalize(candidate: dict[str, Any], raw_result: Any) -> tuple[Any, dict[str, Any]]:
             try:
                 return normalize_estimator_response(
                     raw_result,
                     request=request,
                     expected_profile=profile,
+                )
+            except Exception as exc:
+                return None, invalid_estimator_response(
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        def normalize_distribution_boundary(
+            candidate: dict[str, Any],
+            raw_result: Any,
+        ) -> tuple[Any, dict[str, Any]]:
+            try:
+                return normalize_estimator_response(
+                    raw_result,
+                    request=request,
+                    expected_profile=profile,
+                    allow_partial_models=True,
                 )
             except Exception as exc:
                 return None, invalid_estimator_response(
@@ -266,6 +304,11 @@ def recommend_rlwe(
                     and legacy_successes[0] >= request.validation_count
                 )
             ),
+            stop_on_failure=(
+                (lambda entry: entry.get("code") in VALIDATION_STOP_ERROR_CODES)
+                if not request.legacy_validation_cap
+                else None
+            ),
         )
         secondary_adaptive = None
         if adaptive.target_met and adaptive.best_candidate is not None and not request.legacy_validation_cap:
@@ -281,20 +324,30 @@ def recommend_rlwe(
                 # pass searches this same group in the independent stddev
                 # table, so a smaller-width target is not hidden by the
                 # sampling-bit pass.
-                secondary_adaptive = adaptive_binary_validate(
-                    sorted(
-                        group_candidates,
-                        key=lambda candidate: distribution_objective_key(
-                            candidate,
-                            MIN_STDDEV_OBJECTIVE,
-                        ),
+                ordered_group_candidates = sorted(
+                    group_candidates,
+                    key=lambda candidate: distribution_objective_key(
+                        candidate,
+                        MIN_STDDEV_OBJECTIVE,
                     ),
-                    estimate=estimate,
-                    normalize=normalize,
+                )
+                screen_hint = next(
+                    (
+                        index
+                        for index, candidate in enumerate(ordered_group_candidates)
+                        if meets_target(candidate["security"], request)
+                    ),
+                    None,
+                )
+                secondary_adaptive = adaptive_binary_validate(
+                    ordered_group_candidates,
+                    estimate=estimate_distribution_boundary,
+                    normalize=normalize_distribution_boundary,
                     apply=apply,
                     meets_target=lambda candidate: meets_target(candidate["security"], request),
                     on_progress=on_progress,
                     cancel=lambda: bool(cancel_event and cancel_event.is_set()),
+                    initial_high_index=screen_hint,
                 )
                 secondary_validation_method = secondary_adaptive.method
         # ``adaptive_validate`` stores normalized entries; classify failures and
@@ -331,6 +384,8 @@ def recommend_rlwe(
             if adaptive.exhausted and not adaptive.target_met
             else adaptive.status
         )
+        if adaptive.status == "validation_unavailable":
+            validation["validation_short_circuited"] = True
         validation["target_met"] = adaptive.target_met
         validation["exhausted"] = adaptive.exhausted and (
             secondary_adaptive is None or secondary_adaptive.exhausted
@@ -1886,6 +1941,7 @@ def normalize_estimator_response(
     request: RequestOptions,
     expected_profile: str,
     expected_variant: str | None = None,
+    allow_partial_models: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     response = sanitize_json_value(response)
     if not isinstance(response, dict):
@@ -1998,27 +2054,38 @@ def normalize_estimator_response(
             f"no finite {request.red_cost_model}/{request.security_model} security estimate was returned"
         )
 
-    all_modes_ok = all(
-        normalized_models.get(model, {}).get(mode, {}).get("ok")
-        for model in ESTIMATOR_MODELS
-        for mode in ESTIMATOR_MODES
-    )
-    all_modes_complete = all(
-        normalized_models.get(model, {}).get(mode, {}).get("ok")
-        and normalized_models[model][mode]["complete"]
-        for model in ESTIMATOR_MODELS
-        for mode in ESTIMATOR_MODES
-    )
+    if allow_partial_models:
+        # Boundary probes intentionally run only the requested reduction
+        # model/security mode.  They are sufficient for the target predicate
+        # but must never be mistaken for the full four-way comparison shown
+        # in the final recommendation.
+        all_modes_ok = selected_mode.get("ok") is True
+        all_modes_complete = bool(
+            selected_mode.get("ok") is True
+            and selected_mode.get("complete") is True
+        )
+    else:
+        all_modes_ok = all(
+            normalized_models.get(model, {}).get(mode, {}).get("ok")
+            for model in ESTIMATOR_MODELS
+            for mode in ESTIMATOR_MODES
+        )
+        all_modes_complete = all(
+            normalized_models.get(model, {}).get(mode, {}).get("ok")
+            and normalized_models[model][mode]["complete"]
+            for model in ESTIMATOR_MODELS
+            for mode in ESTIMATOR_MODES
+        )
     if is_lwe_response:
-        if normalized_modes != normalized_models.get("adps16"):
+        if not allow_partial_models and normalized_modes != normalized_models.get("adps16"):
             return None, invalid_estimator_response(
                 "modes must match models.adps16"
             )
-        if response["ok"] is not all_modes_ok:
+        if not allow_partial_models and response["ok"] is not all_modes_ok:
             return None, invalid_estimator_response(
                 "ok disagrees with model/mode attack coverage"
             )
-        if response["complete"] is not all_modes_complete:
+        if not allow_partial_models and response["complete"] is not all_modes_complete:
             return None, invalid_estimator_response(
                 "complete disagrees with model/mode attack coverage"
             )
@@ -2027,6 +2094,8 @@ def normalize_estimator_response(
     normalized["complete"] = bool(
         response["ok"] and response["complete"] and all_modes_complete
     )
+    if allow_partial_models:
+        normalized["partial_models"] = True
     normalized["models"] = normalized_models
     normalized["modes"] = normalized_modes
     return normalized, response
@@ -2039,6 +2108,7 @@ def run_sage_estimator(
     request: RequestOptions | None = None,
     profile: str | None = None,
     cancel_event: Any | None = None,
+    scope: str | None = None,
 ) -> dict[str, Any]:
     config = config or load_config()
     category = request.hard_problem_category if request else "lwe"
@@ -2054,6 +2124,21 @@ def run_sage_estimator(
         "hard_problem_variant": variant,
         "ring_degree": candidate["ring"]["n"],
     }
+    if scope == "selected":
+        payload.update(
+            {
+                "model": request.red_cost_model if request else "matzov",
+                "mode": request.security_model if request else "classical",
+                "attack": "all",
+            }
+        )
+        if not config.estimator.remote_url:
+            # Boundary probes are deliberately coarse: the full estimator is
+            # rerun for the selected recommendation, while this pass only
+            # needs a usable lower/upper target predicate.
+            payload["per_attack_timeout"] = 1
+    elif scope is not None:
+        raise ValueError("estimator scope must be selected or null")
     if config.estimator.remote_url:
         payload["per_attack_timeout"] = max(
             3,

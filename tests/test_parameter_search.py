@@ -852,6 +852,39 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertIn("validation_config_missing", result["recommendation"]["warning_codes"])
         self.assertEqual(result["estimator"]["validated"][1]["message"], "opaque estimator failure")
 
+    def test_unbounded_runtime_failure_does_not_scan_every_candidate(self):
+        failure = {
+            "ok": False,
+            "code": "estimator_process_failed",
+            "message": "Sage process failed",
+        }
+        with patch("app.parameter_search.run_estimator", return_value=failure) as run:
+            result = recommend_rlwe(
+                {
+                    "hardProblemCategory": "lwe",
+                    "hardProblemVariant": "rlwe",
+                    "targetSecurity": 128,
+                    "minN": 512,
+                    "maxN": 512,
+                    "minQBits": 9,
+                    "maxQBits": 9,
+                    "nttScalePower": 1,
+                    "secretDistribution": "centered_binomial",
+                    "errorDistribution": "centered_binomial",
+                    "useEstimator": True,
+                },
+                config=AppConfig(),
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["validation"]["status"], "failed")
+        self.assertEqual(result["validation"]["attempted_candidates"], 1)
+        self.assertTrue(result["validation"]["validation_short_circuited"])
+        self.assertEqual(
+            result["recommendation"]["security"]["source_code"],
+            "fast_screen",
+        )
+
     def test_complete_coverage_with_partial_attacks_is_partial(self):
         with patch(
             "app.parameter_search.run_estimator",
