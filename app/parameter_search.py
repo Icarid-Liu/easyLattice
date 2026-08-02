@@ -9,13 +9,21 @@ from itertools import product
 from typing import Any
 
 from .compression_noise import compression_noise_profile
-from .adaptive_search import adaptive_validate
+from .adaptive_search import adaptive_binary_validate, adaptive_validate
 from .config import AppConfig, load_config
 from .distribution_search import (
     DistributionRequest,
     distribution_order_key,
     enumerate_distribution_candidates,
     parse_distribution_request,
+)
+from .distribution_objectives import (
+    MIN_SAMPLING_BITS_OBJECTIVE,
+    MIN_STDDEV_OBJECTIVE,
+    candidate_modulus_key,
+    distribution_objective_key,
+    distribution_table,
+    select_distribution_objectives,
 )
 from .estimator_contract import (
     EstimatorRouteError,
@@ -166,9 +174,12 @@ def recommend_rlwe(
     validation_codes: list[str] = []
     failure_messages: list[str] = []
     raw_unknown_messages: list[str] = []
+    secondary_validation_method = None
     if request.use_estimator:
         estimator_result = {"ok": True, "profile": profile, "validated": []}
         validated_candidates: list[dict[str, Any]] = []
+        validated_candidate_keys: set[str] = set()
+        attempted_candidate_keys: set[str] = set()
         covered_keys: set[str] = set()
         attacks_complete = True
         estimator_commit = None
@@ -202,7 +213,10 @@ def recommend_rlwe(
             covered_keys.add(validation_candidate_key(candidate))
             attacks_complete = attacks_complete and result["complete"]
             apply_estimator_result(candidate, result, request, profile=profile)
-            validated_candidates.append(candidate)
+            key = validation_candidate_key(candidate)
+            if key not in validated_candidate_keys:
+                validated_candidate_keys.add(key)
+                validated_candidates.append(candidate)
             legacy_successes[0] += 1
             validation_codes.append("validation_applied")
             if not result["complete"]:
@@ -211,6 +225,8 @@ def recommend_rlwe(
 
         def on_progress(event: dict[str, Any]) -> None:
             entry = event.get("candidate")
+            if event.get("event") == "candidate_started" and isinstance(entry, dict):
+                attempted_candidate_keys.add(validation_candidate_key(entry))
             if event.get("event") == "candidate_failed" and isinstance(entry, dict):
                 # The normalized error is already in the validation list; keep the
                 # candidate warning for the existing UI contract.
@@ -222,9 +238,12 @@ def recommend_rlwe(
                         entry.setdefault("warnings", []).append(str(message))
 
         validation_values = list(eligible_candidates.values())
-        validation_pool = rotate_secret_candidates(
+        # Keep the requested n -> q -> distribution order strict.  The old
+        # secret-bucket rotation could validate a larger q before all
+        # distributions at the smaller q had been considered.
+        validation_pool = sorted(
             validation_values,
-            lambda candidate: estimator_candidate_rank(candidate, request),
+            key=lambda candidate: estimator_candidate_rank(candidate, request),
         )
         if request.legacy_validation_cap:
             validation_pool = validation_pool[: request.validation_attempts]
@@ -248,10 +267,43 @@ def recommend_rlwe(
                 )
             ),
         )
+        secondary_adaptive = None
+        if adaptive.target_met and adaptive.best_candidate is not None and not request.legacy_validation_cap:
+            target_group = candidate_modulus_key(adaptive.best_candidate)
+            group_candidates = [
+                candidate
+                for candidate in validation_values
+                if candidate_modulus_key(candidate) == target_group
+                and validation_candidate_key(candidate) not in attempted_candidate_keys
+            ]
+            if group_candidates:
+                # The first pass establishes the winning n/q.  The second
+                # pass searches this same group in the independent stddev
+                # table, so a smaller-width target is not hidden by the
+                # sampling-bit pass.
+                secondary_adaptive = adaptive_binary_validate(
+                    sorted(
+                        group_candidates,
+                        key=lambda candidate: distribution_objective_key(
+                            candidate,
+                            MIN_STDDEV_OBJECTIVE,
+                        ),
+                    ),
+                    estimate=estimate,
+                    normalize=normalize,
+                    apply=apply,
+                    meets_target=lambda candidate: meets_target(candidate["security"], request),
+                    on_progress=on_progress,
+                    cancel=lambda: bool(cancel_event and cancel_event.is_set()),
+                )
+                secondary_validation_method = secondary_adaptive.method
         # ``adaptive_validate`` stores normalized entries; classify failures and
         # preserve the legacy validation messages/codes expected by the UI.
-        estimator_result["validated"] = list(adaptive.validated)
-        for entry in adaptive.validated:
+        validation_entries = list(adaptive.validated)
+        if secondary_adaptive is not None:
+            validation_entries.extend(secondary_adaptive.validated)
+        estimator_result["validated"] = validation_entries
+        for entry in validation_entries:
             if entry.get("ok") is not True:
                 estimator_result["ok"] = False
                 code = entry.get("code")
@@ -266,8 +318,8 @@ def recommend_rlwe(
         validation = validation_result(
             requested=True,
             profile=profile,
-            attempted=adaptive.attempted,
-            successful=adaptive.successful,
+            attempted=adaptive.attempted + (secondary_adaptive.attempted if secondary_adaptive else 0),
+            successful=adaptive.successful + (secondary_adaptive.successful if secondary_adaptive else 0),
             covered=len(covered_keys),
             eligible=len(eligible_candidates),
             attacks_complete=attacks_complete,
@@ -280,14 +332,16 @@ def recommend_rlwe(
             else adaptive.status
         )
         validation["target_met"] = adaptive.target_met
-        validation["exhausted"] = adaptive.exhausted
+        validation["exhausted"] = adaptive.exhausted and (
+            secondary_adaptive is None or secondary_adaptive.exhausted
+        )
         if raw_unknown_messages:
             validation["message"] = raw_unknown_messages[0]
             validation["messages"] = list(dict.fromkeys(raw_unknown_messages))
         if validated_candidates:
-            # The first measured target hit is already minimal under the required
-            # n -> q -> distribution order. Keep all checked candidates as
-            # alternatives while retaining a best unmet reference if exhausted.
+            # The first measured hit fixes the winning n/q.  The secondary
+            # stddev pass may add a cheaper-width hit from that same group;
+            # retain every successful row for the two objective selectors.
             if adaptive.target_met:
                 ranked = sorted(validated_candidates, key=lambda c: estimator_candidate_rank(c, request))
             else:
@@ -298,8 +352,28 @@ def recommend_rlwe(
             ranked = sorted(viable or ranked, key=lambda c: candidate_rank(c, request))
 
     recommendation = ranked[0]
+    # The objective table must retain unmet rows as well: the stddev boundary
+    # is defined by the first false -> true transition, not by a table already
+    # filtered to target hits.
+    objective_pool = list(ranked if request.use_estimator else candidates)
+    if not objective_pool:
+        objective_pool = list(candidates)
+    sampling_recommendation, stddev_recommendation, distribution_search = (
+        select_distribution_objectives(
+            objective_pool,
+            meets_target=lambda candidate: meets_target(candidate["security"], request),
+        )
+    )
+    if sampling_recommendation is not None:
+        recommendation = sampling_recommendation
+    objective_candidates = {
+        MIN_SAMPLING_BITS_OBJECTIVE: sampling_recommendation or recommendation,
+        MIN_STDDEV_OBJECTIVE: stddev_recommendation or recommendation,
+    }
+    if secondary_validation_method:
+        distribution_search["stddev_search"]["validation_method"] = secondary_validation_method
     alternatives = distinct_modulus_alternatives([recommendation, *ranked[1:]], limit=5)[1:]
-    for candidate in [recommendation, *alternatives]:
+    for candidate in list({id(item): item for item in [recommendation, *alternatives, *objective_candidates.values()]}.values()):
         candidate["warning_codes"] = list(
             dict.fromkeys(candidate.get("warning_codes", []) + validation["message_codes"])
         )
@@ -310,6 +384,7 @@ def recommend_rlwe(
         "request": asdict(request),
         "recommendation": recommendation,
         "alternatives": alternatives,
+        "distribution_recommendations": objective_candidates,
         "estimator": estimator_result,
         "validation": validation,
         "search": {
@@ -317,6 +392,8 @@ def recommend_rlwe(
             "generated_candidates": len(raw_candidates),
             "modulus_candidates": len(candidates),
             "viable_candidates": len(viable),
+            "distribution_table": distribution_table(objective_pool),
+            "distribution_objectives": distribution_search,
             "strategy": [
                 f"ring family first: {request.ring_family}",
                 "degree n second",
@@ -1456,7 +1533,10 @@ def ntt_search_strategy_text(request: RequestOptions) -> str:
 def distribution_strategy_text(request: RequestOptions) -> str:
     if is_lwr_variant(request.hard_problem_variant):
         return f"choose secret distribution after q; LWR error uses q->p compression noise with p={request.error_distribution}"
-    return "choose secret and error distributions independently after q"
+    return (
+        "build independent Secret/Error distribution tables after q; locate the minimum target-meeting "
+        "combined sigma, then minimize sampling bits above that sigma"
+    )
 
 
 def ntt_profile(n: int, q: int, factors: dict[int, int] | None = None, ring_family: str = "power2") -> dict[str, Any]:

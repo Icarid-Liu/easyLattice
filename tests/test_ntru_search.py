@@ -98,13 +98,20 @@ class NTRUSearchTests(unittest.TestCase):
             result = recommend_ntru(request, config=AppConfig())
 
         candidate = result["recommendation"]
-        self.assertEqual(run.call_count, 1)
+        # The second objective pass searches the same modulus in ascending
+        # standard deviation order; cached/remaining validation is separate
+        # from the minimum-sampling-bit pass.
+        self.assertEqual(run.call_count, 2)
         self.assertEqual(candidate["distribution"]["secret"]["name"], "ST(l0=1, l1=0)")
         self.assertEqual(candidate["distribution"]["secret"]["support"], [-1, 0, 1])
         self.assertEqual(candidate["distribution"]["secret"]["parameters"]["probability_plus"], 0.25)
         self.assertEqual(candidate["distribution"]["secret"]["parameters"]["probability_minus"], 0.25)
         self.assertEqual(candidate["distribution"]["secret"]["sampling_bits"], 2)
         self.assertEqual(candidate["selection"]["status"], "target_met")
+        self.assertEqual(
+            result["distribution_recommendations"]["min_sampling_bits"]["distribution"]["name"],
+            "ST(l0=1, l1=0)",
+        )
 
     def test_power2_ntru_recommendation_has_three_candidates(self):
         result = recommend_ntru(

@@ -7,6 +7,7 @@ const resultGrid = document.querySelector("#result-grid");
 const details = document.querySelector("#details");
 const warnings = document.querySelector("#warnings");
 const alternatives = document.querySelector("#alternatives");
+const distributionRecommendations = document.querySelector("#distribution-recommendations");
 const copyJson = document.querySelector("#copy-json");
 const dfrForm = document.querySelector("#dfr-form");
 const dfrResults = document.querySelector("#dfr-results");
@@ -287,6 +288,10 @@ const TRANSLATIONS = {
     instance: "Instance",
     estimate: "Estimate",
     alternativeCandidates: "Alternative candidates",
+    distributionObjectives: "Distribution objective candidates",
+    minSamplingCandidate: "Minimum sampling bits",
+    minStddevCandidate: "Minimum standard deviation",
+    distributionObjectiveSummary: "n={n}, q={q} · sampling bits {bits} · combined sigma {sigma}",
     copyJson: "Copy JSON",
     copied: "Copied",
     hardProblem: "Hard problem",
@@ -556,6 +561,10 @@ const TRANSLATIONS = {
     instance: "实例",
     estimate: "估计",
     alternativeCandidates: "备选候选",
+    distributionObjectives: "分布目标候选",
+    minSamplingCandidate: "采样比特最少",
+    minStddevCandidate: "标准差最小",
+    distributionObjectiveSummary: "n={n}，q={q} · 采样比特 {bits} · 合成 sigma {sigma}",
     copyJson: "复制 JSON",
     copied: "已复制",
     hardProblem: "困难问题",
@@ -1238,6 +1247,7 @@ function renderResult(result) {
   warnings.classList.toggle("hidden", warningItems.length === 0);
 
   renderAlternatives(result.alternatives || []);
+  renderDistributionRecommendations(result.distribution_recommendations || {});
 }
 
 function renderParameterProfile(candidate) {
@@ -1317,6 +1327,46 @@ function renderAlternatives(items) {
     }
     list.appendChild(node);
   });
+}
+
+function renderDistributionRecommendations(items) {
+  const list = document.querySelector("#distribution-candidate-list");
+  if (!list || !distributionRecommendations) return;
+  list.innerHTML = "";
+  const labels = {
+    min_sampling_bits: t("minSamplingCandidate"),
+    min_stddev: t("minStddevCandidate"),
+  };
+  Object.entries(items || {}).forEach(([objective, item]) => {
+    if (!item) return;
+    const node = document.createElement("article");
+    node.className = "candidate";
+    const heading = document.createElement("strong");
+    heading.textContent = `${labels[objective] || objective}: ${item.distribution?.name || "-"}`;
+    node.appendChild(heading);
+    const secret = item.distribution?.secret || {};
+    const error = item.distribution?.error || {};
+    const summary = document.createElement("span");
+    const secretBits = Number(secret.sampling_bits);
+    const errorBits = Number(error.sampling_bits);
+    const bits = Number.isFinite(secretBits) && Number.isFinite(errorBits)
+      ? secretBits + errorBits
+      : "-";
+    const secretSigma = Number(secret.stddev);
+    const errorSigma = Number(error.stddev);
+    const sigma = Number.isFinite(secretSigma) && Number.isFinite(errorSigma)
+      ? Math.hypot(secretSigma, errorSigma).toPrecision(6)
+      : "-";
+    summary.textContent = t("distributionObjectiveSummary", {
+      n: item.ring?.n ?? "-",
+      q: item.modulus?.q ?? "-",
+      bits,
+      sigma,
+    });
+    node.appendChild(summary);
+    list.appendChild(node);
+  });
+  distributionRecommendations.classList.toggle("hidden", list.children.length === 0);
 }
 
 function distributionText(distribution) {

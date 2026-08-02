@@ -353,6 +353,18 @@ class ParameterSearchTests(unittest.TestCase):
         self.assertEqual(candidate["distribution"]["error"]["support"], [-1, 0, 1])
         self.assertEqual(candidate["distribution"]["secret"]["sampling_bits"], 2)
         self.assertEqual(candidate["distribution"]["error"]["sampling_bits"], 2)
+        self.assertEqual(
+            result["distribution_recommendations"]["min_sampling_bits"]["distribution"]["secret"]["name"],
+            "ST(l0=1, l1=0)",
+        )
+        self.assertEqual(
+            result["distribution_recommendations"]["min_stddev"]["distribution"]["secret"]["name"],
+            "ST(l0=4, l1=2)",
+        )
+        self.assertEqual(
+            result["search"]["distribution_objectives"]["primary_objective"],
+            "min_sampling_bits",
+        )
 
     def test_lwr_variants_use_compression_noise_error_with_configurable_secret(self):
         request = parse_request({

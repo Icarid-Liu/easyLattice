@@ -197,7 +197,12 @@
     lweCandidate({ q: 15361, factorization: "2^10 * 3 * 5", condition: "1024 | q - 1; 2048 does not divide q - 1", quality: "one_layer_remaining", layers: 1, factorCount: 512, factorDegree: 2, score: 67, twoAdicity: 10, smallWeight: 12, classical: 130.3, quantum: 115.4, beta: 549 }),
   ];
 
-  const distributionProfile = ({ family, name, parameters, variance, stddev, support, sampling, estimator, components }) => {
+  const distributionProfile = ({ family, name, parameters, variance, stddev, support, sampling, estimator, components, sampling_bits }) => {
+    const inferredSamplingBits = sampling_bits !== undefined
+      ? sampling_bits
+      : (components && components.every((component) => Number.isFinite(component.sampling_bits))
+        ? components.reduce((total, component) => total + component.sampling_bits, 0)
+        : family === "uniform_mod" ? 2 : null);
     const profile = {
       family,
       name,
@@ -205,6 +210,7 @@
       variance,
       stddev,
       support,
+      sampling_bits: inferredSamplingBits,
       symmetric: true,
       sampling,
       estimator,
@@ -240,7 +246,10 @@
     estimator: { type: "sparse_ternary_fixed_weight", plus_weight: weight, minus_weight: weight },
   });
   const compositeComponent = (family, name, variance, stddev, support, estimator) => ({
-    family, name, variance, stddev, support, estimator,
+    family, name, variance, stddev, support,
+    sampling_bits: estimator?.sampling_bits
+      ?? (family === "centered_binomial" && Number.isFinite(estimator?.eta) ? 2 * estimator.eta : null),
+    estimator,
   });
   const compositeProfile = (name, variance, stddev, support, components) => distributionProfile({
     family: "composite",
@@ -595,12 +604,21 @@
       request,
       recommendation: candidate,
       alternatives,
+      distribution_recommendations: {
+        min_sampling_bits: candidate,
+        min_stddev: candidate,
+      },
       validation,
       search: {
         elapsed_ms: 0,
         generated_candidates: candidatePool.generatedCandidates,
         viable_candidates: candidatePool.eligibleCandidates,
         modulus_candidates: isNtru ? candidatePool.eligibleCandidates : 411,
+        distribution_objectives: {
+          method: "preview_fixture",
+          primary_objective: "min_sampling_bits",
+          secondary_objective: "min_stddev",
+        },
         strategy: isNtru ? ["ring family first", "fixed preview candidate pool"] : ["ring family first", "fixed default fast-screen pool"],
       },
       next_question: "Run the local service to evaluate parameters and bind them to a concrete scheme.",

@@ -7,8 +7,16 @@ from itertools import combinations_with_replacement
 from typing import Any
 
 from .config import AppConfig, load_config
-from .adaptive_search import adaptive_validate
+from .adaptive_search import adaptive_binary_validate, adaptive_validate
 from .distribution_search import DistributionRequest, enumerate_distribution_candidates, parse_distribution_request
+from .distribution_objectives import (
+    MIN_SAMPLING_BITS_OBJECTIVE,
+    MIN_STDDEV_OBJECTIVE,
+    candidate_modulus_key,
+    distribution_objective_key,
+    distribution_table,
+    select_distribution_objectives,
+)
 from .estimator_contract import ntru_type_for_variant
 from .estimator_process import run_estimator
 from .job_progress import report_progress
@@ -134,9 +142,12 @@ def recommend_ntru(
     validation_codes: list[str] = []
     failure_messages: list[str] = []
     raw_unknown_messages: list[str] = []
+    secondary_validation_method = None
     if request.use_estimator:
         estimator_result = {"ok": True, "profile": NTRU_ESTIMATOR_PROFILE, "validated": []}
         validated_candidates: list[dict[str, Any]] = []
+        validated_candidate_keys: set[str] = set()
+        attempted_candidate_keys: set[str] = set()
         covered_keys: set[str] = set()
         attacks_complete = True
         estimator_commit = None
@@ -167,7 +178,10 @@ def recommend_ntru(
             covered_keys.add(ntru_validation_candidate_key(candidate))
             attacks_complete = attacks_complete and result["complete"]
             apply_ntru_estimator_result(candidate, result, request)
-            validated_candidates.append(candidate)
+            key = ntru_validation_candidate_key(candidate)
+            if key not in validated_candidate_keys:
+                validated_candidate_keys.add(key)
+                validated_candidates.append(candidate)
             legacy_successes[0] += 1
             validation_codes.append("validation_applied")
             if not result["complete"]:
@@ -180,6 +194,12 @@ def recommend_ntru(
         )
         if request.legacy_validation_cap:
             validation_pool = validation_pool[: request.validation_attempts]
+
+        def on_progress(event: dict[str, Any]) -> None:
+            entry = event.get("candidate")
+            if event.get("event") == "candidate_started" and isinstance(entry, dict):
+                attempted_candidate_keys.add(ntru_validation_candidate_key(entry))
+
         adaptive = adaptive_validate(
             validation_pool,
             estimate=estimate,
@@ -198,9 +218,39 @@ def recommend_ntru(
                     and legacy_successes[0] >= request.validation_count
                 )
             ),
+            on_progress=on_progress,
         )
-        estimator_result["validated"] = list(adaptive.validated)
-        for entry in adaptive.validated:
+        secondary_adaptive = None
+        if adaptive.target_met and adaptive.best_candidate is not None and not request.legacy_validation_cap:
+            target_group = candidate_modulus_key(adaptive.best_candidate)
+            group_candidates = [
+                candidate
+                for candidate in eligible_candidates.values()
+                if candidate_modulus_key(candidate) == target_group
+                and ntru_validation_candidate_key(candidate) not in attempted_candidate_keys
+            ]
+            if group_candidates:
+                secondary_adaptive = adaptive_binary_validate(
+                    sorted(
+                        group_candidates,
+                        key=lambda candidate: distribution_objective_key(
+                            candidate,
+                            MIN_STDDEV_OBJECTIVE,
+                        ),
+                    ),
+                    estimate=estimate,
+                    normalize=normalize,
+                    apply=apply,
+                    meets_target=lambda candidate: bool(candidate["selection"]["meets_target"]),
+                    on_progress=on_progress,
+                    cancel=lambda: bool(cancel_event and cancel_event.is_set()),
+                )
+                secondary_validation_method = secondary_adaptive.method
+        validation_entries = list(adaptive.validated)
+        if secondary_adaptive is not None:
+            validation_entries.extend(secondary_adaptive.validated)
+        estimator_result["validated"] = validation_entries
+        for entry in validation_entries:
             if entry.get("ok") is not True:
                 estimator_result["ok"] = False
                 code = entry.get("code")
@@ -214,8 +264,8 @@ def recommend_ntru(
         validation = validation_result(
             requested=True,
             profile=NTRU_ESTIMATOR_PROFILE,
-            attempted=adaptive.attempted,
-            successful=adaptive.successful,
+            attempted=adaptive.attempted + (secondary_adaptive.attempted if secondary_adaptive else 0),
+            successful=adaptive.successful + (secondary_adaptive.successful if secondary_adaptive else 0),
             covered=len(covered_keys),
             eligible=len(eligible_candidates),
             attacks_complete=attacks_complete,
@@ -228,7 +278,9 @@ def recommend_ntru(
             else adaptive.status
         )
         validation["target_met"] = adaptive.target_met
-        validation["exhausted"] = adaptive.exhausted
+        validation["exhausted"] = adaptive.exhausted and (
+            secondary_adaptive is None or secondary_adaptive.exhausted
+        )
         if raw_unknown_messages:
             validation["message"] = raw_unknown_messages[0]
             validation["messages"] = list(dict.fromkeys(raw_unknown_messages))
@@ -245,6 +297,25 @@ def recommend_ntru(
             ranked = sorted(viable or ranked, key=lambda candidate: candidate_rank(candidate, request))
 
     recommendation = ranked[0]
+    # Keep unmet rows in the table so the minimum-stddev boundary can be found
+    # rather than merely taking the minimum of an already-filtered hit list.
+    objective_pool = list(ranked if request.use_estimator else candidates)
+    if not objective_pool:
+        objective_pool = list(candidates)
+    sampling_recommendation, stddev_recommendation, distribution_search = (
+        select_distribution_objectives(
+            objective_pool,
+            meets_target=lambda candidate: bool(candidate["selection"]["meets_target"]),
+        )
+    )
+    if sampling_recommendation is not None:
+        recommendation = sampling_recommendation
+    objective_candidates = {
+        MIN_SAMPLING_BITS_OBJECTIVE: sampling_recommendation or recommendation,
+        MIN_STDDEV_OBJECTIVE: stddev_recommendation or recommendation,
+    }
+    if secondary_validation_method:
+        distribution_search["stddev_search"]["validation_method"] = secondary_validation_method
     alternatives = distinct_modulus_alternatives([recommendation, *ranked[1:]], limit=5)[1:]
     if (
         request.security_model == "quantum"
@@ -256,7 +327,7 @@ def recommend_ntru(
             )
         )
         validation.setdefault("message", QUANTUM_ESTIMATE_UNAVAILABLE_MESSAGE)
-    for candidate in [recommendation, *alternatives]:
+    for candidate in list({id(item): item for item in [recommendation, *alternatives, *objective_candidates.values()]}.values()):
         candidate["warning_codes"] = list(
             dict.fromkeys(candidate.get("warning_codes", []) + validation["message_codes"])
         )
@@ -269,6 +340,7 @@ def recommend_ntru(
         "request": asdict(request) | {"problem": "ntru"},
         "recommendation": recommendation,
         "alternatives": alternatives,
+        "distribution_recommendations": objective_candidates,
         "estimator": estimator_result,
         "validation": validation,
         "search": {
@@ -276,12 +348,14 @@ def recommend_ntru(
             "generated_candidates": len(specs),
             "modulus_candidates": len(candidates),
             "viable_candidates": len(viable),
+            "distribution_table": distribution_table(objective_pool),
+            "distribution_objectives": distribution_search,
             "strategy": [
                 f"ring family first: {request.ring_family}",
                 "degree n second",
                 ntru_ntt_strategy_text(request),
                 "calibrate sigma with a discrete-Gaussian proxy after q",
-                "choose the smallest Secret+Error sampling-bit budget that meets the measured target",
+                "binary-search the minimum target-meeting combined sigma, then minimize sampling bits above that sigma",
                 "rank only candidates above the requested lower bound",
             ],
         },
@@ -1285,6 +1359,7 @@ def gaussian_distribution(stddev: float) -> dict[str, Any]:
         "mean": 0.0,
         "variance": round(stddev * stddev, 9),
         "stddev": stddev,
+        "sampling_bits": None,
         "support": ["Z"],
         "symmetric": True,
         "sampling": "discrete Gaussian sampler required; prototype does not certify sampler quality",
@@ -1356,12 +1431,19 @@ def composite_distribution(components: tuple[dict[str, Any], ...]) -> dict[str, 
     support_low = sum(numeric_support(component)[0] for component in components)
     support_high = sum(numeric_support(component)[1] for component in components)
     names = [component["name"] for component in components]
+    component_bits = [component.get("sampling_bits") for component in components]
+    sampling_bits = (
+        sum(int(value) for value in component_bits)
+        if all(value is not None for value in component_bits)
+        else None
+    )
     return {
         "family": "composite",
         "name": " + ".join(names),
         "mean": 0.0,
         "variance": round(variance, 9),
         "stddev": round(stddev, 9),
+        "sampling_bits": sampling_bits,
         "support": [support_low, support_high],
         "symmetric": all(bool(component.get("symmetric")) for component in components),
         "sampling": "sample each listed fast component independently and add the coefficients",
@@ -1382,6 +1464,7 @@ def component_summary(component: dict[str, Any]) -> dict[str, Any]:
         "variance": component["variance"],
         "stddev": component["stddev"],
         "support": component["support"],
+        "sampling_bits": component.get("sampling_bits"),
         "estimator": component["estimator"],
     }
 
@@ -1401,6 +1484,7 @@ def centered_binomial_distribution(eta: int) -> dict[str, Any]:
         "mean": 0.0,
         "variance": round(variance, 9),
         "stddev": round(math.sqrt(variance), 9),
+        "sampling_bits": 2 * eta,
         "support": [-eta, eta],
         "symmetric": True,
         "sampling": "bit-sliced popcount friendly",
@@ -1416,6 +1500,7 @@ def symmetric_uniform_distribution(radius: int) -> dict[str, Any]:
         "mean": 0.0,
         "variance": round(variance, 9),
         "stddev": round(math.sqrt(variance), 9),
+        "sampling_bits": math.ceil(math.log2(2 * radius + 1)),
         "support": [-radius, radius],
         "symmetric": True,
         "sampling": f"uniform centered coefficients in [-{radius}, {radius}]",
@@ -1431,6 +1516,7 @@ def uniform_mod_distribution(modulus: int) -> dict[str, Any]:
         "mean": 0.0,
         "variance": round(stddev * stddev, 9),
         "stddev": round(stddev, 9),
+        "sampling_bits": math.ceil(math.log2(modulus)),
         "support": [-(modulus // 2), modulus // 2],
         "symmetric": True,
         "sampling": "uniform centered coefficients modulo small integer",
@@ -1456,6 +1542,7 @@ def sparse_ternary_distribution(p: int, m: int, n: int) -> dict[str, Any]:
         "mean": round((p - m) / n, 9),
         "variance": round(variance, 9),
         "stddev": round(math.sqrt(variance), 9),
+        "sampling_bits": None,
         "support": [-1, 0, 1],
         "symmetric": p == m,
         "sampling": "fixed-weight sparse ternary sampler",

@@ -74,8 +74,13 @@ Sparse ternary uses
 \]
 
 Results expose `P(+1)`, `P(-1)`, `P(0)`, and support `[-1, 0, 1]`. For a fixed
-`(n, q)`, the search keeps the first measured candidate that meets the target
-when ordered by the smallest Secret+Error sampling-bit budget.
+`(n, q)`, the search builds two independent distribution tables. It first
+locates the smallest combined standard deviation that reaches the target
+(binary search when the measured target predicate is monotone, with an exact
+fallback otherwise). It then chooses the minimum Secret+Error sampling-bit
+budget among rows at or above that width; equal sampling costs prefer the
+smaller width. The JSON exposes both `min_sampling_bits` and `min_stddev`
+recommendations.
 
 The fast screen is not a scheme proof: correctness, rejection sampling,
 smoothing, and error correction remain scheme-specific.
