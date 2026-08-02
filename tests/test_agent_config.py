@@ -381,6 +381,10 @@ class AgentConfigTests(unittest.TestCase):
                 origin_preflight.assert_called_once_with(runtime, None)
                 runner.assert_called_once()
                 self.assertIsNone(runner.call_args.kwargs["timeout"])
+                self.assertNotIn(
+                    "EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT",
+                    runtime.environment,
+                )
 
     def test_local_validation_failures_do_not_report_estimator_running(self):
         failures = (

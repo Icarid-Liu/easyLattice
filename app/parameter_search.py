@@ -2132,11 +2132,6 @@ def run_sage_estimator(
                 "attack": "all",
             }
         )
-        if not config.estimator.remote_url:
-            # Boundary probes are deliberately coarse: the full estimator is
-            # rerun for the selected recommendation, while this pass only
-            # needs a usable lower/upper target predicate.
-            payload["per_attack_timeout"] = 1
     elif scope is not None:
         raise ValueError("estimator scope must be selected or null")
     if config.estimator.remote_url:

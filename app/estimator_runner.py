@@ -26,12 +26,6 @@ from app.json_safety import sanitize_json_value
 
 NTRU_ATTACKS = ("usvp", "dsd", "bdd", "bdd_hybrid", "bdd_mitm_hybrid")
 
-# Local Sage jobs are launched with this value in their private environment by
-# ``estimator_process``.  Keeping the fallback out of the JSON request keeps
-# the remote API contract unchanged while ensuring that a single pathological
-# Sage attack cannot hold an otherwise cancellable local search forever.
-LOCAL_ATTACK_TIMEOUT_ENV = "EASYLATTICE_ESTIMATOR_PER_ATTACK_TIMEOUT"
-
 
 def requested_task(payload: dict) -> tuple[str, str, str] | None:
     """Return an optional task selector embedded in a runner payload.
@@ -323,8 +317,6 @@ def run_lwe(payload: dict) -> dict:
     ring_degree = int(payload.get("ring_degree", n))
     distribution = payload["distribution"]
     raw_attack_timeout = payload.get("per_attack_timeout")
-    if raw_attack_timeout is None:
-        raw_attack_timeout = os.environ.get(LOCAL_ATTACK_TIMEOUT_ENV)
     per_attack_timeout = (
         int(raw_attack_timeout)
         if raw_attack_timeout is not None
@@ -442,8 +434,6 @@ def run_ntru(payload: dict) -> dict:
     ntru_type = payload["ntru_type"]
     ring_degree = int(payload.get("ring_degree", n))
     raw_attack_timeout = payload.get("per_attack_timeout")
-    if raw_attack_timeout is None:
-        raw_attack_timeout = os.environ.get(LOCAL_ATTACK_TIMEOUT_ENV)
     per_attack_timeout = (
         int(raw_attack_timeout)
         if raw_attack_timeout is not None

@@ -163,7 +163,7 @@ class EstimatorRunnerTests(unittest.TestCase):
             [None] * 12,
         )
 
-    def test_lwe_uses_local_environment_attack_timeout(self) -> None:
+    def test_lwe_ignores_legacy_environment_attack_timeout(self) -> None:
         payload = self.fake_lwe_payload()
         payload.pop("per_attack_timeout")
         estimator_module = types.ModuleType("estimator")
@@ -201,7 +201,7 @@ class EstimatorRunnerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(
             [call.args[0] for call in limit.call_args_list],
-            [3] * 12,
+            [None] * 12,
         )
 
     def test_baseline_attacks_receive_exact_arguments(self):

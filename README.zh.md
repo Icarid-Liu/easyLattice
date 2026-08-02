@@ -24,8 +24,8 @@ cd easyLattice
 ```
 
 `--with-estimator` 不是正常启动的必要条件，只用于将两个 estimator clone 到
-`.external/`。本地任务没有自动墙钟截止时间；本地 runner 只对单个 Sage 攻击设置
-短 watchdog，避免某个规约攻击卡住整个搜索；远程 worker 仍使用配置的整任务超时。
+`.external/`。本地任务和本地单个 Sage 攻击都没有自动时间上限，困难的稀疏分布
+可能需要数分钟；远程 worker 仍使用配置的整任务及单攻击超时。
 
 ## 搜索逻辑
 
